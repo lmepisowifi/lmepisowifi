@@ -218,7 +218,11 @@ urlenc() {
 nm_push() {
     _ps="$1"; _pp="$2"
     _base="http://${NODEMCU_IP}:${NODEMCU_PORT:-8080}"
-    _nresp=$(busybox wget -q -T 5 -O - "${_base}/nonce" 2>/dev/null)
+    # NOTE: use GNU wget (the applet busybox on this ONT does NOT ship), exactly
+    # like coin.sh. `busybox wget` here failed instantly with an empty response
+    # (applet-not-found -> stderr, swallowed by 2>/dev/null), which surfaced as
+    # the misleading "NodeMCU did not acknowledge" abort even though it was online.
+    _nresp=$(wget -q -T 5 -O - "${_base}/nonce" 2>/dev/null)
     _nonce=$(printf '%s' "$_nresp" | busybox grep -o '"nonce":"[^"]*"' \
                 | busybox awk -F'"' '{print $4}' | busybox head -n1)
     if [ -z "$_nonce" ]; then
@@ -228,7 +232,7 @@ nm_push() {
     _tok=$(printf '%s' "${COIN_PSK}:${_nonce}:${_ps}:${_pp}:setwifi" \
                 | busybox md5sum | busybox awk '{print $1}')
     _q="ssid=$(urlenc "$_ps")&pass=$(urlenc "$_pp")&token=${_tok}"
-    _resp=$(busybox wget -q -T 8 -O - "${_base}/setwifi?${_q}" 2>/dev/null)
+    _resp=$(wget -q -T 8 -O - "${_base}/setwifi?${_q}" 2>/dev/null)
     if printf '%s' "$_resp" | busybox grep -q '"ok":true'; then
         dbg "nm_push: NodeMCU ACK (ssid=$_ps)"
         return 0
