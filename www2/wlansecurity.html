@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        /* ── Band selector ─────────────────────────────── */
+        #band-bar {
+            display: flex; align-items: center; gap: 10px;
+            margin-bottom: 14px;
+        }
+        #band-bar label {
+            font-size: 11px; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.08em;
+            white-space: nowrap;
+        }
+        #band-select-main {
+            width: 140px;
+        }
+
+        /* ── Mode badge ────────────────────────────────── */
+        .mode-badge {
+            font-size: 10px; padding: 2px 7px;
+            border-radius: 3px; font-weight: 700;
+            letter-spacing: 0.06em; text-transform: uppercase;
+            white-space: nowrap; flex-shrink: 0;
+        }
+        .mode-badge.ap     { background: rgba(255,255,255,0.10); color: #c8c8c8; }
+
+        /* ── Merged-SSID hint ──────────────────────────────────────── */
+        .merge-note {
+            margin-top: 10px;
+            padding: 7px 10px;
+            border-radius: 5px;
+            font-size: 11.5px;
+            line-height: 1.4;
+            background: rgba(80,180,255,0.10);
+            border: 1px solid rgba(80,180,255,0.30);
+            color: #8ecbff;
+        }
+        .mode-badge.client { background: rgba(80,180,255,0.13);  color: #64b4ff; }
+
+        /* ── PSK reveal ────────────────────────────────── */
+        .psk-wrap { position: relative; }
+        .psk-wrap input { padding-right: 56px !important; }
+        .psk-eye {
+            position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+            cursor: pointer; color: var(--text-secondary); font-size: 13px;
+            background: none; border: none; padding: 0; line-height: 1;
+        }
+        .psk-eye:hover { color: var(--text-primary); }
+
+        /* ── Cipher note ───────────────────────────────── */
+        .cipher-note {
+            font-size: 10px; color: var(--text-secondary);
+            margin-top: 3px;
+        }
+
+        /* ── Confirm banner ────────────────────────────── */
+        #confirm-bar {
+            display: none; position: fixed;
+            bottom: 16px; left: 50%; transform: translateX(-50%);
+            background: var(--bg-card); border: 1px solid var(--accent-color);
+            border-radius: 6px; padding: 10px 20px;
+            display: flex; align-items: center; gap: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4); z-index: 1000;
+        }
+        #confirm-bar.hidden { display: none !important; }
+
+        /* ── Collapsible cards ─────────────────────────── */
+        .card-header.collapsible { cursor: pointer; }
+        .card-chevron {
+            width: 8px; height: 8px;
+            border-right: 2px solid var(--text-secondary);
+            border-bottom: 2px solid var(--text-secondary);
+            transform: rotate(45deg);
+            transition: transform 0.2s; flex-shrink: 0;
+        }
+        .card.collapsed .card-chevron { transform: rotate(-45deg); }
+        .card .card-body {
+            overflow: hidden;
+            max-height: 1500px;
+            transition: max-height 0.3s ease, opacity 0.25s ease,
+                        padding-top 0.3s ease, padding-bottom 0.3s ease;
+        }
+        .card.collapsed .card-body {
+            max-height: 0;
+            opacity: 0;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+        }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:780px;">
+
+    <!-- Band selector (dropdown) -->
+    <div id="band-bar">
+        <label for="band-select-main">Band</label>
+        <select class="form-select" id="band-select-main" onchange="switchBand()">
+            <option value="24">2.4 GHz</option>
+            <option value="5">5 GHz</option>
+        </select>
+    </div>
+
+    <!-- Iface cards injected here -->
+    <div id="ifaces-container"></div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// Constants & state
+// ═══════════════════════════════════════════════════════════════
+const CGI = '/cgi-bin/wlanbasic.cgi';
+
+// encrypt value → human label
+const ENC_LABELS = {
+    0:  'Open (None)',
+    2:  'WPA',
+    4:  'WPA2',
+    6:  'WPA2 Mixed  (WPA + WPA2)',
+    16: 'WPA3',
+    20: 'WPA3 Transition  (WPA2 + WPA3)',
+};
+
+const CIPHER_LABELS = {
+    0: 'Disabled',
+    1: 'TKIP',
+    2: 'AES',
+    3: 'TKIP / AES',
+};
+
+let currentBand   = 24;
+let currentStatus = null;
+let countdownTimer = null;
+let secondsLeft   = 90;
+
+// ═══════════════════════════════════════════════════════════════
+// Overlay
+// ═══════════════════════════════════════════════════════════════
+const overlay    = document.getElementById('overlay');
+const overlayTxt = document.getElementById('overlay-text');
+const spinner    = document.getElementById('overlay-spinner');
+
+function showOverlay(txt) {
+    overlayTxt.textContent = txt;
+    spinner.style.display = 'block';
+    overlay.classList.add('visible');
+}
+function hideOverlay() {
+    overlay.classList.remove('visible');
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+}
+function startCountdown() {
+    secondsLeft = 90;
+    showOverlay('Applying… ' + secondsLeft + 's');
+    countdownTimer = setInterval(() => {
+        secondsLeft--;
+        if (secondsLeft > 0) {
+            overlayTxt.textContent = 'Applying… ' + secondsLeft + 's';
+        } else {
+            clearInterval(countdownTimer); countdownTimer = null;
+            overlayTxt.textContent = 'Reverting Changes.';
+        }
+    }, 1000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Form enable / disable
+// Controls are disabled during load and during apply.
+// On load error or apply error they stay disabled.
+// On success they are re-enabled before the overlay hides.
+// ═══════════════════════════════════════════════════════════════
+function setFormEnabled(enabled) {
+    // Band dropdown
+    const bandSel = document.getElementById('band-select-main');
+    if (bandSel) bandSel.disabled = !enabled;
+
+    // Everything inside the dynamic iface cards
+    document.querySelectorAll(
+        '#ifaces-container input, #ifaces-container select, #ifaces-container button'
+    ).forEach(el => { el.disabled = !enabled; });
+}
+
+// After setFormEnabled(true), re-apply WPA3 cipher locks that
+// setFormEnabled would have just cleared.
+function reapplyAllSecConstraints() {
+    if (!currentStatus) return;
+    currentStatus.ifaces.forEach(iface => {
+        updateSecFields('sec-' + iface.idx);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PSK reveal
+// ═══════════════════════════════════════════════════════════════
+function togglePsk(inputId) {
+    const inp = document.getElementById(inputId);
+    if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    const btn = inp.parentNode.querySelector('.psk-eye');
+    if (btn) btn.textContent = show ? 'Hide' : 'Show';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Collapsible card
+// ═══════════════════════════════════════════════════════════════
+function toggleCard(headerEl) {
+    const card = headerEl.closest('.card');
+    if (card) card.classList.toggle('collapsed');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Band switching
+// ═══════════════════════════════════════════════════════════════
+function switchBand() {
+    currentBand = parseInt(document.getElementById('band-select-main').value) || 24;
+    loadStatus();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Cipher / PSK visibility update
+// ═══════════════════════════════════════════════════════════════
+function updateSecFields(id) {
+    const enc = parseInt(document.getElementById(id + '-encrypt').value) || 0;
+
+    // unicastCipher (WPA cipher) — shown only when WPA bit (2) is set
+    const showUC  = (enc & 2) !== 0;
+    // wpa2UnicastCipher — shown when WPA2 bit (4) OR WPA3 bit (16) is set
+    const showU2C = (enc & 4) !== 0 || (enc & 16) !== 0;
+    const showPsk = enc !== 0;
+    const wpa3Active = (enc & 16) !== 0;
+
+    document.getElementById(id + '-uc-group').style.display  = showUC  ? '' : 'none';
+    document.getElementById(id + '-u2c-group').style.display = showU2C ? '' : 'none';
+    document.getElementById(id + '-psk-group').style.display = showPsk ? '' : 'none';
+
+    const ucSel  = document.getElementById(id + '-uc');
+    const u2cSel = document.getElementById(id + '-u2c');
+
+    // WPA3 rules: WPA cipher must be disabled (0); WPA2/WPA3 cipher must be AES (2)
+    if (wpa3Active) {
+        if (ucSel)  { ucSel.value  = '0'; ucSel.disabled  = true; }
+        if (u2cSel) { u2cSel.value = '2'; u2cSel.disabled = true; }
+    } else {
+        if (ucSel)  ucSel.disabled  = false;
+        if (u2cSel) u2cSel.disabled = false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Build iface cards
+// ═══════════════════════════════════════════════════════════════
+function buildIfaceCards(ifaces) {
+    const container = document.getElementById('ifaces-container');
+    container.innerHTML = '';
+
+    ifaces.forEach(iface => {
+        const id      = 'sec-' + iface.idx;
+        const isAp    = iface.type === 'ap';
+        const isVxd   = iface.type === 'vxd';
+        const typeLbl = isVxd ? 'Client' : 'AP';
+        const typeCls = isVxd ? 'client' : 'ap';
+        let   ifLbl;
+        if      (isAp)  ifLbl = 'Main AP';
+        else if (isVxd) ifLbl = 'VXD — Repeater / Client';
+        else            ifLbl = 'VAP ' + iface.idx;
+
+        // Build encrypt options, including an "Unknown" fallback
+        const encOpts = Object.entries(ENC_LABELS).map(([v, lbl]) =>
+            `<option value="${v}">${lbl}</option>`
+        ).join('');
+
+        // Build cipher options
+        const cipherOpts = Object.entries(CIPHER_LABELS).map(([v, lbl]) =>
+            `<option value="${v}">${lbl}</option>`
+        ).join('');
+
+        const div = document.createElement('div');
+        div.className = 'card mb-2 collapsed';
+        div.id = 'card-' + id;
+
+        div.innerHTML = `
+            <div class="card-header collapsible d-flex align-items-center gap-2"
+                 style="flex-wrap:wrap; row-gap:4px;" onclick="toggleCard(this)">
+                <span class="card-chevron"></span>
+                <span style="font-size:12px; white-space:nowrap;">${ifLbl}</span>
+                <span class="mode-badge ${typeCls}">${typeLbl}</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-2">
+                    <!-- Encryption mode -->
+                    <div class="col-sm-6">
+                        <label class="form-label">Encryption</label>
+                        <select class="form-select" id="${id}-encrypt"
+                                onchange="updateSecFields('${id}')">
+                            ${encOpts}
+                        </select>
+                    </div>
+
+                    <!-- WPA Cipher (unicastCipher) — WPA bit -->
+                    <div class="col-sm-6" id="${id}-uc-group" style="display:none;">
+                        <label class="form-label">WPA Cipher</label>
+                        <select class="form-select" id="${id}-uc">${cipherOpts}</select>
+                    </div>
+
+                    <!-- WPA2 Cipher (wpa2UnicastCipher) — WPA2 or WPA3 bit -->
+                    <div class="col-sm-6" id="${id}-u2c-group" style="display:none;">
+                        <label class="form-label">WPA2 / WPA3 Cipher</label>
+                        <select class="form-select" id="${id}-u2c"
+                                onchange="updateSecFields('${id}')">${cipherOpts}</select>
+                    </div>
+
+                    <!-- Password -->
+                    <div class="col-sm-6" id="${id}-psk-group" style="display:none;">
+                        <label class="form-label">Password</label>
+                        <div class="psk-wrap">
+                            <input type="password" class="form-control" id="${id}-psk"
+                                   maxlength="63" placeholder="8–63 characters"
+                                   autocomplete="new-password">
+                            <button type="button" class="psk-eye" tabindex="-1"
+                                    onclick="togglePsk('${id}-psk')">Show</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="merge-note" id="${id}-merge-note" style="display:none;">
+                    🔗 Merged &mdash; these security &amp; encryption settings also apply to the paired interface on the other band.
+                </div>
+                <button type="button" class="btn btn-primary w-100 mt-3"
+                        onclick="saveSecurity(${iface.idx})">Save</button>
+            </div>`;
+
+        container.appendChild(div);
+
+        // Set values
+        const encSel = document.getElementById(id + '-encrypt');
+        if (encSel.querySelector(`option[value="${iface.encrypt}"]`)) {
+            encSel.value = String(iface.encrypt);
+        } else {
+            // Unknown encrypt value ��� add a read-only placeholder
+            const el = document.createElement('option');
+            el.value = iface.encrypt;
+            el.textContent = 'Current (' + iface.encrypt + ')';
+            el.selected = true;
+            encSel.insertBefore(el, encSel.firstChild);
+        }
+
+        const ucSel  = document.getElementById(id + '-uc');
+        const u2cSel = document.getElementById(id + '-u2c');
+        if (ucSel)  ucSel.value  = String(iface.unicastCipher     ?? 0);
+        if (u2cSel) u2cSel.value = String(iface.wpa2UnicastCipher ?? 2);
+
+        document.getElementById(id + '-psk').value = iface.psk || '';
+
+        updateSecFields(id);
+    });
+
+    // Refresh merged-SSID hints for the interfaces on this band
+    refreshMergeNotes();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Merged SSID (band steering) — hint only; the CGI mirrors the actual
+// security changes across the paired interface on the other band.
+// ═══════════════════════════════════════════════════════════════════
+let mergeCfg = { enabled: 0, iface24: 0, iface5: 0 };
+
+function mergedIdxForBand(band) {
+    if (!mergeCfg || mergeCfg.enabled !== 1) return -1;
+    return band === 24 ? mergeCfg.iface24 : mergeCfg.iface5;
+}
+
+function refreshMergeNotes() {
+    const mIdx = mergedIdxForBand(currentBand);
+    for (let i = 0; i <= 5; i++) {
+        const n = document.getElementById('sec-' + i + '-merge-note');
+        if (n) n.style.display = (mIdx === i) ? '' : 'none';
+    }
+}
+
+function loadMergeStatus() {
+    return fetch(CGI + '?action=merge_status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(cfg => { mergeCfg = cfg; refreshMergeNotes(); })
+        .catch(() => { /* non-fatal */ });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Load status
+// ═══════════════════════════════════════════════════════════════
+function loadStatus() {
+    setFormEnabled(false);
+    showOverlay('Loading ' + (currentBand === 24 ? '2.4' : '5') + ' GHz…');
+    fetch(CGI + '?band=' + currentBand + '&action=status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(status => {
+            currentStatus = status;
+            buildIfaceCards(status.ifaces);
+            if (status.pending) {
+                fetch(CGI + '?band=' + currentBand + '&action=confirm').catch(() => {});
+            }
+            setFormEnabled(true);
+            reapplyAllSecConstraints();
+            hideOverlay();
+        })
+        .catch(err => {
+            hideOverlay();
+            // Keep form disabled — data was not loaded successfully
+            toastr["warning"]('Could not load security settings: ' + (err.message || err), "Error");
+        });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Poll until router comes back after wlan_apply
+// ═══════════════════════════════════════════════════════════════
+function pollUntilBack(retries) {
+    retries = (retries === undefined) ? 25 : retries;
+    fetch(CGI + '?band=' + currentBand + '&action=status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(status => {
+            currentStatus = status;
+            buildIfaceCards(status.ifaces);
+            if (status.pending) {
+                fetch(CGI + '?band=' + currentBand + '&action=confirm').catch(() => {});
+            }
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Changes Applied.';
+            setFormEnabled(true);
+            reapplyAllSecConstraints();
+            setTimeout(hideOverlay, 1200);
+        })
+        .catch(err => {
+            if (retries > 0) setTimeout(() => pollUntilBack(retries - 1), 2000);
+            else {
+                hideOverlay();
+                // Keep form disabled on persistent network failure after apply
+                toastr["warning"]('Network error after apply: ' + (err.message || err), "Error");
+            }
+        });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Save security for one interface
+// ═══════════════════════════════════════════════════════════════
+function saveSecurity(idx) {
+    const id  = 'sec-' + idx;
+    const enc = parseInt(document.getElementById(id + '-encrypt').value) || 0;
+    const uc  = parseInt(document.getElementById(id + '-uc')?.value  || '0');
+    const u2c = parseInt(document.getElementById(id + '-u2c')?.value || '2');
+    const psk = document.getElementById(id + '-psk').value;
+
+    // Client-side validation
+    if (enc !== 0 && (psk.length < 8 || psk.length > 63)) {
+        alert('Password must be 8–63 characters.'); return;
+    }
+
+    const body = 'encrypt='           + enc
+               + '&unicastCipher='    + uc
+               + '&wpa2UnicastCipher='+ u2c
+               + (enc !== 0 ? '&psk=' + encodeURIComponent(psk) : '');
+
+    const iface   = currentStatus?.ifaces?.find(i => i.idx === idx);
+    const ifaceOn = (iface?.disabled ?? 1) === 0;
+
+    // Disable all controls immediately for both save paths
+    setFormEnabled(false);
+
+    if (!ifaceOn) {
+        // Interface is off — quick save, no restart
+        showOverlay('Saving…');
+        fetch(CGI + '?action=save_security&band=' + currentBand + '&idx=' + idx, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+        .then(() => {
+            // Refresh status to update PSK display etc.
+            return fetch(CGI + '?band=' + currentBand + '&action=status')
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                .then(s => { currentStatus = s; buildIfaceCards(s.ifaces); });
+        })
+        .then(() => {
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Saved.';
+            setFormEnabled(true);
+            reapplyAllSecConstraints();
+            setTimeout(hideOverlay, 900);
+        })
+        .catch(err => {
+            hideOverlay();
+            // Keep form disabled on save error
+            toastr["warning"]('Save error: ' + (err.message || err), "Error");
+        });
+    } else {
+        // Interface is live — needs wlan_apply, use countdown + poll-until-back.
+        // A fast 4xx/5xx (e.g. the coin-slot NodeMCU didn't ACK) returns BEFORE
+        // any restart, so surface it and skip the poll.
+        let aborted = false;
+        startCountdown();
+        fetch(CGI + '?action=save_security&band=' + currentBand + '&idx=' + idx, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => {
+            if (r && !r.ok) { aborted = true; return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); }
+        })
+        .catch(err => {
+            if (aborted) {
+                if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                hideOverlay();
+                setFormEnabled(true);
+                toastr["warning"](err.message || 'Save failed', "Error");
+            }
+        });
+        setTimeout(() => { if (!aborted) pollUntilBack(); }, 4500);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', () => {
+    setFormEnabled(false);  // Disable until data is loaded
+    loadStatus();
+    loadMergeStatus();
+});
+</script>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>
+

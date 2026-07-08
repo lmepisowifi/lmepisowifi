@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin</title>
+<script>
+(function(){
+  var h = location.hostname || "10.0.0.1";
+  location.replace(location.protocol + "//" + h + ":8080/");
+})();
+</script>
+<meta http-equiv="refresh" content="1;url=http://10.0.0.1:8080/">
+</head>
+<body style="font-family:sans-serif;text-align:center;margin-top:3em">
+Redirecting to the admin dashboard&hellip;
+<p><a id="l" href="http://10.0.0.1:8080/">Continue</a></p>
+<script>
+(function(){
+  var h = location.hostname || "10.0.0.1";
+  document.getElementById("l").href = location.protocol + "//" + h + ":8080/";
+})();
+</script>
+</body>
+</html>

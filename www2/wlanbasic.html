@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        /* ── Toggle switch ─────────────────────────────── */
+        .wlan-toggle {
+            width: 50px; height: 28px;
+            border-radius: 14px;
+            background: #555;
+            position: relative; cursor: pointer;
+            transition: background 0.25s; flex-shrink: 0;
+            user-select: none;
+        }
+        .wlan-toggle.on { background: #ffffff; }
+        .wlan-toggle.disabled-ui { opacity: 0.35; pointer-events: none; }
+
+        /* ── Merged-SSID hint ──────────────────────────────────────── */
+        .merge-note {
+            margin-top: 10px;
+            padding: 7px 10px;
+            border-radius: 5px;
+            font-size: 11.5px;
+            line-height: 1.4;
+            background: rgba(80,180,255,0.10);
+            border: 1px solid rgba(80,180,255,0.30);
+            color: #8ecbff;
+        }
+        .wlan-toggle-knob {
+            position: absolute; width: 20px; height: 20px;
+            border-radius: 50%; background: #fff;
+            top: 4px; left: 4px;
+            transition: left 0.25s, background 0.25s;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .wlan-toggle.on .wlan-toggle-knob { left: 26px; background: #555; }
+
+        /* ── Mode badge ────────────────────────────────── */
+        .mode-badge {
+            font-size: 10px; padding: 2px 7px;
+            border-radius: 3px; font-weight: 700;
+            letter-spacing: 0.06em; text-transform: uppercase;
+            white-space: nowrap; flex-shrink: 0;
+        }
+        .mode-badge.ap     { background: rgba(255,255,255,0.10); color: #c8c8c8; }
+        .mode-badge.client { background: rgba(80,180,255,0.13);  color: #64b4ff; }
+
+        /* ── Band selector ─────────────────────────────── */
+        #band-bar {
+            display: flex; align-items: center; gap: 10px;
+            margin-bottom: 14px;
+        }
+        #band-bar label {
+            font-size: 11px; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.08em;
+            white-space: nowrap;
+        }
+        #band-select-main {
+            width: 140px;
+        }
+
+        /* ── Section labels ───────────────────────────── */
+        .section-label {
+            font-size: 11px; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--text-secondary);
+            margin-bottom: 8px; margin-top: 4px;
+        }
+
+        /* ── Client-mode banner ────────────────────────── */
+        #client-mode-banner {
+            display: none;
+            background: rgba(100, 180, 255, 0.08);
+            border: 1px solid rgba(100, 180, 255, 0.25);
+            border-radius: 4px;
+            padding: 7px 12px;
+            font-size: 12px;
+            color: #88c8ff;
+            margin-bottom: 10px;
+        }
+
+        /* ── Compact card header ────────────────────────── */
+        .iface-card .card-header { height: 38px; }
+
+        /* ── Collapsible cards ──────────────────────────── */
+        .card-header.collapsible { cursor: pointer; }
+        .card-chevron {
+            width: 8px; height: 8px;
+            border-right: 2px solid var(--text-secondary);
+            border-bottom: 2px solid var(--text-secondary);
+            transform: rotate(45deg);
+            transition: transform 0.2s; flex-shrink: 0;
+        }
+        .card.collapsed .card-chevron { transform: rotate(-45deg); }
+        .card .card-body {
+            overflow: hidden;
+            max-height: 1500px;
+            transition: max-height 0.3s ease, opacity 0.25s ease,
+                        padding-top 0.3s ease, padding-bottom 0.3s ease;
+        }
+        .card.collapsed .card-body {
+            max-height: 0;
+            opacity: 0;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+        }
+
+        /* ── PSK reveal button ─────────────────────────── */
+        .psk-wrap { position: relative; }
+        .psk-wrap input { padding-right: 36px !important; }
+        .psk-eye {
+            position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+            cursor: pointer; color: var(--text-secondary); font-size: 13px;
+            background: none; border: none; padding: 0; line-height: 1;
+        }
+        .psk-eye:hover { color: var(--text-primary); }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:780px;">
+
+    <!-- Band selector (dropdown) -->
+    <div id="band-bar">
+        <label for="band-select-main">Band</label>
+        <select class="form-select" id="band-select-main" onchange="switchBand(parseInt(this.value))">
+            <option value="24">2.4 GHz</option>
+            <option value="5">5 GHz</option>
+        </select>
+    </div>
+
+    <div class="card mb-3 collapsed" id="card-merge">
+        <div class="card-header collapsible d-flex align-items-center justify-content-between gap-2"
+             onclick="toggleCard(this)">
+            <div class="d-flex align-items-center gap-2" style="min-width:0; overflow:hidden;">
+                <span class="card-chevron"></span>
+                <span style="white-space:nowrap;">Unified SSID</span>
+            </div>
+            <div class="wlan-toggle" id="toggle-merge"
+                 onclick="event.stopPropagation(); localToggle('merge'); onMergeToggle()" role="switch" aria-checked="false"
+                 title="Enable / Disable">
+                <div class="wlan-toggle-knob"></div>
+            </div>
+        </div>
+        <div class="card-body">
+            <p class="text-secondary" style="font-size:12px; margin-bottom:12px;">
+                Pick one active 2.4&nbsp;GHz interface and one active 5&nbsp;GHz interface. Their
+                network name (SSID) and security / encryption are kept identical &mdash; changing one
+                band automatically updates the other. Enabling copies the 2.4&nbsp;GHz settings onto
+                the selected 5&nbsp;GHz interface.
+            </p>
+            <div id="merge-fields">
+                <div class="row g-2">
+                    <div class="col-sm-6">
+                        <label class="form-label">2.4 GHz Interface</label>
+                        <select class="form-select" id="merge-iface24"></select>
+                    </div>
+                    <div class="col-sm-6">
+                        <label class="form-label">5 GHz Interface</label>
+                        <select class="form-select" id="merge-iface5"></select>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btn btn-primary w-100 mt-3" id="save-merge-btn" onclick="saveMerge()">
+                Save
+            </button>
+        </div>
+    </div>
+
+    <!-- ═══════════ COIN SLOT (NODEMCU) ═══════════ -->
+    <div class="section-label">Coin Slot (NodeMCU)</div>
+    <div class="card mb-3 collapsed" id="card-nodemcu">
+        <div class="card-header collapsible d-flex align-items-center justify-content-between gap-2"
+             onclick="toggleCard(this)">
+            <div class="d-flex align-items-center gap-2" style="min-width:0; overflow:hidden;">
+                <span class="card-chevron"></span>
+                <span style="white-space:nowrap;">Coin Slot WiFi Sync</span>
+            </div>
+            <div class="wlan-toggle" id="toggle-nodemcu"
+                 onclick="event.stopPropagation(); localToggle('nodemcu'); onNodemcuToggle()" role="switch" aria-checked="false"
+                 title="Enable / Disable">
+                <div class="wlan-toggle-knob"></div>
+            </div>
+        </div>
+        <div class="card-body">
+            <p class="text-secondary" style="font-size:12px; margin-bottom:12px;">
+                Tell the portal which interface the coin-slot NodeMCU connects to. When that
+                interface's SSID or password changes, the portal first sends the new credentials
+                to the NodeMCU and waits for its acknowledgement <em>before</em> switching the
+                radio &mdash; so the coin slot is never stranded offline.
+            </p>
+            <div id="nodemcu-disabled-note" class="merge-note"
+                 style="display:none; background:rgba(255,180,80,0.10); border-color:rgba(255,180,80,0.30); color:#ffcf8e;">
+                ⚠️ The coin slot is not enabled on this router, so WiFi sync has no effect until you enable it in the coin-slot settings.
+            </div>
+            <div id="nodemcu-fields">
+                <div class="row g-2">
+                    <div class="col-sm-6">
+                        <label class="form-label">Band</label>
+                        <select class="form-select" id="nodemcu-band" onchange="renderNodemcuIfaces()">
+                            <option value="24">2.4 GHz</option>
+                            <option value="5">5 GHz</option>
+                        </select>
+                    </div>
+                    <div class="col-sm-6">
+                        <label class="form-label">Interface</label>
+                        <select class="form-select" id="nodemcu-iface"></select>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btn btn-primary w-100 mt-3" id="save-nodemcu-btn" onclick="saveNodemcu()">
+                Save
+            </button>
+        </div>
+    </div>
+
+    <!-- ═══════════ MAIN AP CARD ═══════════ -->
+    <div class="section-label">Main Access Point</div>
+    <div class="card mb-3 collapsed" id="card-ap">
+        <div class="card-header collapsible d-flex align-items-center justify-content-between gap-2"
+             onclick="toggleCard(this)">
+            <div class="d-flex align-items-center gap-2" style="min-width:0; overflow:hidden;">
+                <span class="card-chevron"></span>
+                <span id="ap-ifname" style="white-space:nowrap;">wlan1</span>
+            </div>
+            <div class="wlan-toggle" id="toggle-ap"
+                 onclick="event.stopPropagation(); localToggle('ap')" role="switch" aria-checked="false" title="Enable / Disable">
+                <div class="wlan-toggle-knob"></div>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row g-2">
+                <!-- Mode -->
+                <div class="col-sm-6">
+                    <label class="form-label">Mode</label>
+                    <select class="form-select" id="ap-wlanmode" onchange="onApModeChange()">
+                        <option value="0">AP Mode</option>
+                        <option value="1">Client / WDS</option>
+                    </select>
+                </div>
+                <!-- SSID -->
+                <div class="col-sm-6">
+                    <label class="form-label">Network Name (SSID)</label>
+                    <input type="text" class="form-control" id="ap-ssid"
+                           maxlength="32" placeholder="Enter SSID">
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label">IEEE Standard</label>
+                    <select class="form-select" id="ap-wlanband" onchange="onApBandChange()"></select>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label">Channel</label>
+                    <select class="form-select" id="ap-channel"></select>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label">Channel Width</label>
+                    <!-- Options populated dynamically by populateChannelWidthSel() -->
+                    <select class="form-select" id="ap-channelwidth" onchange="onApWidthChange()"></select>
+                </div>
+                <div class="col-sm-4" id="ap-sideband-group" style="display:none;">
+                    <label class="form-label">Sideband</label>
+                    <select class="form-select" id="ap-controlband" onchange="onApSidebandChange()">
+                        <option value="0">Upper (+2 ch)</option>
+                        <option value="1">Lower (−2 ch)</option>
+                    </select>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label">TX Power</label>
+                    <select class="form-select" id="ap-txpower">
+                        <option value="0">100% (Full)</option>
+                        <option value="1">75%</option>
+                        <option value="2">50%</option>
+                        <option value="3">25%</option>
+                        <option value="4">12.5% (Low)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="merge-note" id="ap-merge-note" style="display:none;">
+                🔗 Merged &mdash; the SSID &amp; security you save here also apply to the paired interface on the other band.
+            </div>
+            <button type="button" class="btn btn-primary w-100 mt-3" id="save-ap-btn" onclick="saveAp()">
+                Save
+            </button>
+        </div>
+    </div>
+
+    <!-- ═══════════ VAPs & VXD ═══════════ -->
+    <div class="section-label">Virtual Interfaces</div>
+
+    <div id="client-mode-banner">
+        &#9888;&#65039; Virtual interfaces cannot be enabled while the main AP is in Client / WDS mode.
+    </div>
+
+    <div id="ifaces-container"></div>
+
+</div><!-- /container -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════════
+const CGI = '/cgi-bin/wlanbasic.cgi';
+
+const BAND_OPTS_24 = [
+    { value: 11, label: '802.11 b/g/n' },
+    { value: 10, label: '802.11 g/n'   },
+    { value:  3, label: '802.11 b/g'   },
+    { value:  8, label: '802.11 n'     },
+    { value:  2, label: '802.11 g'     },
+    { value:  1, label: '802.11 b'     },
+];
+
+const BAND_OPTS_5 = [
+    { value: 76, label: '802.11 a/n/ac' },   // 4+8+64
+    { value: 72, label: '802.11 n/ac'   },   // 8+64
+    { value: 68, label: '802.11 a/ac'   },   // 4+64
+    { value: 64, label: '802.11 ac'     },   // 64
+    { value: 12, label: '802.11 a/n'    },   // 4+8
+    { value:  8, label: '802.11 n (5G)' },   // 8
+    { value:  4, label: '802.11 a'      },   // 4
+];
+
+// IEEE modes that are 20 MHz only
+const BAND_20ONLY_24 = new Set([1, 2, 3]);
+const BAND_20ONLY_5  = new Set([4]);          // 802.11a only = 20 MHz
+// 5 GHz n-only modes (no ac bit 64) — max 40 MHz
+const BAND_40MAX_5   = new Set([8, 12]);      // 802.11n / 802.11a+n
+
+// Channel-width dropdown options per band
+const CW_OPTS_24 = [
+    { value: 0, label: '20 MHz' },
+    { value: 1, label: '40 MHz' },
+    { value: 3, label: 'Auto'   },
+];
+const CW_OPTS_5 = [
+    { value: 0, label: '20 MHz' },
+    { value: 1, label: '40 MHz' },
+    { value: 2, label: '80 MHz' },
+    { value: 3, label: 'Auto'   },
+];
+
+// ═══════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════
+let currentBand   = 24;
+let currentStatus = null;
+let allChannels   = [];
+let apClientMode  = false;
+let countdownTimer = null;
+let secondsLeft   = 90;
+
+// ═══════════════════════════════════════════════════════════════
+// DOM refs
+// ═══════════════════════════════════════════════════════════════
+const overlay    = document.getElementById('overlay');
+const overlayTxt = document.getElementById('overlay-text');
+const spinner    = document.getElementById('overlay-spinner');
+
+// ═══════════════════════════════════════════════════════════════
+// Overlay helpers
+// ═══════════════════════════════════════════════════════════════
+function showOverlay(txt) {
+    overlayTxt.textContent = txt;
+    spinner.style.display = 'block';
+    overlay.classList.add('visible');
+}
+function hideOverlay() {
+    overlay.classList.remove('visible');
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+}
+function startCountdown(label) {
+    secondsLeft = 90;
+    showOverlay((label || 'Applying…') + ' ' + secondsLeft + 's');
+    countdownTimer = setInterval(() => {
+        secondsLeft--;
+        if (secondsLeft > 0) {
+            overlayTxt.textContent = (label || 'Applying…') + ' ' + secondsLeft + 's';
+        } else {
+            clearInterval(countdownTimer); countdownTimer = null;
+            overlayTxt.textContent = 'Reverting Changes.';
+        }
+    }, 1000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Form enable / disable
+// Controls are disabled during load and during apply.
+// On load error or apply error they stay disabled.
+// On success they are re-enabled before the overlay hides.
+// ═══════════════════════════════════════════════════════════════
+function setFormEnabled(enabled) {
+    // Band dropdown
+    const bandSel = document.getElementById('band-select-main');
+    if (bandSel) bandSel.disabled = !enabled;
+
+    // Everything inside the main AP card
+    document.querySelectorAll(
+        '#card-ap input, #card-ap select, #card-ap button'
+    ).forEach(el => { el.disabled = !enabled; });
+
+    // Everything inside the dynamic iface cards
+    document.querySelectorAll(
+        '#ifaces-container input, #ifaces-container select, #ifaces-container button'
+    ).forEach(el => { el.disabled = !enabled; });
+
+    // Merged-SSID card controls
+    document.querySelectorAll(
+        '#card-merge input, #card-merge select, #card-merge button'
+    ).forEach(el => { el.disabled = !enabled; });
+
+    // Coin-slot NodeMCU card controls
+    document.querySelectorAll(
+        '#card-nodemcu input, #card-nodemcu select, #card-nodemcu button'
+    ).forEach(el => { el.disabled = !enabled; });
+
+    // Toggle switches (use disabled-ui class, they don't use disabled attr)
+    document.querySelectorAll('.wlan-toggle').forEach(el =>
+        el.classList.toggle('disabled-ui', !enabled)
+    );
+
+    // Re-apply merge / nodemcu field enable-state based on their toggles
+    if (enabled) {
+        updateMergeFieldsState();
+        if (typeof updateNodemcuFieldsState === 'function') updateNodemcuFieldsState();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Toggle helpers
+// ═══════════════════════════════════════════════════════════════
+function localToggle(id) {
+    const tog = document.getElementById('toggle-' + id);
+    if (!tog || tog.classList.contains('disabled-ui')) return;
+    const isOn = tog.classList.toggle('on');
+    tog.setAttribute('aria-checked', isOn ? 'true' : 'false');
+}
+function setToggle(id, enabled) {
+    const tog = document.getElementById('toggle-' + id);
+    if (!tog) return;
+    tog.classList.toggle('on', enabled);
+    tog.setAttribute('aria-checked', enabled ? 'true' : 'false');
+}
+function isToggleOn(id) {
+    const tog = document.getElementById('toggle-' + id);
+    return tog ? tog.classList.contains('on') : false;
+}
+function lockToggle(id, locked) {
+    const tog = document.getElementById('toggle-' + id);
+    if (tog) tog.classList.toggle('disabled-ui', locked);
+}
+
+// ════════════��══════════════════════════════════════════════════
+// Collapsible card
+// ══════════════════════════════════════════════════════════���════
+function toggleCard(headerEl) {
+    const card = headerEl.closest('.card');
+    if (card) card.classList.toggle('collapsed');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PSK reveal
+// ═══════════════════════════════════════════════════════════════
+function togglePsk(inputId) {
+    const inp = document.getElementById(inputId);
+    if (!inp) return;
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Band switching
+// ═══════════════════════════════════════════════════════════════
+function switchBand(band) {
+    currentBand = band;
+    document.getElementById('band-select-main').value = String(band);
+    document.getElementById('ap-ifname').textContent = band === 24 ? 'wlan1' : 'wlan0';
+    loadStatus();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// IEEE Standard select population
+// ═══════════════════════════════════════════════════════════════
+function populateWlanBandSel(selId, currentVal) {
+    const sel  = document.getElementById(selId);
+    const opts = currentBand === 5 ? BAND_OPTS_5 : BAND_OPTS_24;
+    sel.innerHTML = '';
+    let matched = false;
+    opts.forEach(o => {
+        const el = document.createElement('option');
+        el.value = o.value; el.textContent = o.label;
+        if (o.value === currentVal) { el.selected = true; matched = true; }
+        sel.appendChild(el);
+    });
+    // If current value doesn't match known options, add a placeholder
+    if (!matched && currentVal !== undefined) {
+        const el = document.createElement('option');
+        el.value = currentVal;
+        el.textContent = 'Current (' + currentVal + ')';
+        el.selected = true;
+        sel.insertBefore(el, sel.firstChild);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Encryption toggle
+// ═══════════════════════════════════════════════════════════════
+function onEncChange(ctx) {
+    const encSel = document.getElementById(ctx + '-encrypt');
+    const pskGrp = document.getElementById(ctx + '-psk-group');
+    if (!encSel || !pskGrp) return;
+    pskGrp.style.display = (encSel.value !== '0') ? '' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Channel helpers
+// ═══════════════════════════════════════════════════════════════
+function getChannelRange24(cw, cb) {
+    if (cw === 1) return cb === 1 ? { min: 1, max: 7 } : { min: 5, max: 11 };
+    return { min: 1, max: 11 };
+}
+
+function buildChannelList(cw, cb) {
+    if (currentBand === 24) {
+        const { min, max } = getChannelRange24(cw, cb);
+        return allChannels.filter(c => c >= min && c <= max);
+    }
+    // 5 GHz: return all available channels unfiltered
+    return allChannels;
+}
+
+function populateChannelDropdown(selId, channels, current, isAuto) {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    sel.innerHTML = '';
+
+    // Auto is always the first option (value 0)
+    const autoOpt = document.createElement('option');
+    autoOpt.value = 0;
+    autoOpt.textContent = 'Auto';
+    if (isAuto) autoOpt.selected = true;
+    sel.appendChild(autoOpt);
+
+    // Specific channels
+    channels.forEach(ch => {
+        const o = document.createElement('option');
+        o.value = ch;
+        o.textContent = 'Ch ' + ch;
+        if (!isAuto && ch === current) o.selected = true;
+        sel.appendChild(o);
+    });
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+}
+
+function updateApSidebandVisibility() {
+    const is40 = parseInt(document.getElementById('ap-channelwidth').value) === 1;
+    const show  = is40 && currentBand === 24;          // sideband only meaningful on 2.4 GHz
+    document.getElementById('ap-sideband-group').style.display = show ? '' : 'none';
+}
+
+function rebuildApChannels() {
+    const cw     = parseInt(document.getElementById('ap-channelwidth').value);
+    const cb     = parseInt(document.getElementById('ap-controlband').value);
+    const curVal = parseInt(document.getElementById('ap-channel').value);
+    const isAuto = curVal === 0;
+    const filtered = buildChannelList(cw, cb);
+    let snapped = 0; // default: Auto
+    if (!isAuto) {
+        // Keep current channel if still valid, else snap to first available
+        snapped = filtered.includes(curVal) ? curVal : (filtered[0] || 1);
+    }
+    populateChannelDropdown('ap-channel', filtered, snapped, isAuto);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Channel-width dropdown — rebuild for current band
+// ═══════════════════════════════════════════════════════════════
+function populateChannelWidthSel(currentVal) {
+    const sel  = document.getElementById('ap-channelwidth');
+    const opts = currentBand === 5 ? CW_OPTS_5 : CW_OPTS_24;
+    const prev = (currentVal !== undefined) ? currentVal
+                 : (sel.value !== '' ? parseInt(sel.value) : 0);
+    sel.innerHTML = '';
+    opts.forEach(o => {
+        const el = document.createElement('option');
+        el.value = o.value; el.textContent = o.label;
+        if (o.value === prev) el.selected = true;
+        sel.appendChild(el);
+    });
+    // If previous selection no longer exists for this band, default to 0
+    if (!Array.from(sel.options).find(o => o.selected)) sel.selectedIndex = 0;
+}
+
+function applyApBandConstraints() {
+    const band20Only = currentBand === 5 ? BAND_20ONLY_5 : BAND_20ONLY_24;
+    const bv    = parseInt(document.getElementById('ap-wlanband').value);
+    const cwSel = document.getElementById('ap-channelwidth');
+
+    // Determine maximum permitted channelwidth value for this IEEE mode
+    let maxCw;
+    if (band20Only.has(bv)) {
+        maxCw = 0;                              // 20 MHz only (e.g. 802.11a, b, g)
+    } else if (currentBand === 5 && BAND_40MAX_5.has(bv)) {
+        maxCw = 1;                              // 5 GHz n-only → 40 MHz max (no ac)
+    } else {
+        maxCw = 3;                              // 80 MHz + Auto available (ac or 2.4 GHz n)
+    }
+
+    // Enable / disable individual options based on maxCw
+    Array.from(cwSel.options).forEach(opt => {
+        opt.disabled = parseInt(opt.value) > maxCw;
+    });
+
+    // If the currently-selected width exceeds the new maximum, clamp it
+    if (parseInt(cwSel.value) > maxCw) {
+        cwSel.value = String(maxCw);
+        updateApSidebandVisibility();
+        rebuildApChannels();
+    }
+}
+
+function onApBandChange()    { applyApBandConstraints(); }
+function onApWidthChange()   { updateApSidebandVisibility(); rebuildApChannels(); }
+function onApSidebandChange(){ rebuildApChannels(); }
+
+// ═══════════════════════════════════════════════════════════════
+// AP mode change  →  lock / unlock VAPs & VXD
+// ═══════════════════════════════════════════════════════════════
+function onApModeChange() {
+    apClientMode = parseInt(document.getElementById('ap-wlanmode').value) === 1;
+    updateVapLock();
+}
+
+function updateVapLock() {
+    const banner = document.getElementById('client-mode-banner');
+    banner.style.display = apClientMode ? '' : 'none';
+    for (let i = 1; i <= 5; i++) {
+        lockToggle('iface-' + i, apClientMode);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Build VAP / VXD cards dynamically
+// ═══════════════════════════════════════════════════════════════
+function buildIfaceCards(ifaces) {
+    const container = document.getElementById('ifaces-container');
+    container.innerHTML = '';
+
+    ifaces.forEach(iface => {
+        const id      = 'iface-' + iface.idx;
+        const isVxd   = iface.type === 'vxd';
+        const typeLbl = isVxd ? 'Client' : 'AP';
+        const typeCls = isVxd ? 'client' : 'ap';
+        const ifLbl   = isVxd ? 'VXD — Repeater / Client' : 'VAP ' + iface.idx;
+
+        const div = document.createElement('div');
+        div.className = 'card iface-card mb-2 collapsed';
+        div.id = 'card-' + id;
+
+        div.innerHTML = `
+            <div class="card-header collapsible d-flex align-items-center justify-content-between gap-2"
+                 onclick="toggleCard(this)">
+                <div class="d-flex align-items-center gap-2" style="min-width:0; overflow:hidden;">
+                    <span class="card-chevron"></span>
+                    <span style="font-size:12px; white-space:nowrap;">${ifLbl}</span>
+                    <span class="mode-badge ${typeCls}">${typeLbl}</span>
+                </div>
+                <div class="wlan-toggle" id="toggle-${id}"
+                     onclick="event.stopPropagation(); localToggle('${id}')" role="switch" aria-checked="false"
+                     title="Enable / Disable">
+                    <div class="wlan-toggle-knob"></div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="row g-2">
+                    <div class="col-sm-8">
+                        <label class="form-label">SSID</label>
+                        <input type="text" class="form-control" id="${id}-ssid"
+                               maxlength="32" placeholder="Network Name">
+                    </div>
+                </div>
+                <div class="merge-note" id="${id}-merge-note" style="display:none;">
+                    🔗 Merged &mdash; this SSID also applies to the paired interface on the other band.
+                </div>
+                <button type="button" class="btn btn-primary w-100 mt-3"
+                        id="save-${id}-btn" onclick="saveIface(${iface.idx})">Save</button>
+            </div>`;
+
+        container.appendChild(div);
+
+        // Populate values
+        document.getElementById(id + '-ssid').value = iface.ssid || '';
+        setToggle(id, iface.disabled === 0);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Apply full status object to UI
+// ═══════════════════════════════════════════════════════════════
+function applyStatus(status) {
+    currentStatus = status;
+    allChannels   = status.channels || [];
+
+    const ap = status.ifaces.find(i => i.type === 'ap');
+    if (ap) {
+        document.getElementById('ap-ssid').value = ap.ssid || '';
+
+        // Mode
+        apClientMode = (ap.wlanMode === 1);
+        document.getElementById('ap-wlanmode').value = String(ap.wlanMode || 0);
+
+        // Toggle
+        setToggle('ap', ap.disabled === 0);
+
+        // Channel width + sideband (populate options first, then set value)
+        populateChannelWidthSel(status.channelwidth || 0);
+        document.getElementById('ap-channelwidth').value = String(status.channelwidth || 0);
+        document.getElementById('ap-controlband').value  = String(status.controlband  || 0);
+        updateApSidebandVisibility();
+
+        // Channels
+        const cw = parseInt(document.getElementById('ap-channelwidth').value);
+        const cb = parseInt(document.getElementById('ap-controlband').value);
+        const filtered = buildChannelList(cw, cb);
+        populateChannelDropdown('ap-channel', filtered, status.channel || filtered[0],
+                                status.autoChannel === 1);
+
+        // IEEE standard
+        populateWlanBandSel('ap-wlanband', ap.wlanBand);
+        applyApBandConstraints();
+
+        // TX Power
+        const tpv = parseInt(status.txpower);
+        document.getElementById('ap-txpower').value = String(
+            (tpv >= 0 && tpv <= 4) ? tpv : 0
+        );
+    }
+
+    // VAPs and VXD
+    buildIfaceCards(status.ifaces.filter(i => i.type !== 'ap'));
+
+    // Apply client-mode lock state
+    updateVapLock();
+
+    // Refresh merged-SSID hints for the interfaces on this band
+    refreshMergeNotes();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Poll until router responds again (post-wlan_apply)
+// ═══════════════════════════════════════════════════════════════
+function pollUntilBack(retries) {
+    retries = (retries === undefined) ? 25 : retries;
+    fetch(CGI + '?band=' + currentBand + '&action=status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(status => {
+            applyStatus(status);
+            if (status.pending) {
+                fetch(CGI + '?band=' + currentBand + '&action=confirm').catch(() => {});
+            }
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Changes Applied.';
+            setFormEnabled(true);
+            setTimeout(hideOverlay, 1200);
+        })
+        .catch(err => {
+            if (retries > 0) setTimeout(() => pollUntilBack(retries - 1), 2000);
+            else {
+                hideOverlay();
+                // Fields remain disabled — apply failed
+                toastr["warning"]('Network error after apply: ' + (err.message || err), "Error");
+            }
+        });
+}
+
+// ═══════════════════════��═══════════════════════════════════════
+// Load status from CGI
+// ═══════════════════════════════════════════════════════════════
+function loadStatus() {
+    setFormEnabled(false);
+    showOverlay('Loading ' + (currentBand === 24 ? '2.4' : '5') + ' GHz…');
+    fetch(CGI + '?band=' + currentBand + '&action=status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(status => {
+            applyStatus(status);
+            if (status.pending) {
+                fetch(CGI + '?band=' + currentBand + '&action=confirm').catch(() => {});
+            }
+            setFormEnabled(true);
+            hideOverlay();
+        })
+        .catch(err => {
+            hideOverlay();
+            // Keep form disabled — data was not loaded successfully
+            toastr["warning"]('Could not load WiFi settings: ' + (err.message || err), "Error");
+        });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Save Main AP  (POST ?action=save_ap)
+// ═══════════════════════════════════════════════════════════════
+function saveAp() {
+    const ssid = document.getElementById('ap-ssid').value.trim();
+    if (!ssid) { alert('SSID is required.'); return; }
+
+    const disabled     = isToggleOn('ap') ? 0 : 1;
+    const wlanMode     = document.getElementById('ap-wlanmode').value;
+    const wlanBand     = document.getElementById('ap-wlanband').value;
+    const channel      = document.getElementById('ap-channel').value;
+    const autoChannel  = (parseInt(channel) === 0) ? 1 : 0;
+    const channelwidth = document.getElementById('ap-channelwidth').value;
+    const controlband  = document.getElementById('ap-controlband').value;
+    const txpower      = document.getElementById('ap-txpower').value;
+
+    const body = 'ssid='          + encodeURIComponent(ssid)
+               + '&disabled='     + disabled
+               + '&wlanMode='     + wlanMode
+               + '&wlanBand='     + wlanBand
+               + '&channel='      + channel
+               + '&autoChannel='  + autoChannel
+               + '&channelwidth=' + channelwidth
+               + '&controlband='  + controlband
+               + '&txpower='      + txpower;
+
+    const origDis = currentStatus?.ifaces?.find(i => i.type === 'ap')?.disabled ?? 1;
+
+    // Disable form immediately for both save paths
+    setFormEnabled(false);
+
+    if (disabled === 1 && origDis === 1) {
+        // Both off → quick save without wlan_apply restart
+        showOverlay('Saving…');
+        fetch(CGI + '?action=save_ap&band=' + currentBand, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+        .then(() => {
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Settings Saved.';
+            setFormEnabled(true);
+            setTimeout(hideOverlay, 1000);
+        })
+        .catch(err => {
+            hideOverlay();
+            // Keep form disabled on save error
+            toastr["warning"]('Save error: ' + (err.message || err), "Error");
+        });
+    } else {
+        // wlan_apply will restart → use countdown + poll-until-back.
+        // A fast 4xx/5xx (e.g. the coin-slot NodeMCU didn't ACK) returns
+        // BEFORE any restart, so surface it and skip the poll.
+        let aborted = false;
+        startCountdown('Applying');
+        fetch(CGI + '?action=save_ap&band=' + currentBand, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => {
+            if (r && !r.ok) { aborted = true; return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); }
+        })
+        .catch(err => {
+            if (aborted) {
+                if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                hideOverlay();
+                setFormEnabled(true);
+                toastr["warning"](err.message || 'Save failed', "Error");
+            }
+            // else: expected connection drop during restart — ignore
+        });
+        setTimeout(() => { if (!aborted) pollUntilBack(); }, 4500);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Save VAP / VXD  (POST ?action=save_iface&idx=N)
+// ═══════════════════════════════════════════════════════════════
+function saveIface(idx) {
+    const id      = 'iface-' + idx;
+    const ssid    = document.getElementById(id + '-ssid').value.trim();
+    const disabled = (apClientMode || !isToggleOn(id)) ? 1 : 0;
+
+    let body = 'disabled=' + disabled;
+    if (ssid) body += '&ssid=' + encodeURIComponent(ssid);
+
+    const origIface = currentStatus?.ifaces?.find(i => i.idx === idx);
+    const origDis   = origIface?.disabled ?? 1;
+
+    // Disable form immediately
+    setFormEnabled(false);
+
+    if (disabled === 1 && origDis === 1) {
+        showOverlay('Saving…');
+        fetch(CGI + '?action=save_iface&band=' + currentBand + '&idx=' + idx, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
+        .then(() => {
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Saved.';
+            setFormEnabled(true);
+            setTimeout(hideOverlay, 800);
+        })
+        .catch(err => {
+            hideOverlay();
+            // Keep form disabled on save error
+            toastr["warning"]('Save error: ' + (err.message || err), "Error");
+        });
+    } else {
+        let aborted = false;
+        startCountdown('Applying');
+        fetch(CGI + '?action=save_iface&band=' + currentBand + '&idx=' + idx, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => {
+            if (r && !r.ok) { aborted = true; return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); }
+        })
+        .catch(err => {
+            if (aborted) {
+                if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                hideOverlay();
+                setFormEnabled(true);
+                toastr["warning"](err.message || 'Save failed', "Error");
+            }
+        });
+        setTimeout(() => { if (!aborted) pollUntilBack(); }, 4500);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+let mergeCfg = { enabled: 0, iface24: 0, iface5: 0, ifaces24: [], ifaces5: [] };
+
+function ifaceOptLabel(iface) {
+    const base = iface.type === 'ap' ? 'Main AP'
+               : (iface.type === 'vxd' ? 'VXD (Client)' : 'VAP ' + iface.idx);
+    return base + (iface.ssid ? ' — ' + iface.ssid : '');
+}
+
+// Only enabled, AP-type interfaces are eligible for merging (VXD/client excluded)
+function populateMergeSelect(selId, ifaces, current) {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    sel.innerHTML = '';
+    const eligible = (ifaces || []).filter(i => i.disabled === 0 && i.type !== 'vxd');
+    if (eligible.length === 0) {
+        const o = document.createElement('option');
+        o.value = ''; o.textContent = 'No active interface';
+        o.disabled = true; o.selected = true;
+        sel.appendChild(o);
+        return;
+    }
+    eligible.forEach(i => {
+        const o = document.createElement('option');
+        o.value = i.idx; o.textContent = ifaceOptLabel(i);
+        if (i.idx === current) o.selected = true;
+        sel.appendChild(o);
+    });
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+}
+
+function updateMergeFieldsState() {
+    const on = isToggleOn('merge');
+    const s24 = document.getElementById('merge-iface24');
+    const s5  = document.getElementById('merge-iface5');
+    if (s24) s24.disabled = !on;
+    if (s5)  s5.disabled  = !on;
+    const fields = document.getElementById('merge-fields');
+    if (fields) fields.style.opacity = on ? '1' : '0.45';
+}
+
+function onMergeToggle() { updateMergeFieldsState(); }
+
+function renderMergeCard() {
+    setToggle('merge', mergeCfg.enabled === 1);
+    populateMergeSelect('merge-iface24', mergeCfg.ifaces24, mergeCfg.iface24);
+    populateMergeSelect('merge-iface5',  mergeCfg.ifaces5,  mergeCfg.iface5);
+    updateMergeFieldsState();
+}
+
+// Which interface index (if any) is merged on the currently displayed band
+function mergedIdxForBand(band) {
+    if (!mergeCfg || mergeCfg.enabled !== 1) return -1;
+    return band === 24 ? mergeCfg.iface24 : mergeCfg.iface5;
+}
+
+// Show/hide the "merged" hints on the AP + VAP cards for the current band
+function refreshMergeNotes() {
+    const mIdx = mergedIdxForBand(currentBand);
+    const apNote = document.getElementById('ap-merge-note');
+    if (apNote) apNote.style.display = (mIdx === 0) ? '' : 'none';
+    for (let i = 1; i <= 5; i++) {
+        const n = document.getElementById('iface-' + i + '-merge-note');
+        if (n) n.style.display = (mIdx === i) ? '' : 'none';
+    }
+}
+
+function loadMergeStatus() {
+    return fetch(CGI + '?action=merge_status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(cfg => {
+            mergeCfg = cfg;
+            renderMergeCard();
+            refreshMergeNotes();
+            // NodeMCU picker reuses these interface lists — refresh it once they arrive
+            if (nodemcuLoaded) renderNodemcuCard();
+        })
+        .catch(() => { /* non-fatal: leave merge card in default state */ });
+}
+
+function saveMerge() {
+    const enabled = isToggleOn('merge') ? 1 : 0;
+    let iface24 = parseInt(document.getElementById('merge-iface24').value);
+    let iface5  = parseInt(document.getElementById('merge-iface5').value);
+
+    if (enabled === 1 && (isNaN(iface24) || isNaN(iface5))) {
+        alert('Select one active 2.4 GHz interface and one active 5 GHz interface.');
+        return;
+    }
+    if (isNaN(iface24)) iface24 = 0;
+    if (isNaN(iface5))  iface5  = 0;
+
+    const body = 'enabled=' + enabled + '&iface24=' + iface24 + '&iface5=' + iface5;
+    setFormEnabled(false);
+
+    if (enabled === 0) {
+        // Turning merge off never restarts the radios — quick save
+        showOverlay('Saving…');
+        fetch(CGI + '?action=save_merge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        })
+        .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); })
+        .then(() => {
+            spinner.style.display = 'none';
+            overlayTxt.textContent = 'Saved.';
+            setFormEnabled(true);
+            loadMergeStatus();
+            setTimeout(hideOverlay, 900);
+        })
+        .catch(err => {
+            hideOverlay();
+            toastr["warning"]('Save error: ' + (err.message || err), "Error");
+        });
+        return;
+    }
+
+    // Enabling copies 2.4 GHz → 5 GHz and restarts WLAN (5 GHz clients reconnect)
+    let validationFailed = false;
+    startCountdown('Applying');
+    fetch(CGI + '?action=save_merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+    })
+    .then(r => {
+        if (r.status === 400) {
+            validationFailed = true;
+            return r.text().then(t => { throw new Error(t || 'Invalid selection'); });
+        }
+    })
+    .catch(err => {
+        // A 400 is a fast, pre-restart validation error → surface it and stop.
+        // Any other rejection is the expected connection drop from wlan_apply.
+        if (validationFailed) {
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            hideOverlay();
+            setFormEnabled(true);
+            toastr["warning"](err.message || 'Save failed', "Error");
+        }
+    });
+    setTimeout(() => {
+        if (validationFailed) return;
+        loadMergeStatus();
+        pollUntilBack();
+    }, 4500);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Coin Slot (NodeMCU) Wi-Fi sync binding
+// ═══════════════════════════════════════════════════════════════════
+let nodemcuCfg    = { coinEnabled: 0, enabled: 0, band: 24, iface: 0 };
+let nodemcuLoaded = false;
+
+function onNodemcuToggle() { updateNodemcuFieldsState(); }
+
+function updateNodemcuFieldsState() {
+    const on = isToggleOn('nodemcu');
+    const b = document.getElementById('nodemcu-band');
+    const i = document.getElementById('nodemcu-iface');
+    if (b) b.disabled = !on;
+    if (i) i.disabled = !on;
+    const f = document.getElementById('nodemcu-fields');
+    if (f) f.style.opacity = on ? '1' : '0.45';
+}
+
+// Populate the interface picker from whichever band is selected. Reuses the
+// merge interface lists (loaded via loadMergeStatus) — enabled AP-type only.
+function renderNodemcuIfaces() {
+    const band = parseInt(document.getElementById('nodemcu-band').value);
+    const ifaces = band === 24 ? (mergeCfg.ifaces24 || []) : (mergeCfg.ifaces5 || []);
+    populateMergeSelect('nodemcu-iface', ifaces, nodemcuCfg.iface);
+}
+
+function renderNodemcuCard() {
+    setToggle('nodemcu', nodemcuCfg.enabled === 1);
+    document.getElementById('nodemcu-band').value = String(nodemcuCfg.band || 24);
+    renderNodemcuIfaces();
+    const note = document.getElementById('nodemcu-disabled-note');
+    if (note) note.style.display = (nodemcuCfg.coinEnabled === 1) ? 'none' : '';
+    updateNodemcuFieldsState();
+}
+
+function loadNodemcuStatus() {
+    return fetch(CGI + '?action=nodemcu_status')
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(cfg => { nodemcuCfg = cfg; nodemcuLoaded = true; renderNodemcuCard(); })
+        .catch(() => { /* non-fatal */ });
+}
+
+function saveNodemcu() {
+    const enabled = isToggleOn('nodemcu') ? 1 : 0;
+    const band    = parseInt(document.getElementById('nodemcu-band').value) || 24;
+    let   iface   = parseInt(document.getElementById('nodemcu-iface').value);
+    if (enabled === 1 && isNaN(iface)) {
+        alert('Select the interface the NodeMCU connects to.');
+        return;
+    }
+    if (isNaN(iface)) iface = 0;
+
+    const body = 'enabled=' + enabled + '&band=' + band + '&iface=' + iface;
+    setFormEnabled(false);
+    showOverlay('Saving…');
+    fetch(CGI + '?action=save_nodemcu_bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+    })
+    .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); })
+    .then(() => {
+        spinner.style.display = 'none';
+        overlayTxt.textContent = 'Saved.';
+        setFormEnabled(true);
+        loadNodemcuStatus();
+        setTimeout(hideOverlay, 900);
+    })
+    .catch(err => {
+        hideOverlay();
+        toastr["warning"]('Save error: ' + (err.message || err), "Error");
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', () => {
+    setFormEnabled(false);  // Disable until data is loaded
+    loadStatus();
+    loadMergeStatus();
+    loadNodemcuStatus();
+});
+</script>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

@@ -1,0 +1,465 @@
+#!/bin/sh
+# ============================================================
+# ota.sh — GitHub-based OTA updater for lmepisowifi
+# RTL9607C ONT | rootfs = squashfs (ro) | /lmepisowifi = ubifs (rw)
+#
+# This is a FILE-SYNC OTA (not a firmware flash): it downloads a release
+# tarball from GitHub, verifies its sha256, atomically swaps the app trees
+# under /lmepisowifi, restarts the portal + admin httpd + hotspot watchdog,
+# health-checks them, and auto-rolls-back if anything is unhealthy.
+#
+# Usage:
+#   ota.sh check           # print JSON: current/latest/update_available/notes
+#   ota.sh apply [VERSION] # download+verify+swap+restart (VERSION optional = latest)
+#   ota.sh rollback        # restore the previous version kept from the last apply
+#   ota.sh cron            # scheduled check; notify, and apply if OTA_AUTO=1
+#   ota.sh status          # print the current status token
+#
+# Only uses tools present on the device: wget(GNU), sha256sum, tar, gzip,
+# sed, awk, grep, mv, cp, rm, mkdir.
+# ============================================================
+
+ROOT="/lmepisowifi"
+ENV_FILE="$ROOT/ota.env"
+VERSION_FILE="$ROOT/VERSION"
+STAGE="$ROOT/.ota_stage"          # MUST be on the same fs as ROOT (ubifs) for atomic mv
+BAK_SUFFIX=".ota_old"             # <component>.ota_old kept for rollback
+DL="/tmp/ota"                     # downloads live in RAM (ramfs) — no flash wear
+LOG="/tmp/ota.log"
+STATUS_FILE="/tmp/ota_status"
+LOCK="/tmp/ota.lock"
+BB="busybox"
+
+# Components (top-level items) delivered by a release and swapped wholesale.
+# Runtime state (hotspot_data/, globals.env, ota.env) is NOT in the payload,
+# so it is never touched. User-customised files that live *inside* a replaced
+# component are listed in PRESERVE below and carried across the swap.
+# defaults.env is a tracked component: it holds canonical default values and is
+# replaced on every update. globals.env (user settings) is NOT a component, so
+# it is preserved; lmehspt.sh's seed_globals() merges any new default keys into
+# it on boot after the swap.
+COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env"
+PRESERVE="www2/data/dashboard_layout.json www2/uploads hotspot/img/promo1.jpg hotspot/img/promo2.jpg hotspot/audio"
+
+# ---- config ----------------------------------------------------------------
+OTA_REPO=""
+OTA_BRANCH="main"
+OTA_MANIFEST_URL=""
+OTA_CHANGELOG_URL=""
+OTA_AUTO="0"
+OTA_CACERT="$ROOT/cacert.pem"
+OTA_NOTIFY="1"
+OTA_NODEMCU="1"                    # 1 = also push firmware to the coin-slot NodeMCU
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+# ---- helpers ---------------------------------------------------------------
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG"; }
+set_status() { printf '%s' "$1" > "$STATUS_FILE"; }
+now_ver() { [ -f "$VERSION_FILE" ] && tr -d ' \t\r\n' < "$VERSION_FILE" || echo "0.0.0"; }
+
+notify() {
+    [ "$OTA_NOTIFY" = "1" ] || return 0
+    [ -x "$ROOT/hotspot/notify.sh" ] || return 0
+    ( "$ROOT/hotspot/notify.sh" "$1" >/dev/null 2>&1 </dev/null & )
+}
+
+# JSON string escaper (backslash + double-quote only — enough for our fields).
+json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# wget wrapper: HTTPS-only, retries, timeouts, writable -O target, cert handling.
+fetch() { # fetch <url> <outfile>
+    _wf="--https-only -t 3 -T 30 --retry-connrefused -U lmepisowifi-ota"
+    if [ -f "$OTA_CACERT" ]; then
+        _wf="$_wf --ca-certificate=$OTA_CACERT"
+    else
+        _wf="$_wf --no-check-certificate"
+    fi
+    wget $_wf -q -O "$2" "$1"
+}
+
+# parse a key=value line from the manifest (strips CR)
+mval() { sed -n "s/^$1=//p" "$DL/manifest.txt" | tr -d '\r' | head -1; }
+
+# strictly-newer compare using dotted numeric fields: ver_gt A B  -> true if A>B
+ver_gt() {
+    _a="$1"; _b="$2"
+    _i=1
+    while [ "$_i" -le 4 ]; do
+        _x=$(printf '%s' "$_a" | cut -d. -f$_i); _x=${_x:-0}
+        _y=$(printf '%s' "$_b" | cut -d. -f$_i); _y=${_y:-0}
+        # non-numeric guard
+        case "$_x" in ''|*[!0-9]*) _x=0 ;; esac
+        case "$_y" in ''|*[!0-9]*) _y=0 ;; esac
+        [ "$_x" -gt "$_y" ] && return 0
+        [ "$_x" -lt "$_y" ] && return 1
+        _i=$((_i+1))
+    done
+    return 1
+}
+
+# ---- check -----------------------------------------------------------------
+# Fetches the manifest and prints a JSON object. Returns 0 always (errors are
+# reported inside the JSON so the CGI can render them).
+do_check() {
+    mkdir -p "$DL"
+    _cur=$(now_ver)
+    if [ -z "$OTA_MANIFEST_URL" ]; then
+        printf '{"error":"OTA_MANIFEST_URL not set","current":"%s"}\n' "$(json_esc "$_cur")"
+        return 0
+    fi
+    if ! fetch "$OTA_MANIFEST_URL" "$DL/manifest.txt"; then
+        printf '{"error":"could not reach GitHub","current":"%s"}\n' "$(json_esc "$_cur")"
+        return 0
+    fi
+    _lat=$(mval version)
+    _url=$(mval url)
+    _notes=$(mval notes)
+    if [ -z "$_lat" ] || [ -z "$_url" ]; then
+        printf '{"error":"manifest missing version/url","current":"%s"}\n' "$(json_esc "$_cur")"
+        return 0
+    fi
+    if ver_gt "$_lat" "$_cur"; then _upd=true; else _upd=false; fi
+    printf '{"current":"%s","latest":"%s","update_available":%s,"notes":"%s"}\n' \
+        "$(json_esc "$_cur")" "$(json_esc "$_lat")" "$_upd" "$(json_esc "$_notes")"
+    return 0
+}
+
+# ---- apply -----------------------------------------------------------------
+do_apply() {
+    _want="$1"   # optional explicit version; default = manifest latest
+
+    # single-instance lock
+    if ! ( set -C; : > "$LOCK" ) 2>/dev/null; then
+        log "another OTA run is in progress — aborting"; return 1
+    fi
+    trap 'rm -f "$LOCK"' EXIT
+
+    : > "$LOG"
+    set_status "checking"
+    log "OTA apply started (installed=$(now_ver))"
+    mkdir -p "$DL"
+
+    if ! fetch "$OTA_MANIFEST_URL" "$DL/manifest.txt"; then
+        set_status "failed"; log "ERROR: cannot fetch manifest"; return 1
+    fi
+    _lat=$(mval version); _url=$(mval url); _sum=$(mval sha256); _notes=$(mval notes)
+    [ -n "$_want" ] && [ "$_want" != "$_lat" ] && {
+        log "NOTE: requested $_want but manifest latest is $_lat — installing manifest version"
+    }
+    if [ -z "$_lat" ] || [ -z "$_url" ] || [ -z "$_sum" ]; then
+        set_status "failed"; log "ERROR: manifest incomplete (need version/url/sha256)"; return 1
+    fi
+
+    # SECURITY: pin the download to our own repo's Releases.
+    case "$_url" in
+        "https://github.com/$OTA_REPO/releases/download/"*) : ;;
+        *) set_status "failed"; log "ERROR: refusing url outside repo Releases: $_url"; return 1 ;;
+    esac
+
+    set_status "downloading"; log "downloading $_lat"
+    if ! fetch "$_url" "$DL/bundle.tar.gz"; then
+        set_status "failed"; log "ERROR: download failed"; notify "OTA: download of $_lat failed"; return 1
+    fi
+
+    set_status "verifying"; log "verifying sha256"
+    if ! echo "$_sum  $DL/bundle.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+        set_status "failed"; log "ERROR: sha256 MISMATCH — discarding download"
+        rm -f "$DL/bundle.tar.gz"; notify "OTA: $_lat FAILED checksum (rejected)"; return 1
+    fi
+
+    set_status "staging"; log "extracting"
+    rm -rf "$STAGE"; mkdir -p "$STAGE"
+    if ! tar -xzf "$DL/bundle.tar.gz" -C "$STAGE" 2>>"$LOG"; then
+        set_status "failed"; log "ERROR: extract failed"; rm -rf "$STAGE"; return 1
+    fi
+    # Some tarballs wrap everything in a single top dir — flatten if so.
+    if [ ! -f "$STAGE/lmehspt.sh" ]; then
+        _inner=$(find "$STAGE" -maxdepth 2 -name lmehspt.sh 2>/dev/null | head -1)
+        [ -n "$_inner" ] && STAGE=$(dirname "$_inner")
+    fi
+    # sanity-check the payload
+    if [ ! -f "$STAGE/lmehspt.sh" ] || [ ! -d "$STAGE/www2" ] || [ ! -d "$STAGE/hotspot" ]; then
+        set_status "failed"; log "ERROR: bundle missing expected files (lmehspt.sh/www2/hotspot)"
+        rm -rf "$STAGE"; return 1
+    fi
+
+    # Carry user-customised files (inside replaced components) into the stage.
+    log "preserving local customisations"
+    for rel in $PRESERVE; do
+        if [ -e "$ROOT/$rel" ]; then
+            mkdir -p "$STAGE/$(dirname "$rel")"
+            cp -a "$ROOT/$rel" "$STAGE/$(dirname "$rel")/" 2>/dev/null
+        fi
+    done
+
+    # ---- atomic swap (rename within the same ubifs volume) ----
+    set_status "applying"; log "swapping components"
+    # clear any stale backups from a previous run
+    for c in $COMPONENTS; do rm -rf "$ROOT/$c$BAK_SUFFIX"; done
+    _swapped=""
+    for c in $COMPONENTS; do
+        if [ ! -e "$STAGE/$c" ]; then
+            log "  skip $c (not in bundle)"; continue
+        fi
+        [ -e "$ROOT/$c" ] && mv "$ROOT/$c" "$ROOT/$c$BAK_SUFFIX"
+        if mv "$STAGE/$c" "$ROOT/$c"; then
+            _swapped="$_swapped $c"; log "  swapped $c"
+        else
+            log "  ERROR swapping $c — rolling back"
+            _do_rollback_set "$_swapped"; set_status "rolledback"; rm -rf "$STAGE"; return 1
+        fi
+    done
+    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" 2>/dev/null
+    chmod +x "$ROOT"/hotspot/cgi-bin/*.sh "$ROOT"/www2/cgi-bin/* "$ROOT"/www2/sh/*.sh 2>/dev/null
+
+    # record new version early so health-checked processes see it
+    # (back up the old VERSION so a failed health check can restore it)
+    cp -a "$VERSION_FILE" "$ROOT/VERSION$BAK_SUFFIX" 2>/dev/null
+    printf '%s\n' "$_lat" > "$VERSION_FILE"
+
+    # ---- restart services ----
+    set_status "restarting"; log "restarting services"
+    restart_services
+
+    # ---- health check ----
+    log "health check"
+    if health_ok; then
+        rm -rf "$STAGE"
+        # Keep the previous version as *.ota_old (and VERSION.ota_old) so the
+        # admin can MANUALLY roll back until the next update, which rotates
+        # these backups (see "clear any stale backups" above).
+        set_status "success"; log "OTA success — now on $_lat (previous version kept for rollback)"
+        notify "OTA: updated to $_lat"
+        # Coin-slot firmware: version-gated, so a portal-only release that didn't
+        # bump nodemcu_version is a no-op here. Never fails the portal OTA.
+        sync_nodemcu
+        return 0
+    fi
+
+    log "health check FAILED — rolling back"
+    _do_rollback_set "$_swapped"
+    [ -f "$ROOT/VERSION$BAK_SUFFIX" ] && mv "$ROOT/VERSION$BAK_SUFFIX" "$VERSION_FILE"
+    restart_services
+    set_status "rolledback"; log "rolled back after failed health check"
+    notify "OTA: $_lat unhealthy — rolled back"
+    return 1
+}
+
+# restore a specific set of components from their .ota_old backups
+_do_rollback_set() {
+    for c in $1; do
+        if [ -e "$ROOT/$c$BAK_SUFFIX" ]; then
+            rm -rf "$ROOT/$c"
+            mv "$ROOT/$c$BAK_SUFFIX" "$ROOT/$c"
+            log "  restored $c"
+        fi
+    done
+}
+
+# manual rollback entrypoint: restore whatever .ota_old backups still exist
+do_rollback() {
+    : > "$LOG"; set_status "restarting"; log "manual rollback requested"
+    _any=""
+    for c in $COMPONENTS; do
+        if [ -e "$ROOT/$c$BAK_SUFFIX" ]; then
+            rm -rf "$ROOT/$c"; mv "$ROOT/$c$BAK_SUFFIX" "$ROOT/$c"
+            _any="$_any $c"; log "  restored $c"
+        fi
+    done
+    if [ -z "$_any" ]; then set_status "failed"; log "no backup to roll back to"; return 1; fi
+    [ -f "$ROOT/VERSION.ota_old" ] && mv "$ROOT/VERSION.ota_old" "$VERSION_FILE"
+    restart_services
+    set_status "success"; log "rollback complete — now on $(now_ver)"
+    return 0
+}
+
+# ---- restart the portal httpd, admin httpd and hotspot watchdog ----
+restart_services() {
+    # admin UI (www2) — binds 0.0.0.0:8080
+    for pid in $($BB ps w 2>/dev/null | grep "httpd" | grep -v grep | grep -F "/lmepisowifi/www2" | awk '{print $1}'); do
+        kill "$pid" 2>/dev/null
+    done
+    ( setsid $BB httpd -h "$ROOT/www2" -p 8080 >/dev/null 2>&1 & ) 2>/dev/null || \
+        ( $BB httpd -h "$ROOT/www2" -p 8080 >/dev/null 2>&1 & )
+
+    # portal + hotspot watchdog + firewall: lmehspt.sh tears down and rebuilds.
+    ( setsid sh "$ROOT/lmehspt.sh" --force >/tmp/ota_lmehspt.log 2>&1 & ) 2>/dev/null || \
+        ( sh "$ROOT/lmehspt.sh" --force >/tmp/ota_lmehspt.log 2>&1 & )
+    sleep 4
+}
+
+# ---- health check: admin UI answers and portal httpd is up ----
+health_ok() {
+    _tries=0
+    while [ "$_tries" -lt 10 ]; do
+        if wget -q -T 3 -O /dev/null "http://127.0.0.1:8080/login.html" 2>/dev/null; then
+            # also confirm a portal httpd process exists (best-effort)
+            if $BB ps w 2>/dev/null | grep "httpd" | grep -v grep | grep -qF "/lmepisowifi/hotspot"; then
+                return 0
+            fi
+            return 0
+        fi
+        sleep 2; _tries=$((_tries+1))
+    done
+    return 1
+}
+
+# ---- scheduled check (cron) ----
+do_cron() {
+    _json=$(do_check)
+    echo "$_json" | grep -q '"update_available":true' || { log "cron: up to date"; exit 0; }
+    _lat=$(printf '%s' "$_json" | sed -n 's/.*"latest":"\([^"]*\)".*/\1/p')
+    if [ "$OTA_AUTO" = "1" ]; then
+        log "cron: auto-updating to $_lat"
+        do_apply "$_lat"
+    else
+        # Notify only ONCE per new version so the 6-hour check doesn't spam.
+        _seen_file="$ROOT/hotspot_data/.ota_notified"
+        _seen=$(cat "$_seen_file" 2>/dev/null | tr -d ' \t\r\n')
+        if [ "$_seen" != "$_lat" ]; then
+            log "cron: update $_lat available (auto off) — notifying"
+            notify "OTA: version $_lat is available. Open Admin > System > Software Update to install."
+            printf '%s' "$_lat" > "$_seen_file" 2>/dev/null
+        else
+            log "cron: update $_lat available (already notified)"
+        fi
+    fi
+}
+
+# ---- auto-update toggle (persists OTA_AUTO in ota.env) ----
+do_get_auto() { [ "$OTA_AUTO" = "1" ] && echo 1 || echo 0; }
+
+do_set_auto() {
+    case "$1" in 1) _v=1 ;; *) _v=0 ;; esac
+    if [ -f "$ENV_FILE" ] && grep -q '^OTA_AUTO=' "$ENV_FILE"; then
+        _tmp=$(mktemp /tmp/ota.env.XXXXXX)
+        sed "s/^OTA_AUTO=.*/OTA_AUTO=\"$_v\"/" "$ENV_FILE" > "$_tmp" && mv "$_tmp" "$ENV_FILE"
+    else
+        printf 'OTA_AUTO="%s"\n' "$_v" >> "$ENV_FILE"
+    fi
+    echo "$_v"
+}
+
+# ---- changelog (raw CHANGELOG.md from the repo) ----
+do_changelog() {
+    [ -n "$OTA_CHANGELOG_URL" ] || { echo "No changelog configured."; return 0; }
+    mkdir -p "$DL"
+    if fetch "$OTA_CHANGELOG_URL" "$DL/CHANGELOG.md" && [ -s "$DL/CHANGELOG.md" ]; then
+        cat "$DL/CHANGELOG.md"
+    else
+        echo "Could not fetch changelog."
+    fi
+}
+
+# ---- coin-slot NodeMCU firmware push -----------------------------------------
+# Version-GATED self-flash of the ESP8266 coin controller. Called at the end of a
+# successful do_apply (and available standalone as `ota.sh nodemcu`).
+#
+# Why this never reflashes on a portal-only update: we compare the device's
+# running FW_VERSION (GET /version) against the release manifest's
+# nodemcu_version. A release that only touched www2/hotspot does NOT bump
+# nodemcu_version, so running == release and we return early WITHOUT flashing.
+#
+# The image ships inside the release at hotspot/firmware/coin_nodemcu.bin, so
+# after the hotspot swap it is already live and served by the captive httpd
+# (busybox httpd -h /lmepisowifi/hotspot -p $PORTAL_PORT) at /firmware/
+# coin_nodemcu.bin — the exact host:port the NodeMCU already reaches. The device
+# pulls it itself; we only hand it a signed authorisation.
+#
+# Auth mirrors wlanbasic.cgi's nm_push() / the firmware's /setwifi flow:
+#   GET /version                          → gate
+#   GET /nonce                            → single-use nonce
+#   GET /update?md5=<hex>&token=<t>        t = md5(COIN_PSK:nonce:md5:update)
+sync_nodemcu() {
+    [ "$OTA_NODEMCU" = "1" ] || { log "nodemcu: push disabled (OTA_NODEMCU=0)"; return 0; }
+
+    _nver=$(mval nodemcu_version)
+    _nmd5=$(mval nodemcu_md5)
+    if [ -z "$_nver" ] || [ -z "$_nmd5" ]; then
+        log "nodemcu: manifest has no nodemcu_version/nodemcu_md5 — nothing to push"
+        return 0
+    fi
+
+    _bin="$ROOT/hotspot/firmware/coin_nodemcu.bin"
+    if [ ! -f "$_bin" ]; then
+        log "nodemcu: firmware image not in release ($_bin) — skipping"
+        return 0
+    fi
+    # Integrity of the hosted image before we tell the device to trust it.
+    _localmd5=$(md5sum "$_bin" 2>/dev/null | awk '{print $1}')
+    if [ -n "$_localmd5" ] && [ "$_localmd5" != "$_nmd5" ]; then
+        log "nodemcu: hosted bin md5 ($_localmd5) != manifest ($_nmd5) — refusing to push"
+        return 1
+    fi
+
+    # Coin-slot connection details + PSK live in globals.env (user settings).
+    NODEMCU_IP=""; NODEMCU_PORT="8080"; COIN_PSK=""
+    [ -f "$ROOT/globals.env" ] && . "$ROOT/globals.env"
+    if [ -z "$NODEMCU_IP" ] || [ -z "$COIN_PSK" ]; then
+        log "nodemcu: NODEMCU_IP/COIN_PSK not set in globals.env — skipping"
+        return 0
+    fi
+    _base="http://${NODEMCU_IP}:${NODEMCU_PORT:-8080}"
+
+    # ---- GATE: only flash if the running version differs -------------------
+    _vresp=$(wget -q -T 5 -O - "$_base/version" 2>/dev/null)
+    _running=$(printf '%s' "$_vresp" | sed -n 's/.*"fw":"\([^"]*\)".*/\1/p')
+    if [ -z "$_running" ]; then
+        log "nodemcu: no /version reply (offline, or firmware predates OTA support) — skipping"
+        return 0
+    fi
+    if [ "$_running" = "$_nver" ]; then
+        log "nodemcu: already on $_running — no flash needed"
+        return 0
+    fi
+    log "nodemcu: running $_running, release ships $_nver — pushing update"
+
+    # ---- signed handshake: nonce → update ----------------------------------
+    _nresp=$(wget -q -T 5 -O - "$_base/nonce" 2>/dev/null)
+    _nonce=$(printf '%s' "$_nresp" | grep -o '"nonce":"[^"]*"' | awk -F'"' '{print $4}' | head -n1)
+    if [ -z "$_nonce" ]; then
+        log "nodemcu: no nonce from device — aborting push"; return 1
+    fi
+    _tok=$(printf '%s' "${COIN_PSK}:${_nonce}:${_nmd5}:update" | md5sum | awk '{print $1}')
+    _uresp=$(wget -q -T 20 -O - "$_base/update?md5=${_nmd5}&token=${_tok}" 2>/dev/null)
+    if printf '%s' "$_uresp" | grep -q '"error":"busy"'; then
+        log "nodemcu: coin session active — will retry on next cron/apply"
+        return 0
+    fi
+    if ! printf '%s' "$_uresp" | grep -q '"ok":true'; then
+        log "nodemcu: update not accepted (resp=$_uresp)"; return 1
+    fi
+    log "nodemcu: flash accepted, device downloading + rebooting; verifying…"
+
+    # ---- verify: device should come back reporting the new version --------
+    _i=0
+    while [ "$_i" -lt 15 ]; do
+        sleep 4
+        _rv=$(wget -q -T 4 -O - "$_base/version" 2>/dev/null \
+              | sed -n 's/.*"fw":"\([^"]*\)".*/\1/p')
+        if [ "$_rv" = "$_nver" ]; then
+            log "nodemcu: confirmed running $_nver"
+            notify "OTA: coin slot firmware updated to $_nver"
+            return 0
+        fi
+        _i=$((_i + 1))
+    done
+    log "nodemcu: could not confirm $_nver after flash (last=$_rv) — check the device"
+    notify "OTA: coin slot firmware push to $_nver unconfirmed — please check the coin slot"
+    return 1
+}
+
+# ---- dispatch ----
+case "$1" in
+    check)    do_check ;;
+    apply)    do_apply "$2" ;;
+    rollback) do_rollback ;;
+    cron)     do_cron ;;
+    changelog) do_changelog ;;
+    get_auto) do_get_auto ;;
+    set_auto) do_set_auto "$2" ;;
+    nodemcu)  mkdir -p "$DL"; fetch "$OTA_MANIFEST_URL" "$DL/manifest.txt" && sync_nodemcu ;;
+    status)   cat "$STATUS_FILE" 2>/dev/null || echo "idle" ;;
+    log)      cat "$LOG" 2>/dev/null ;;
+    *) echo "usage: $0 {check|apply [version]|rollback|cron|changelog|get_auto|set_auto 0|1|nodemcu|status|log}" ; exit 2 ;;
+esac

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+
+    <!--
+    ============================================================
+    xterm.js dependencies
+    ============================================================
+    -->
+    <link  href="/css/xterm.css?v=1.0.0"  rel="stylesheet"
+           onerror="this.href='https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css'">
+    <style>
+        html, body { height: 100%; overflow: hidden; }
+
+        /* Make the page below the navbar fill remaining height */
+        .terminal-wrapper {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 56px); /* 56px = navbar height */
+            background: #0d0d0d;
+            padding: 6px 8px; /* <-- PADDING MOVED HERE */
+        }
+
+        #terminal-container {
+            flex: 1;
+            min-height: 0;       /* allow flex child to shrink */
+            overflow: hidden;    /* <-- ADDED THIS to prevent scrollbars */
+        }
+
+        /* 
+           !!! THE HEIGHT:100% !IMPORTANT RULE WAS DELETED HERE !!!
+           xterm's fitAddon will handle the sizing automatically now.
+        */
+
+        /* ---- Status bar ---- */
+        #status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 3px 10px;
+            font-size: 11px;
+            background: #1a1a1a;
+            border-top: 1px solid #2a2a2a;
+            color: #888;
+            flex-shrink: 0;
+        }
+        #status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #555;
+            display: inline-block;
+            margin-right: 6px;
+            transition: background .3s;
+        }
+        #status-dot.connected    { background: #4caf50; }
+        #status-dot.connecting   { background: #ff9800; }
+        #status-dot.disconnected { background: #f44336; }
+
+        /* ---- Mobile toolbar ---- */
+        #mobile-toolbar {
+            display: none;           /* shown via JS on touch devices */
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            gap: 4px;
+            padding: 5px 8px;
+            background: #1e1e1e;
+            border-top: 1px solid #2a2a2a;
+            flex-shrink: 0;
+        }
+        #mobile-toolbar button {
+            flex-shrink: 0;
+            font-size: 11px;
+            padding: 5px 10px;
+            background: #2d2d2d;
+            color: #ccc;
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            white-space: nowrap;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+        }
+        #mobile-toolbar button:active { background: #444; }
+        #mobile-toolbar button.danger { color: #f66; border-color: #633; }
+    </style>
+</head>
+<body>
+
+    <!-- ======== Navbar ======== -->
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <!-- ======== Terminal area ======== -->
+    <div class="terminal-wrapper">
+        <div id="terminal-container"></div>
+
+        <div id="mobile-toolbar" aria-label="Mobile keyboard shortcuts">
+            <button onclick="sendKey('\t')">Tab</button>
+            <button onclick="sendKey('\x01')">Ctrl+A</button>
+            <button onclick="sendKey('\x03')" class="danger">Ctrl+C</button>
+            <button onclick="sendKey('\x04')" class="danger">Ctrl+D</button>
+            <button onclick="sendKey('\x1b')">Esc</button>
+            <button onclick="sendKey('\x1b[A')">▲</button>
+            <button onclick="sendKey('\x1b[B')">▼</button>
+            <button onclick="sendKey('\x1b[D')">◀</button>
+            <button onclick="sendKey('\x1b[C')">▶</button>
+            <button onclick="sendKey('\x1b[H')">Home</button>
+            <button onclick="sendKey('\x1b[F')">End</button>
+            <button onclick="sendKey('\x7f')">⌫</button>
+            <button onclick="reconnect()">↺ Reconnect</button>
+        </div>
+
+        <div id="status-bar">
+            <span><span id="status-dot"></span><span id="status-text">Connecting…</span></span>
+            <span id="status-size" style="color:#555"></span>
+        </div>
+    </div>
+
+    <!-- xterm.js script integration -->
+    <script>
+        // 1. Define the loaders
+        function loadScript(local, cdn, cb) {
+            const s = document.createElement('script');
+            s.src = local;
+            s.onload = cb;
+            s.onerror = () => { s.remove(); const f = document.createElement('script'); f.src = cdn; f.onload = cb; document.head.appendChild(f); };
+            document.head.appendChild(s);
+        }
+        function loadAll(scripts, cb) {
+            if (!scripts.length) return cb();
+            loadScript(scripts[0][0], scripts[0][1], () => loadAll(scripts.slice(1), cb));
+        }
+
+        // 2. All your configuration, globals, and the initTerminal function
+        const TTYD_PORT    = 7681;          
+        const RECONNECT_MS = 4000;          
+        const WS_URL       = `ws://${location.hostname}:${TTYD_PORT}/ws`;
+
+        let term, fitAddon, ws, reconnectTimer;
+
+        // ----------------------------------------------------------------
+        // Status bar helpers
+        // ----------------------------------------------------------------
+        function setStatus(state, text) {
+            document.getElementById('status-dot').className  = state;
+            document.getElementById('status-text').textContent = text;
+        }
+
+        function updateSize() {
+            if (!term) return;
+            document.getElementById('status-size').textContent =
+                `${term.cols} × ${term.rows}`;
+        }
+
+        // ----------------------------------------------------------------
+        // Mobile toolbar — show on touch devices
+        // ----------------------------------------------------------------
+        function sendKey(seq) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('0' + seq);
+            }
+            term && term.focus();
+        }
+
+        function detectMobile() {
+            if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+                document.getElementById('mobile-toolbar').style.display = 'flex';
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // WebSocket <-> xterm.js bridge (ttyd protocol)
+        // ----------------------------------------------------------------
+        function connect() {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            setStatus('connecting', 'Connecting…');
+
+            ws = new WebSocket(WS_URL);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                setStatus('connected', 'Connected');
+                sendResize();
+            };
+
+            ws.onmessage = e => {
+                const data = typeof e.data === 'string' ? e.data
+                           : new TextDecoder().decode(e.data);
+                if (!data.length) return;
+                const type = data[0];
+                const body = data.slice(1);
+                if (type === '1') term.write(body);           // output
+                else if (type === '2') document.title = body || 'Terminal'; // title
+            };
+
+            ws.onclose = () => {
+                setStatus('disconnected', 'Disconnected — reconnecting…');
+                reconnectTimer = setTimeout(connect, RECONNECT_MS);
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        function sendResize() {
+            if (!ws || ws.readyState !== WebSocket.OPEN || !term) return;
+            ws.send('3' + JSON.stringify({ cols: term.cols, rows: term.rows }));
+            updateSize();
+        }
+
+        function reconnect() {
+            if (ws) { ws.onclose = null; ws.close(); }
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            term.clear();
+            connect();
+        }
+
+        // ----------------------------------------------------------------
+        // Init — called after all scripts load
+        // ----------------------------------------------------------------
+        function initTerminal() {
+            term = new Terminal({
+                cursorBlink:      true,
+                fontSize:         14,
+                fontFamily:       "'Cascadia Code', 'Fira Code', 'Courier New', monospace",
+                theme: {
+                    background:   '#0d0d0d',
+                    foreground:   '#e0e0e0',
+                    cursor:       '#00e5ff',
+                    black:        '#1e1e1e',
+                    red:          '#f44336',
+                    green:        '#4caf50',
+                    yellow:       '#ffeb3b',
+                    blue:         '#2196f3',
+                    magenta:      '#9c27b0',
+                    cyan:         '#00bcd4',
+                    white:        '#e0e0e0',
+                    brightBlack:  '#555',
+                    brightRed:    '#ef9a9a',
+                    brightGreen:  '#a5d6a7',
+                    brightYellow: '#fff176',
+                    brightBlue:   '#90caf9',
+                    brightMagenta:'#ce93d8',
+                    brightCyan:   '#80deea',
+                    brightWhite:  '#ffffff',
+                },
+                allowProposedApi: true,
+                scrollback:       2000,
+            });
+
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+            term.open(document.getElementById('terminal-container'));
+            fitAddon.fit();
+            term.focus();
+            updateSize();
+            detectMobile();
+
+            // Send keystrokes to ttyd
+            term.onData(data => {
+                if (ws && ws.readyState === WebSocket.OPEN) ws.send('0' + data);
+            });
+
+            // Resize terminal when window/orientation changes
+            const ro = new ResizeObserver(() => { fitAddon.fit(); sendResize(); });
+            ro.observe(document.getElementById('terminal-container'));
+            window.addEventListener('resize', () => { fitAddon.fit(); sendResize(); });
+            screen.orientation && screen.orientation.addEventListener('change',
+                () => setTimeout(() => { fitAddon.fit(); sendResize(); }, 300));
+
+            connect();
+        }
+
+        // 3. FINALLY, call loadAll AT THE VERY END, now that initTerminal actually exists!
+        loadAll([
+            ['/js/xterm.js',               'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js'],
+            ['/js/xterm-addon-fit.js',      'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js'],
+            ['/js/xterm-addon-web-links.js','https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js'],
+        ], initTerminal);
+    </script>
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+</body>
+</html>

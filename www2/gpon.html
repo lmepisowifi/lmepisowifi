@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+        .invalid-feedback { display: block; }
+        .form-control.is-invalid { border-color: #dc3545; }
+        code { color: #fff; }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">GPON Settings</div>
+                    <div class="card-body">
+
+                        <!-- GPON Serial Number -->
+                        <div class="mb-2">
+                            <label for="gpon-sn" class="form-label">GPON Serial Number</label>
+                            <input type="text" class="form-control text-uppercase"
+                                   id="gpon-sn" maxlength="12" autocomplete="off"
+                                   placeholder="e.g. YOTCF6349B6B">
+                            <div class="field-hint">
+                                12 characters: 4-letter vendor code + 8 hex digits
+                                (e.g. <code>YOTCF6349B6B</code>)
+                            </div>
+                            <div class="invalid-feedback" id="gpon-sn-err" style="display:none"></div>
+                        </div>
+
+                        <!-- LOID -->
+                        <div class="mb-2">
+                            <label for="loid" class="form-label">LOID</label>
+                            <input type="text" class="form-control"
+                                   id="loid" maxlength="64" autocomplete="off"
+                                   placeholder="e.g. yotc-pon-349b6b">
+                            <div class="field-hint">Logical ONU Identifier</div>
+                            <div class="invalid-feedback" id="loid-err" style="display:none"></div>
+                        </div>
+
+                        <!-- LOID Password -->
+                        <div class="mb-2">
+                            <label for="loid-passwd" class="form-label">LOID Password</label>
+                            <input type="text" class="form-control"
+                                   id="loid-passwd" maxlength="24" autocomplete="off"
+                                   placeholder="e.g. 12345678">
+                            <div class="field-hint">Up to 24 characters</div>
+                        </div>
+
+                        <!-- PLOAM Password -->
+                        <div class="mb-2">
+                            <label for="ploam-passwd" class="form-label">PLOAM Password</label>
+                            <input type="text" class="form-control"
+                                   id="ploam-passwd" maxlength="20" autocomplete="off"
+                                   placeholder="e.g. 28f6349b6b">
+                            <div class="field-hint">Hex string (e.g. <code>28f6349b6b</code>)</div>
+                            <div class="invalid-feedback" id="ploam-err" style="display:none"></div>
+                        </div>
+
+                        <!-- Apply -->
+                        <div class="d-grid mt-4">
+                            <button class="btn btn-primary" id="apply-btn"
+                                    onclick="applyGponSettings()">Apply</button>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- Info card: what happens on apply -->
+                <div class="card mt-3">
+                    <div class="card-body" style="font-size:0.82em; color:var(--text-secondary)">
+                        <strong style="color:var(--bs-body-color)">On Apply:</strong>
+                        All changes are written to flash (<code>mib commit</code>) and
+                        <code>omci_app</code> is restarted with the new parameters.
+                        If the Serial Number is changed, the ONT is deactivated and
+                        re-activated immediately without a reboot.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script>
+    // ---------------------------------------------------------------
+    // Overlay
+    // ---------------------------------------------------------------
+    var overlay        = document.getElementById('overlay');
+    var overlayTxt     = document.getElementById('overlay-text');
+    var overlaySpinner = document.getElementById('overlay-spinner');
+
+    function showOverlay(msg, spinning) {
+        overlayTxt.textContent = msg;
+        overlaySpinner.style.display = (spinning === false) ? 'none' : '';
+        overlay.classList.add('visible');
+    }
+
+    function hideOverlay(cb) {
+        overlay.classList.remove('visible');
+        if (cb) setTimeout(cb, 360);
+    }
+
+    // ---------------------------------------------------------------
+    // Form lock / unlock
+    // ---------------------------------------------------------------
+    var FORM_IDS = ['gpon-sn', 'loid', 'loid-passwd', 'ploam-passwd', 'apply-btn'];
+
+    function setFormLocked(locked) {
+        FORM_IDS.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            if (locked) {
+                el.setAttribute('disabled', '');
+                el.style.pointerEvents = 'none';
+            } else {
+                el.removeAttribute('disabled');
+                el.style.pointerEvents = '';
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Validation helpers
+    // ---------------------------------------------------------------
+    function setFieldError(inputId, errId, msg) {
+        var inp = document.getElementById(inputId);
+        var err = errId ? document.getElementById(errId) : null;
+        if (msg) {
+            inp.classList.add('is-invalid');
+            if (err) { err.textContent = msg; err.style.display = 'block'; }
+        } else {
+            inp.classList.remove('is-invalid');
+            if (err) err.style.display = 'none';
+        }
+    }
+
+    function validateGponSn(sn) {
+        if (!sn || sn.length !== 12)
+            return 'Must be exactly 12 characters';
+        if (!/^[A-Za-z]{4}/.test(sn))
+            return 'First 4 characters must be letters (vendor code)';
+        if (!/^[A-Za-z]{4}[0-9A-Fa-f]{8}$/.test(sn))
+            return 'Last 8 characters must be hex digits (0\u20139, A\u2013F)';
+        return null;
+    }
+
+    function validatePloam(val) {
+        if (!val) return null; // empty is allowed (some devices have no PLOAM)
+        if (!/^[0-9A-Fa-f]+$/.test(val))
+            return 'PLOAM password must be a hex string';
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // Live uppercase for GPON SN
+    // ---------------------------------------------------------------
+    (function() {
+        var snInput = document.getElementById('gpon-sn');
+        snInput.addEventListener('input', function() {
+            var pos = this.selectionStart;
+            this.value = this.value.toUpperCase();
+            this.setSelectionRange(pos, pos);
+        });
+    })();
+
+    // ---------------------------------------------------------------
+    // Load current values
+    // ---------------------------------------------------------------
+    function loadStatus() {
+        setFormLocked(true);
+        showOverlay('Loading\u2026');
+        fetch('/cgi-bin/lme.cgi?action=gpon_status', { cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                // Guard: if the device is manually set to a non-GPON PON mode,
+                // lock the page — GPON settings have no effect in this mode.
+                var isGpon = (String(d.pon_auto) === '1' || String(d.pon_mode) === '1');
+                if (!isGpon) {
+                    overlaySpinner.style.display = 'none';
+                    overlayTxt.textContent = 'GPON Settings are only available when the device is in GPON mode. Change the PON mode in System \u2192 Settings.';
+                    return; // leave overlay up, form stays locked
+                }
+                document.getElementById('gpon-sn').value      = d.gpon_sn     || '';
+                document.getElementById('loid').value         = d.loid        || '';
+                document.getElementById('loid-passwd').value  = d.loid_passwd || '';
+                document.getElementById('ploam-passwd').value = d.ploam_passwd || '';
+                hideOverlay(function() { setFormLocked(false); });
+            })
+            .catch(function() {
+                hideOverlay(function() { setFormLocked(false); });
+                toastr['warning']('Failed to load GPON settings.', 'Error');
+            });
+    }
+
+    // ---------------------------------------------------------------
+    // Apply settings
+    // ---------------------------------------------------------------
+    function applyGponSettings() {
+        var snVal    = document.getElementById('gpon-sn').value.trim().toUpperCase();
+        var loidVal  = document.getElementById('loid').value.trim();
+        var loidPwVal = document.getElementById('loid-passwd').value.trim();
+        var ploamVal = document.getElementById('ploam-passwd').value.trim();
+
+        // Validate
+        var snErr    = validateGponSn(snVal);
+        var ploamErr = validatePloam(ploamVal);
+        setFieldError('gpon-sn',     'gpon-sn-err', snErr);
+        setFieldError('ploam-passwd','ploam-err',   ploamErr);
+        if (snErr || ploamErr) return;
+
+        var body = 'gpon_sn='      + encodeURIComponent(snVal)
+                 + '&loid='        + encodeURIComponent(loidVal)
+                 + '&loid_passwd=' + encodeURIComponent(loidPwVal)
+                 + '&ploam_passwd='+ encodeURIComponent(ploamVal);
+
+        showOverlay('Applying GPON settings\u2026');
+        setFormLocked(true);
+
+        // The CGI responds with 200 OK immediately after mib commit, then
+        // restarts omci_app in a background subshell — so the response always
+        // arrives before the network is disrupted.  The AbortController is kept
+        // as a safety net in case the MIB operations themselves stall.
+        var controller  = new AbortController();
+        var timeoutId   = setTimeout(function() { controller.abort(); }, 10000);
+
+        function onApplied() {
+            clearTimeout(timeoutId);
+            overlaySpinner.style.display = 'none';
+            overlayTxt.textContent = 'GPON Settings Applied.';
+            setTimeout(function() {
+                hideOverlay(function() { setFormLocked(false); });
+            }, 1500);
+        }
+
+        function onFailed(msg) {
+            clearTimeout(timeoutId);
+            overlaySpinner.style.display = 'none';
+            hideOverlay(function() { setFormLocked(false); });
+            toastr['warning'](msg || 'Request failed.', 'Error');
+        }
+
+        fetch('/cgi-bin/lme.cgi?action=gpon_settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body,
+            signal: controller.signal
+        })
+        .then(function(r) {
+            return r.text().then(function(t) { return { ok: r.ok, text: t }; });
+        })
+        .then(function(res) {
+            if (res.ok) {
+                onApplied();
+            } else {
+                onFailed('Error: ' + (res.text.trim() || 'Unknown error'));
+            }
+        })
+        .catch(function(err) {
+            // AbortError means the 10 s timeout fired — the settings were
+            // already written and omci_app restarted (dropping the connection).
+            // Any other fetch error after the request was dispatched is treated
+            // the same way: assume success, hide the loader cleanly.
+            if (err.name === 'AbortError') {
+                onApplied();
+            } else {
+                onFailed('Request failed.');
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Init
+    // ---------------------------------------------------------------
+    loadStatus();
+</script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

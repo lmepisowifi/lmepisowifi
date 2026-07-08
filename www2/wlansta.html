@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        /* ── STA table ── */
+        .sta-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .sta-table th {
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-color);
+            text-align: left;
+            white-space: nowrap;
+        }
+        .sta-table td {
+            padding: 9px 12px;
+            border-bottom: 1px solid rgba(255,255,255,.04);
+            color: var(--text-primary);
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+        .sta-table tbody tr:last-child td { border-bottom: none; }
+        .sta-table tbody tr { cursor: pointer; }
+        .sta-table tbody tr:hover td { background: var(--bg-surface-hover); }
+        .sta-table tbody tr.selected td { background: rgba(13,110,253,.16); }
+        .mac-mono {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            letter-spacing: 0.02em;
+        }
+        /* ── Signal badge ── */
+        .sig-badge {
+            display: inline-block;
+            min-width: 58px;
+            text-align: center;
+            padding: 2px 7px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .sig-ex   { background: rgba(76,175,80,.18);  color: #81c784; }
+        .sig-good { background: rgba(139,195,74,.18); color: #aed581; }
+        .sig-fair { background: rgba(255,193,7,.18);  color: #ffd54f; }
+        .sig-weak { background: rgba(255,87,34,.18);  color: #ff8a65; }
+        .sub      { font-size: 11px; color: var(--text-secondary); }
+        /* ── Tags ── */
+        .tag {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            background: rgba(255,255,255,.07);
+            color: var(--text-secondary);
+        }
+        .tag-band24 { background: rgba(255,193,7,.16);  color: #ffd54f; }
+        .tag-band5  { background: rgba(13,110,253,.18); color: #6ea8fe; }
+        .tag-bf-yes { background: rgba(76,175,80,.18);  color: #81c784; }
+        .tag-bf-no  { background: rgba(255,255,255,.06); color: var(--text-secondary); }
+        /* ── Controls ── */
+        .controls-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .status-txt   { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
+        .empty-state  { padding: 28px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+        .sel-radio    { width: 16px; height: 16px; cursor: pointer; }
+        .btn-spinner {
+            display: inline-block; width: 13px; height: 13px;
+            border: 2px solid rgba(255,255,255,.4); border-top-color: #fff;
+            border-radius: 50%; animation: spin .7s linear infinite;
+            margin-right: 7px; vertical-align: -2px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+    <script src="/js/nav.js?v=1.0.0"></script>
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+
+    <!-- Full-page overlay -->
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <div class="container mt-4">
+
+        <!-- ── Controls ── -->
+        <div class="card mb-3">
+            <div class="card-body" style="padding: 12px 16px !important;">
+                <div class="controls-row">
+                    <label class="form-label mb-0" style="white-space:nowrap;font-size:12px;">Band</label>
+                    <select id="band-filter" class="form-select" style="width:170px;" onchange="render()">
+                        <option value="all">All bands</option>
+                        <option value="wlan1">2.4 GHz (wlan1)</option>
+                        <option value="wlan0">5 GHz (wlan0)</option>
+                    </select>
+                    <button id="refresh-btn" class="btn btn-primary" onclick="manualRefresh()">Refresh</button>
+                    <button id="auto-btn" class="btn btn-outline-secondary" onclick="toggleAuto()">Auto-refresh: On</button>
+                    <button id="disconnect-btn" class="btn btn-outline-danger" onclick="disconnectSelected()" disabled>Disconnect</button>
+                    <span class="status-txt" id="status-txt">Loading…</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Clients table ── -->
+        <div class="card">
+            <div class="card-header d-flex align-items-center justify-content-between">
+                <span>Connected Clients</span>
+                <span id="sta-count" style="font-size:11px;color:var(--text-secondary);font-weight:400;"></span>
+            </div>
+            <div class="card-body" style="padding:0 !important;overflow-x:auto;">
+                <div id="sta-area">
+                    <div class="empty-state">Loading…</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+    <script>
+    // ── Overlay helpers ──
+    var overlayEl  = document.getElementById('overlay');
+    var overlayTxt = document.getElementById('overlay-text');
+    function showOverlay(msg) { overlayTxt.textContent = msg || ''; overlayEl.classList.add('visible'); }
+    function hideOverlay()    { overlayEl.classList.remove('visible'); }
+
+    if (window.toastr) {
+        toastr.options = {
+            positionClass: 'toast-top-right', timeOut: 3500, closeButton: true,
+            preventDuplicates: true, newestOnTop: true
+        };
+    }
+    function notify(type, msg) { if (window.toastr && toastr[type]) toastr[type](msg); }
+
+    // ── State ──
+    var STATIONS   = [];     // last fetched list
+    var selectedMac = null;  // "iface|macraw"
+    var autoOn      = true;
+    var autoTimer   = null;
+    var inFlight    = false;
+
+    function esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // wlan1 = 2.4 GHz, wlan0 = 5 GHz
+    function bandLabel(iface) { return iface === 'wlan0' ? '5 GHz' : '2.4 GHz'; }
+    function bandClass(iface) { return iface === 'wlan0' ? 'tag-band5' : 'tag-band24'; }
+
+    // Raw sta_info rssi is usually already dBm (negative); some driver/link
+    // states report a positive 0-100 quality value instead. Same source and
+    // same conversion as the hotspot portal (hotspot/index.html).
+    function rssiToDbm(rssi) {
+        rssi = Number(rssi) || 0;
+        return rssi > 0 ? Math.max(rssi - 100, -100) : rssi;
+    }
+    function sigClass(dbm) {
+        if (dbm >= -55) return 'sig-ex';
+        if (dbm >= -67) return 'sig-good';
+        if (dbm >= -77) return 'sig-fair';
+        return 'sig-weak';
+    }
+
+    function fmtBytes(n) {
+        n = Number(n) || 0;
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+        return (n / 1073741824).toFixed(2) + ' GB';
+    }
+
+    function fmtTime(sec) {
+        sec = Number(sec) || 0;
+        if (sec < 60) return sec + 's';
+        var d = Math.floor(sec / 86400); sec %= 86400;
+        var h = Math.floor(sec / 3600);  sec %= 3600;
+        var m = Math.floor(sec / 60);    var s = sec % 60;
+        var parts = [];
+        if (d) parts.push(d + 'd');
+        if (h) parts.push(h + 'h');
+        if (m) parts.push(m + 'm');
+        if (!d && !h) parts.push(s + 's');
+        return parts.join(' ');
+    }
+
+    function staKey(s) { return s.iface + '|' + s.macraw; }
+
+    function render() {
+        var filter = document.getElementById('band-filter').value;
+        var list = STATIONS.filter(function (s) {
+            return filter === 'all' || s.iface === filter;
+        });
+
+        document.getElementById('sta-count').textContent =
+            list.length + (list.length === 1 ? ' client' : ' clients');
+
+        var area = document.getElementById('sta-area');
+        if (list.length === 0) {
+            area.innerHTML = '<div class="empty-state">No connected clients</div>';
+            selectedMac = null;
+            syncDisconnectBtn();
+            return;
+        }
+
+        var rows = list.map(function (s) {
+            var dbm = rssiToDbm(s.rssi);
+            var key = staKey(s);
+            var sel = (key === selectedMac) ? ' class="selected"' : '';
+            var checked = (key === selectedMac) ? ' checked' : '';
+            var bf = s.bf
+                ? '<span class="tag tag-bf-yes">Yes</span>'
+                : '<span class="tag tag-bf-no">No</span>';
+            return '<tr' + sel + ' data-key="' + esc(key) + '">' +
+                '<td><input type="radio" name="sta-sel" class="sel-radio" value="' + esc(key) + '"' + checked + '></td>' +
+                '<td class="mac-mono">' + esc(s.mac) + '</td>' +
+                '<td><span class="tag ' + bandClass(s.iface) + '">' + bandLabel(s.iface) +
+                    '</span> <span class="sub">' + esc(s.iface) + '</span></td>' +
+                '<td><span class="sig-badge ' + sigClass(dbm) + '">' + dbm + ' dBm</span>' +
+                    '<div class="sub">RSSI ' + s.rssi + '</div></td>' +
+                '<td>' + s.snr + ' dB</td>' +
+                '<td>' + esc(s.txrate || '—') + '<div class="sub">rx ' + esc(s.rxrate || '—') + '</div></td>' +
+                '<td>' + esc(s.bw || '—') + '</td>' +
+                '<td>' + esc(s.mode || '—') + '</td>' +
+                '<td>' + bf + '</td>' +
+                '<td>' + fmtTime(s.linktime) + '</td>' +
+                '<td class="sub">&#8593;' + fmtBytes(s.txbytes) + '<br>&#8595;' + fmtBytes(s.rxbytes) + '</td>' +
+                '</tr>';
+        }).join('');
+
+        area.innerHTML =
+            '<table class="sta-table">' +
+            '<thead><tr>' +
+            '<th></th><th>MAC Address</th><th>Band</th><th>Signal</th><th>SNR</th>' +
+            '<th>TX / RX Rate</th><th>BW</th><th>Mode</th><th>Beamforming</th>' +
+            '<th>Conn. Time</th><th>Traffic</th>' +
+            '</tr></thead><tbody>' + rows + '</tbody></table>';
+
+        // Row + radio selection wiring
+        var trs = area.querySelectorAll('tbody tr');
+        for (var i = 0; i < trs.length; i++) {
+            trs[i].addEventListener('click', function () { selectRow(this.getAttribute('data-key')); });
+        }
+        syncDisconnectBtn();
+    }
+
+    function selectRow(key) {
+        selectedMac = key;
+        var trs = document.querySelectorAll('#sta-area tbody tr');
+        for (var i = 0; i < trs.length; i++) {
+            var k = trs[i].getAttribute('data-key');
+            trs[i].classList.toggle('selected', k === key);
+            var r = trs[i].querySelector('input[type=radio]');
+            if (r) r.checked = (k === key);
+        }
+        syncDisconnectBtn();
+    }
+
+    function syncDisconnectBtn() {
+        var btn = document.getElementById('disconnect-btn');
+        // keep selection valid only if the station is still present
+        var stillThere = STATIONS.some(function (s) { return staKey(s) === selectedMac; });
+        if (!stillThere) selectedMac = null;
+        btn.disabled = !selectedMac;
+    }
+
+    function setStatus(msg) { document.getElementById('status-txt').textContent = msg; }
+
+    async function load(showSpin) {
+        if (inFlight) return;
+        inFlight = true;
+        var btn = document.getElementById('refresh-btn');
+        if (showSpin) { btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Refreshing'; }
+        try {
+            var r = await fetch('/cgi-bin/wlansta.cgi?action=status', { cache: 'no-store' });
+            var data = await r.json();
+            STATIONS = (data && data.stations) ? data.stations : [];
+            render();
+            var now = new Date();
+            setStatus('Updated ' + now.toLocaleTimeString());
+        } catch (e) {
+            setStatus('Failed to load clients');
+            notify('error', 'Could not read client list');
+        } finally {
+            inFlight = false;
+            if (showSpin) { btn.disabled = false; btn.innerHTML = 'Refresh'; }
+        }
+    }
+
+    function manualRefresh() { load(true); }
+
+    function toggleAuto() {
+        autoOn = !autoOn;
+        var btn = document.getElementById('auto-btn');
+        if (autoOn) {
+            btn.textContent = 'Auto-refresh: On';
+            btn.classList.replace('btn-outline-secondary', 'btn-secondary');
+            startAuto();
+        } else {
+            btn.textContent = 'Auto-refresh: Off';
+            btn.classList.replace('btn-secondary', 'btn-outline-secondary');
+            stopAuto();
+        }
+    }
+    function startAuto() { stopAuto(); autoTimer = setInterval(function () { load(false); }, 5000); }
+    function stopAuto()  { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } }
+
+    async function disconnectSelected() {
+        if (!selectedMac) return;
+        var parts = selectedMac.split('|');
+        var iface = parts[0], macraw = parts[1];
+        var sta = STATIONS.find(function (s) { return staKey(s) === selectedMac; });
+        var macDisp = sta ? sta.mac : macraw;
+
+        if (!confirm('Disconnect client ' + macDisp + ' on ' + bandLabel(iface) + ' (' + iface + ')?\n\nThe device will be kicked off the WiFi.')) {
+            return;
+        }
+
+        showOverlay('Disconnecting ' + macDisp + '…');
+        var wasAuto = autoOn; stopAuto();
+        try {
+            var body = 'iface=' + encodeURIComponent(iface) + '&mac=' + encodeURIComponent(macraw);
+            var r = await fetch('/cgi-bin/wlansta.cgi?action=disconnect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body
+            });
+            if (r.ok) {
+                notify('success', 'Disconnected ' + macDisp);
+                selectedMac = null;
+            } else {
+                var t = await r.text();
+                notify('error', 'Disconnect failed: ' + (t || r.status));
+            }
+        } catch (e) {
+            notify('error', 'Disconnect request failed');
+        } finally {
+            hideOverlay();
+            await load(false);
+            if (wasAuto) { autoOn = true; startAuto(); }
+        }
+    }
+
+    // ── Init ──
+    document.getElementById('auto-btn').classList.replace('btn-outline-secondary', 'btn-secondary');
+    load(true);
+    startAuto();
+    window.addEventListener('beforeunload', stopAuto);
+    </script>
+</body>
+</html>

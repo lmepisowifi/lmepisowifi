@@ -1,0 +1,1310 @@
+#!/bin/sh
+
+# ============================================================
+# lmehspt.sh — Piso Wifi Hotspot Controller
+# RTL9607C ONT | BusyBox | iptables captive portal
+# ============================================================
+
+BB="busybox"
+HOTSPOT_INTERFACES="eth0.2.0 wlan0 wlan1"
+HOTSPOT_BR="br1"
+PORTAL_IP="10.0.0.1"
+PORTAL_PORT="808"
+WWW2_PORT="8080"   # busybox httpd -h /lmepisowifi/www2 -p 8080 (admin UI). /admin on the portal redirects here.
+SESSION_FILE="/tmp/active_sessions.txt"
+USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
+WHITELIST_FILE="/lmepisowifi/hotspot_data/whitelist.txt"
+
+WAN_INT_DEFAULT="br0"
+WAN_INT="br0"
+BR0_GATEWAY="192.168.18.1"   # FALLBACK only. The live gateway is auto-detected from br0's
+                             # current IP (see resolve_br0_gateway); this value is used only
+                             # if br0 has no IPv4 address yet.
+GLOBAL_RATE="50mbit"
+INACTIVITY_TIMEOUT="300"
+BOOT_MARKER="/tmp/hotspot_boot.mark"
+ACTIVITY_FILE="/tmp/hotspot_activity.txt"
+PER_USER_RATE="5mbit"
+PER_USER_BURST="10k"
+UNAUTH_RATE="1000kbit"
+IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
+
+HOTSPOT_ENABLED="1"
+ANTI_TETHER="1"
+COIN_ENABLED="1"
+NODEMCU_IP="10.0.0.2"
+NODEMCU_MAC="e868e7c81814"
+NODEMCU_PORT="8080"
+COIN_PSK="lmepisowifi"
+COIN_TIMEOUT="30"
+COIN_RATES="1:15 5:90 10:210 15:360 20:720 25:1080 30:2160 35:2880 40:3600 45:4320 50:5040 55:5760"
+COIN_STRIKE_THRESHOLD="3"
+COIN_COOLDOWN="60"
+
+# NTP servers used by busybox ntpd to discipline the system clock over the WAN.
+NTP_SERVERS="pool.ntp.org time.google.com time.cloudflare.com"
+NTP_EVENT="/lmepisowifi/hotspot/ntp_event.sh"
+
+# ── Defaults + persistent globals ─────────────────────────────────────────────
+# Layering (later overrides earlier):
+#   1. built-in defaults hardcoded above (ultimate fallback),
+#   2. /lmepisowifi/defaults.env  — canonical defaults, SHIPPED/REPLACED by OTA,
+#   3. /lmepisowifi/globals.env   — user settings (PRESERVED across OTA), written
+#                                   by www2/cgi-bin/hotspot.cgi when settings are
+#                                   saved in the admin UI.
+#
+# seed_globals() copies any key present in defaults.env but MISSING from
+# globals.env into globals.env, so when an OTA introduces a new tunable, old
+# devices automatically gain it (with its default) in their preserved
+# globals.env and it shows up pre-filled in the admin UI. It never overwrites a
+# key the user already set, and is idempotent (safe to run on every boot).
+seed_globals() {
+    _def="/lmepisowifi/defaults.env"
+    _glob="/lmepisowifi/globals.env"
+    [ -f "$_def" ] || return 0
+    [ -f "$_glob" ] || : > "$_glob"   # create empty file if it doesn't exist yet
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            ''|\#*) continue ;;               # skip blank lines and comments
+        esac
+        _key=${_line%%=*}
+        case "$_key" in
+            ''|*[!A-Za-z0-9_]*) continue ;;   # skip lines that aren't KEY=value
+        esac
+        # append only if globals.env has no assignment for this key yet
+        grep -q "^${_key}=" "$_glob" 2>/dev/null || printf '%s\n' "$_line" >> "$_glob"
+    done < "$_def"
+}
+
+[ -f /lmepisowifi/defaults.env ] && . /lmepisowifi/defaults.env
+seed_globals
+[ -f /lmepisowifi/globals.env ] && . /lmepisowifi/globals.env
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Customizable Telegram/Discord message templates
+[ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
+
+# --lib mode: source this file to get all functions without running the main
+# boot sequence. Used by hotspot.cgi's hotspot_stop to call cleanup_old_hotspot
+# with the exact same logic the script itself trusts.
+[ "$1" = "--lib" ] && LMEHSPT_LIB_ONLY=1
+
+# ============================================================
+# UTILITY
+# ============================================================
+_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_lock() {
+    local i=0
+    while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
+        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        $BB sleep 0.1 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+}
+_fmt_secs() {
+    # 1. If s is empty, default it to 0
+    local s="${1:-0}"
+    
+    # 2. Strip any negative sign if present
+    s="${s#-}"
+    
+    # 3. If s contains any non-digit characters, force it to 0
+    case "$s" in
+        ""|*[!0-9]*) s=0 ;;
+    esac
+
+    # 4. Now perform the math safely
+    local d=$(( s / 86400 ))
+    local h=$(( (s % 86400) / 3600 ))
+    local m=$(( (s % 3600) / 60 ))
+
+    if [ "$d" -gt 0 ]; then 
+        printf '%dd %dh %dm' "$d" "$h" "$m"
+    elif [ "$h" -gt 0 ]; then 
+        printf '%dh %dm' "$h" "$m"
+    else 
+        printf '%dm' "$m"
+    fi
+}
+sync_to_persistent_db() {
+    local USERS_TMP="${USERS_FILE}.tmp"
+    local NOW
+    NOW=$($BB awk '{print int($1)}' /proc/uptime)
+    > "$USERS_TMP"
+    if [ -f "$SESSION_FILE" ]; then
+        while read -r mac expiry total; do
+            [ -n "$mac" ] && [ -n "$expiry" ] || continue
+            local remaining=$(( expiry - NOW ))
+            [ "$remaining" -le 0 ] && continue
+            [ -z "$total" ] && total=$remaining
+            echo "$mac active $remaining $total $(_fmt_secs "$remaining")" >> "$USERS_TMP"
+        done < "$SESSION_FILE"
+    fi
+    if [ -f "$USERS_FILE" ]; then
+        while read -r mac status remaining total fmt; do
+            [ -n "$mac" ] && [ -n "$status" ] || continue
+            if [ -f "$SESSION_FILE" ] && $BB grep -q "^$mac " "$SESSION_FILE" 2>/dev/null; then continue; fi
+            [ "$status" = "active" ] && status="paused"
+            [ "$remaining" -le 0 ] && continue
+            [ -z "$total" ] && total=$remaining
+            echo "$mac $status $remaining $total $(_fmt_secs "$remaining")" >> "$USERS_TMP"
+        done < "$USERS_FILE"
+    fi
+    $BB mv "$USERS_TMP" "$USERS_FILE"
+}
+
+# ============================================================
+
+# Normalise a tc rate string to always use bit-based units understood by tc.
+# Handles: bare m/k/g → mbit/kbit/gbit; mbps/kbps/gbps → *bit (*8);
+# already-correct forms (mbit, kbit, gbit, bit) pass through unchanged.
+_norm_rate() {
+    local r="$1"
+    case "$r" in
+        # Already correct
+        *bit|*bit) echo "$r"; return ;;
+        # Bytes-per-second variants → convert to bits
+        *[Mm][Bb][Pp][Ss]) r="${r%????}"; r="$(( r * 8 ))mbit" ;;
+        *[Kk][Bb][Pp][Ss]) r="${r%????}"; r="$(( r * 8 ))kbit" ;;
+        *[Gg][Bb][Pp][Ss]) r="${r%????}"; r="$(( r * 8 ))gbit" ;;
+        # Bare suffix shortcuts
+        *[Mm]) r="${r%?}mbit" ;;
+        *[Kk]) r="${r%?}kbit" ;;
+        *[Gg]) r="${r%?}gbit" ;;
+    esac
+    echo "$r"
+}
+
+format_mac() {
+    printf '%s' "$1" | tr -d ':' | tr 'A-F' 'a-f' | \
+        sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6/'
+}
+iface_in_bridge() {
+    local link
+    link=$(readlink -f "/sys/class/net/$1/brport/bridge" 2>/dev/null)
+    [ -n "$link" ] && [ "$(basename "$link")" = "$HOTSPOT_BR" ]
+}
+is_whitelisted() {
+    [ -f "$WHITELIST_FILE" ] || return 1
+    local raw
+    raw=$(printf '%s' "$1" | tr -d ':' | tr 'A-F' 'a-f')
+    $BB grep -qi "^${raw}$" "$WHITELIST_FILE"
+}
+
+# DNS watchdog: monitors and recovers name resolution when loopback resolver fails
+check_and_fix_dns() {
+    # Check if DNS resolution is broken
+    if ! $BB nslookup google.com >/dev/null 2>&1 && ! $BB nslookup pool.ntp.org >/dev/null 2>&1; then
+        # DNS is not resolving. Check if we already modified resolv.conf to prevent infinite writes
+        if ! $BB grep -q "1.1.1.1" /etc/resolv.conf 2>/dev/null; then
+            # Backup original resolv.conf if not already backed up
+            [ -f /etc/resolv.conf.bak ] || cp /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null
+            
+            # Rewrite resolv.conf to use reliable public DNS servers first, keeping loopback as fallback
+            cat > /etc/resolv.conf << 'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 127.0.0.1
+nameserver ::1
+EOF
+        fi
+    fi
+}
+
+wait_for_wlan_ready() {
+    local max_wait=90 waited=0
+
+    # Stage 1: the vap netdevs need to exist at all
+    while [ $waited -lt $max_wait ]; do
+        [ -e /sys/class/net/wlan0-vap0 ] && [ -e /sys/class/net/wlan1-vap0 ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Stage 2: wait for the vendor bring-up to actually finish.
+    # No hostapd on this driver -- SSID/security go straight into the
+    # kernel module via iwpriv set_mib during rc35. monitord is the last
+    # thing that stage launches, after WLAN MIB programming, firewall
+    # rules, and cwmp/samba are all done, so its presence is a reliable
+    # "vendor bring-up is finished" signal.
+    waited=0
+    while [ $waited -lt $max_wait ]; do
+        $BB pidof monitord >/dev/null 2>&1 && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Settle delay: dot11k_deamon and the Multi-AP service can still be
+    # finishing up for a moment after monitord's first print.
+    sleep 3
+    ip route add default via "$(resolve_br0_gateway)" dev br0 2>/dev/null
+}
+
+
+
+cleanup_old_hotspot() {
+    tc qdisc del dev $WAN_INT root 2>/dev/null
+    for iface in $HOTSPOT_INTERFACES; do
+        tc qdisc del dev "$iface" root 2>/dev/null
+    done
+    teardown_anti_tether 2>/dev/null
+    [ -f /tmp/hotspot_watchdog.pid ] && { kill -9 "$(cat /tmp/hotspot_watchdog.pid)" 2>/dev/null; rm -f /tmp/hotspot_watchdog.pid; }
+    MY_PID=$$
+    for pid in $($BB ps | $BB grep "run_test.sh" | $BB grep -v grep | $BB awk '{print $1}'); do
+        [ "$pid" -ne "$MY_PID" ] && kill -9 "$pid" 2>/dev/null
+    done
+    [ -f /tmp/hotspot_dhcp.pid ] && { kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null; rm -f /tmp/hotspot_dhcp.pid; }
+    for pid in $($BB ps | $BB grep "hotspot_dhcp.conf" | $BB grep -v grep | $BB awk '{print $1}'); do kill -9 "$pid" 2>/dev/null; done
+    for pid in $($BB ps | $BB grep "httpd" | $BB grep -v grep | $BB grep -F "$PORTAL_IP:$PORTAL_PORT" | $BB awk '{print $1}'); do kill -9 "$pid" 2>/dev/null; done
+    
+    # Kill any spawned ntpd instances for this hotspot to prevent orphaned processes
+    for pid in $($BB ps w | $BB grep "ntpd -S" | $BB grep -v grep | $BB awk '{print $1}'); do
+        kill -9 "$pid" 2>/dev/null
+    done
+
+    iptables -t filter -D FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -F HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -X HOTSPOT_FWD 2>/dev/null
+    iptables -t nat -D PREROUTING -i $HOTSPOT_BR -j HOTSPOT 2>/dev/null
+    _cleanup_subnet=$(cat /tmp/hotspot_subnet.mark 2>/dev/null)
+    [ -z "$_cleanup_subnet" ] && _cleanup_subnet=$(printf '%s' "${PORTAL_IP:-192.168.99.1}" | $BB sed 's/\.[^.]*$/.0\/24/')
+    iptables -t nat -D POSTROUTING -s "$_cleanup_subnet" -j MASQUERADE 2>/dev/null
+    rm -f /tmp/hotspot_subnet.mark
+    iptables -t nat -F HOTSPOT 2>/dev/null
+    iptables -t nat -X HOTSPOT 2>/dev/null
+    iptables -t filter -D FORWARD -d $NODEMCU_IP -j DROP 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m comment --comment "lmehspt_ratelimit" -j DROP 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -j DROP 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -j ACCEPT 2>/dev/null
+    # Return hotspot-enslaved interfaces to br0 (the LAN bridge) BEFORE tearing
+    # down the hotspot bridge. Without this, disabling the hotspot leaves the
+    # wlan/eth ports orphaned in the (now removed) bridge and offline. We walk
+    # the live bridge members so it works even if HOTSPOT_INTERFACES changed.
+    for ifpath in /sys/class/net/"$HOTSPOT_BR"/brif/*; do
+        [ -e "$ifpath" ] || continue
+        bm=$($BB basename "$ifpath")
+        $BB brctl delif "$HOTSPOT_BR" "$bm" 2>/dev/null
+        $BB brctl addif br0 "$bm" 2>/dev/null
+        ifconfig "$bm" 0.0.0.0 up 2>/dev/null
+    done
+    # Belt-and-suspenders: also rebind anything still listed in the config.
+    for iface in $HOTSPOT_INTERFACES; do
+        $BB brctl delif "$HOTSPOT_BR" "$iface" 2>/dev/null
+        $BB brctl addif br0 "$iface" 2>/dev/null
+        ifconfig "$iface" 0.0.0.0 up 2>/dev/null
+    done
+    ifconfig $HOTSPOT_BR down 2>/dev/null
+    $BB brctl delbr $HOTSPOT_BR 2>/dev/null
+    rm -f /tmp/hotspot_dhcp.conf /tmp/udhcpd.leases
+
+    # Restore original system DNS configuration if a backup exists
+    [ -f /etc/resolv.conf.bak ] && { mv /etc/resolv.conf.bak /etc/resolv.conf 2>/dev/null; }
+}
+
+# Returns the interface to use as the hotspot upstream (upload direction).
+# When repurposeaswan.sh has promoted a WAN port, uses that; else br0.
+resolve_wan_int() {
+    local rif
+    if [ -f /tmp/repurpose_active ]; then
+        rif=$($BB tr -d '\r\n' < /tmp/repurpose_active 2>/dev/null)
+        if [ -n "$rif" ] && ip link show "$rif" >/dev/null 2>&1; then
+            echo "$rif"; return
+        fi
+    fi
+    echo "$WAN_INT_DEFAULT"
+}
+
+# Returns the upstream default-route gateway for br0, detected dynamically
+# from br0's own IPv4 address (assumes the gateway is the .1 host of br0's
+# /24 subnet, e.g. br0=192.168.18.42 -> gateway 192.168.18.1). Falls back to
+# the configured BR0_GATEWAY only when br0 has no IPv4 address yet.
+resolve_br0_gateway() {
+    local _ip _gw
+    # Prefer `ip`; parse the first IPv4 assigned to br0.
+    _ip=$(ip -4 addr show br0 2>/dev/null | $BB grep -o 'inet [0-9.]*' | $BB awk '{print $2}' | head -1)
+    # Fallback to ifconfig output (older busybox "inet addr:x.x.x.x" format too).
+    if [ -z "$_ip" ]; then
+        _ip=$(ifconfig br0 2>/dev/null | $BB grep -o 'inet \(addr:\)\?[0-9.]*' | $BB grep -o '[0-9.]*' | head -1)
+    fi
+    if [ -n "$_ip" ]; then
+        _gw=$(printf '%s' "$_ip" | $BB sed 's/\.[^.]*$/.1/')
+        [ -n "$_gw" ] && { echo "$_gw"; return; }
+    fi
+    echo "$BR0_GATEWAY"
+}
+
+# Deauthenticate every station currently associated to a wlan* netdev so it
+# re-associates and pulls a fresh DHCP lease. Called right after an interface
+# is enslaved into HOTSPOT_BR: any STA that connected while the radio was still
+# on br0 is holding a br0 LAN IP and will bypass the captive portal entirely.
+# Kicking forces a reconnect → new udhcpd lease from the portal subnet on br1.
+#
+# Station MACs are read from /proc/<iface>/sta_info (same source wlansta.cgi
+# parses) and kicked with `iwpriv <iface> del_sta <hexmac>` (12-hex-digit form,
+# exactly what wlansta.cgi's disconnect action uses). Non-wlan (e.g. ethernet)
+# interfaces have no sta_info and are skipped automatically.
+kick_iface_stas() {
+    local _if="$1" _sf _mac _hx
+    case "$_if" in wlan*) ;; *) return ;; esac
+    _sf="/proc/${_if}/sta_info"
+    [ -f "$_sf" ] || return
+    for _mac in $($BB grep -i '^[ \t]*hwaddr:' "$_sf" 2>/dev/null \
+                    | $BB sed 's/^[^:]*:[ \t]*//'); do
+        _hx=$(printf '%s' "$_mac" | $BB tr 'A-Z' 'a-z' | $BB sed 's/[^0-9a-f]//g')
+        [ ${#_hx} -eq 12 ] || continue
+        logger -t lmehspt "kick STA $_hx on $_if after br1 bind (was on br0)" 2>/dev/null
+        iwpriv "$_if" del_sta "$_hx" >/dev/null 2>&1
+    done
+}
+
+setup_network() {
+    $BB brctl addbr $HOTSPOT_BR 2>/dev/null
+    # Release any interface still enslaved in HOTSPOT_BR that is no longer
+    # listed in HOTSPOT_INTERFACES (the admin unbound it) back to br0 first.
+    # Without this, an unbound interface just sits orphaned in the hotspot
+    # bridge — off the LAN and unusable — until a full hotspot restart.
+    for ifpath in /sys/class/net/"$HOTSPOT_BR"/brif/*; do
+        [ -e "$ifpath" ] || continue
+        bm=$($BB basename "$ifpath")
+        case " $HOTSPOT_INTERFACES " in
+            *" $bm "*) ;;  # still wanted — leave enslaved
+            *)
+                $BB brctl delif "$HOTSPOT_BR" "$bm" 2>/dev/null
+                $BB brctl addif br0 "$bm" 2>/dev/null
+                ifconfig "$bm" 0.0.0.0 up 2>/dev/null
+                ;;
+        esac
+    done
+    for iface in $HOTSPOT_INTERFACES; do
+        $BB brctl delif br0 $iface 2>/dev/null
+        $BB brctl addif $HOTSPOT_BR $iface 2>/dev/null
+        ifconfig $iface 0.0.0.0 up
+    done
+    ifconfig $HOTSPOT_BR $PORTAL_IP netmask 255.255.255.0 up
+
+    # Bounce every station now that the wlan interfaces are enslaved to the
+    # portal bridge. Anything that associated while the radio was still part of
+    # br0 already grabbed a LAN IP and would otherwise never see the captive
+    # portal; kicking forces a reconnect and a fresh DHCP lease on br1. This
+    # runs on the first boot-time setup_network AND whenever the watchdog
+    # re-binds after an Interfaces-tab change, covering both requested cases.
+    for iface in $HOTSPOT_INTERFACES; do
+        kick_iface_stas "$iface"
+    done
+}
+
+setup_firewall() {
+    iptables -t nat -N HOTSPOT 2>/dev/null
+    iptables -t nat -F HOTSPOT
+    iptables -t nat -A HOTSPOT -d $PORTAL_IP -j RETURN
+    iptables -t nat -A HOTSPOT -p tcp --dport 80 -j DNAT --to-destination $PORTAL_IP:$PORTAL_PORT
+    iptables -t nat -A HOTSPOT -p tcp --dport 443 -j DNAT --to-destination $PORTAL_IP:$PORTAL_PORT
+    iptables -t nat -D PREROUTING -i $HOTSPOT_BR -j HOTSPOT 2>/dev/null
+    iptables -t nat -I PREROUTING -i $HOTSPOT_BR -j HOTSPOT
+    _portal_subnet=$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$/.0\/24/')
+    printf '%s\n' "$_portal_subnet" > /tmp/hotspot_subnet.mark
+    iptables -t nat -D POSTROUTING -s "$_portal_subnet" -j MASQUERADE 2>/dev/null
+    iptables -t nat -A POSTROUTING -s "$_portal_subnet" -j MASQUERADE
+    iptables -t filter -N HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -F HOTSPOT_FWD
+    iptables -t filter -A HOTSPOT_FWD -m state --state ESTABLISHED,RELATED -o $HOTSPOT_BR -j ACCEPT
+    iptables -t filter -A HOTSPOT_FWD -p udp --dport 53 -j ACCEPT
+    iptables -t filter -A HOTSPOT_FWD -d $PORTAL_IP -j ACCEPT
+    iptables -t filter -A HOTSPOT_FWD -j DROP
+    iptables -t filter -D FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -I FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD
+    iptables -t filter -I FORWARD -d $NODEMCU_IP -j DROP 2>/dev/null
+    # Tag with a comment so the port-80 watchdog can tell these apart from
+    # vendor-added rules later. Not every embedded iptables build has the
+    # comment match module compiled in, so fall back to untagged rules
+    # rather than let a missing module silently drop the rate-limit
+    # protection entirely.
+    iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m comment --comment "lmehspt_ratelimit" -j DROP 2>/dev/null \
+        || iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -j DROP 2>/dev/null
+    iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null \
+        || iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -j ACCEPT 2>/dev/null
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    # Apply anti-tethering if enabled
+    case "${ANTI_TETHER:-0}" in 1|yes|true) setup_anti_tether ;; esac
+}
+
+# ============================================================
+# PORT 80 WATCHDOG — only does anything while PORTAL_PORT="80"
+# The vendor firmware's own "boa" httpd binds port 80 for the router's
+# stock admin UI, which collides with our BusyBox httpd trying to bind
+# $PORTAL_IP:80, and some vendor init scripts add their own INPUT/
+# FORWARD firewall rules reserving port 80 for it. Both fights are
+# only worth having if the admin has explicitly chosen port 80 for the
+# portal (instead of the default 808) — e.g. for client devices whose
+# captive-portal detection only follows a redirect to plain port 80.
+# ============================================================
+PORT80_LOG="/tmp/portal80_watchdog.log"
+
+ensure_port80_clear() {
+    [ "$PORTAL_PORT" = "80" ] || return 0
+
+    # 1. Kill boa. A vendor process monitor may respawn it, so this is
+    #    meant to be called repeatedly (from the main watchdog loop),
+    #    not just once.
+    if $BB pidof boa >/dev/null 2>&1; then
+        $BB killall boa 2>/dev/null
+        $BB pidof boa >/dev/null 2>&1 && $BB killall -9 boa 2>/dev/null
+        printf '[%s] portal80: killed boa\n' "$($BB date)" >> "$PORT80_LOG"
+    fi
+
+    # 2. Remove any DROP/REJECT rule targeting dport 80 in INPUT/FORWARD
+    #    that isn't our own "lmehspt_ratelimit"-tagged rule. Vendor
+    #    firmware sometimes reserves port 80 for boa at the firewall
+    #    level too, which would silently blackhole the portal even with
+    #    boa's process dead. Skipped entirely on builds whose iptables
+    #    doesn't support -S (rule dump) — nothing to safely act on then.
+    for _chain in INPUT FORWARD; do
+        iptables -S "$_chain" 2>/dev/null | while read -r _rule; do
+            case "$_rule" in
+                *"--dport 80"*"-j DROP"*|*"--dport 80"*"-j REJECT"*)
+                    case "$_rule" in
+                        *"lmehspt_ratelimit"*) continue ;;  # ours — keep
+                    esac
+                    _spec=$(printf '%s' "$_rule" | $BB sed "s/^-A $_chain //")
+                    if iptables -D "$_chain" $_spec 2>/dev/null; then
+                        printf '[%s] portal80: removed blocking rule from %s: %s\n' \
+                            "$($BB date)" "$_chain" "$_rule" >> "$PORT80_LOG"
+                    fi
+                    ;;
+            esac
+        done
+    done
+}
+
+restore_fw_sessions() {
+    [ -f "$SESSION_FILE" ] || return
+    local NOW
+    NOW=$($BB awk '{print int($1)}' /proc/uptime)
+    while read -r mac expiry total; do
+        [ -n "$mac" ] && [ -n "$expiry" ] || continue
+        [ "$expiry" -gt "$NOW" ] || continue
+        iptables -t nat -I HOTSPOT 1 -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+        iptables -t filter -I HOTSPOT_FWD 1 -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+    done < "$SESSION_FILE"
+}
+
+setup_whitelist() {
+    [ -f "$WHITELIST_FILE" ] || return
+    while read -r rawmac; do
+        [ -z "$rawmac" ] && continue
+        case "$rawmac" in \#*) continue ;; esac
+        local mac
+        mac=$(format_mac "$rawmac")
+        iptables -t nat -I HOTSPOT 1 -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+        iptables -t filter -I HOTSPOT_FWD 1 -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+    done < "$WHITELIST_FILE"
+}
+
+ip_to_cid() {
+    local _pfx
+    _pfx=$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$//')
+    printf '%s' "$1" | $BB awk -F. -v p="$_pfx" \
+        'BEGIN{n=split(p,a,".")} (NF==4&&$1==a[1]&&$2==a[2]&&$3==a[3]&&$4+0>=5&&$4+0<=254){print $4+400}'
+}
+save_ip_map() {
+    local mac=$1 ip=$2
+    $BB grep -vi "^$mac " "$IP_MAP_FILE" > /tmp/ip_map.tmp 2>/dev/null
+    echo "$mac $ip" >> /tmp/ip_map.tmp
+    $BB mv /tmp/ip_map.tmp "$IP_MAP_FILE"
+}
+get_ip_for_mac() {
+    local mac=$1 ip
+    ip=$($BB arp -n 2>/dev/null | $BB grep -i "$mac" | $BB awk '{print $1}' | head -1)
+    [ -n "$ip" ] && { echo "$ip"; return; }
+    $BB grep -i "^$mac " "$IP_MAP_FILE" 2>/dev/null | $BB awk '{print $2}' | head -1
+}
+
+add_user_qos() {
+    local mac=$1 ip cid
+    ip=$(get_ip_for_mac "$mac")
+    [ -z "$ip" ] && return
+    cid=$(ip_to_cid "$ip")
+    [ -z "$cid" ] && return
+
+    # Normalise rate strings (handles bare m/k/g and mbps/kbps suffixes)
+    GLOBAL_RATE=$(_norm_rate "$GLOBAL_RATE")
+    PER_USER_RATE=$(_norm_rate "$PER_USER_RATE")
+
+    iptables -t mangle -I FORWARD 1 -i $HOTSPOT_BR -m mac --mac-source "$mac" -j MARK --set-mark $cid 2>/dev/null
+    
+    # Upload (WAN) Leaf QoS
+    # Precise quantum 1500 forces fair packet sharing at the HTB scheduler level
+    tc class add dev $WAN_INT parent 1:1 classid 1:$cid htb rate $PER_USER_RATE ceil $GLOBAL_RATE burst $PER_USER_BURST quantum 1500 2>/dev/null
+    # Compact SFQ limit (24) drops excess packets early, keeping latency low (~57ms max queue delay)
+    tc qdisc add dev $WAN_INT parent 1:$cid handle ${cid}: sfq perturb 10 limit 24 2>/dev/null
+    tc filter add dev $WAN_INT parent 1:0 prio $cid handle $cid fw flowid 1:$cid 2>/dev/null
+    
+    # Download (LAN Bridge) Leaf QoS
+    tc class add dev $HOTSPOT_BR parent 2:1 classid 2:$cid htb rate $PER_USER_RATE ceil $GLOBAL_RATE burst $PER_USER_BURST quantum 1500 2>/dev/null
+    tc qdisc add dev $HOTSPOT_BR parent 2:$cid handle $((cid+500)): sfq perturb 10 limit 24 2>/dev/null
+    tc filter add dev $HOTSPOT_BR protocol ip parent 2:0 prio $cid u32 match ip dst $ip/32 flowid 2:$cid 2>/dev/null
+}
+
+del_user_qos() {
+    local mac=$1 ip cid
+    ip=$(get_ip_for_mac "$mac")
+    [ -z "$ip" ] && ip=$($BB grep -i "^$mac " "$IP_MAP_FILE" 2>/dev/null | $BB awk '{print $2}')
+    [ -z "$ip" ] && return
+    cid=$(ip_to_cid "$ip")
+    [ -z "$cid" ] && return
+    iptables -t mangle -D FORWARD -i $HOTSPOT_BR -m mac --mac-source "$mac" -j MARK --set-mark $cid 2>/dev/null
+    tc filter del dev $WAN_INT parent 1:0 prio $cid 2>/dev/null
+    tc qdisc  del dev $WAN_INT parent 1:$cid 2>/dev/null
+    tc class  del dev $WAN_INT classid 1:$cid 2>/dev/null
+    tc filter del dev $HOTSPOT_BR protocol ip parent 2:0 prio $cid 2>/dev/null
+    tc qdisc  del dev $HOTSPOT_BR parent 2:$cid 2>/dev/null
+    tc class  del dev $HOTSPOT_BR classid 2:$cid 2>/dev/null
+    $BB grep -vi "^$mac " "$IP_MAP_FILE" > /tmp/ip_map_del.tmp 2>/dev/null
+    $BB mv /tmp/ip_map_del.tmp "$IP_MAP_FILE"
+}
+
+restore_qos_sessions() {
+    [ -f "$SESSION_FILE" ] || return
+    local NOW mac expiry total ip cid
+    NOW=$($BB awk '{print int($1)}' /proc/uptime)
+    while read -r mac expiry total; do
+        [ -n "$mac" ] && [ -n "$expiry" ] || continue
+        [ "$expiry" -gt "$NOW" ] || continue
+        ip=$(get_ip_for_mac "$mac")
+        [ -z "$ip" ] && continue
+        cid=$(ip_to_cid "$ip")
+        [ -z "$cid" ] && continue
+        tc class show dev $WAN_INT classid 1:$cid 2>/dev/null | $BB grep -q ":" && continue
+        add_user_qos "$mac"
+    done < "$SESSION_FILE"
+}
+
+start_dhcp() {
+    local _pb
+    _pb=$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$//')
+    $BB touch /tmp/udhcpd.leases
+    $BB cat > /tmp/hotspot_dhcp.conf << EOF
+start           ${_pb}.5
+end             ${_pb}.254
+interface       $HOTSPOT_BR
+option subnet   255.255.255.0
+option router   $PORTAL_IP
+option dns      1.1.1.1
+lease_file      /tmp/udhcpd.leases
+pidfile         /tmp/hotspot_dhcp.pid
+EOF
+    if [ "$COIN_ENABLED" = "1" ] && [ -n "$NODEMCU_MAC" ]; then
+        printf 'static_lease    %s %s\n' "$(format_mac "$NODEMCU_MAC")" "$NODEMCU_IP" >> /tmp/hotspot_dhcp.conf
+    fi
+    $BB udhcpd /tmp/hotspot_dhcp.conf
+}
+
+# ============================================================
+# ANTI-TETHERING (CHOKE CLASS WORKAROUND)
+# Used on limited Realtek kernels where firewall and action modules are stripped.
+# Routes packets with TTL=62 (mobile) or TTL=126 (Windows) to a 1kbps choke class.
+# ============================================================
+
+setup_anti_tether() {
+    local wan_if
+    wan_if=$(resolve_wan_int)
+
+    # 1. Add the Choke Class to the active WAN interface (1kbit is essentially 0 speed)
+    tc class add dev "$wan_if" parent 1:1 classid 1:666 htb rate 1kbit ceil 1kbit burst 1k 2>/dev/null
+
+    # 2. Redirect TTL=62 and TTL=126 to the choke class at high priority (prio 1)
+    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 62 0xff at 8 flowid 1:666 2>/dev/null
+    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 126 0xff at 8 flowid 1:666 2>/dev/null
+}
+
+teardown_anti_tether() {
+    local wan_if
+    wan_if=$(resolve_wan_int)
+
+    # Delete priority 1 filters (clears the TTL matching rules)
+    tc filter del dev "$wan_if" parent 1:0 protocol ip prio 1 2>/dev/null
+
+    # Delete the choke class
+    tc class del dev "$wan_if" classid 1:666 2>/dev/null
+}
+
+setup_qos() {
+    # Normalise rate strings (handles bare m/k/g and mbps/kbps suffixes)
+    GLOBAL_RATE=$(_norm_rate "$GLOBAL_RATE")
+    UNAUTH_RATE=$(_norm_rate "$UNAUTH_RATE")
+
+    tc qdisc del dev $WAN_INT  root 2>/dev/null
+    tc qdisc del dev $HOTSPOT_BR root 2>/dev/null
+    
+    # ------------------------------------------------------------
+    # UPLOAD (WAN) CONFIGURATION
+    # ------------------------------------------------------------
+    # Root HTB with r2q 1 prevents incorrect automatic quantum calculations at low speeds
+    tc qdisc add dev $WAN_INT root handle 1: htb default 99 r2q 1
+    tc class add dev $WAN_INT parent 1:  classid 1:1  htb rate $GLOBAL_RATE  burst 32k
+    
+    # Default unauth class with precise quantum
+    tc class add dev $WAN_INT parent 1:1 classid 1:99 htb rate $UNAUTH_RATE  ceil $GLOBAL_RATE burst 4k quantum 1500
+    # SFQ with a low packet limit (12) to drop early and trigger TCP backoff
+    tc qdisc add dev $WAN_INT parent 1:99 handle 990: sfq perturb 10 limit 12
+    # PCQ Emulation: force unauth upload SFQ to hash strictly by source IP
+    tc filter add dev $WAN_INT parent 990: protocol ip prio 1 flow hash keys src perturb 10 divisor 1024 2>/dev/null
+
+    # ------------------------------------------------------------
+    # DOWNLOAD (LAN Bridge) CONFIGURATION
+    # ------------------------------------------------------------
+    tc qdisc add dev $HOTSPOT_BR root handle 2: htb default 99 r2q 1
+    tc class add dev $HOTSPOT_BR parent 2:  classid 2:1  htb rate $GLOBAL_RATE  burst 32k
+    
+    # Default unauth class with precise quantum
+    tc class add dev $HOTSPOT_BR parent 2:1 classid 2:99 htb rate $UNAUTH_RATE  ceil $GLOBAL_RATE burst 4k quantum 1500
+    # SFQ with low packet limit (12)
+    tc qdisc add dev $HOTSPOT_BR parent 2:99 handle 299: sfq perturb 10 limit 12
+    # PCQ Emulation: force unauth download SFQ to hash strictly by destination IP
+    tc filter add dev $HOTSPOT_BR parent 299: protocol ip prio 1 flow hash keys dst perturb 10 divisor 1024 2>/dev/null
+
+    # Apply anti-tethering filters after QoS resets
+    case "${ANTI_TETHER:-0}" in 1|yes|true) setup_anti_tether ;; esac
+}
+# ============================================================
+# SESSION MANAGEMENT (3-COLUMN AWARE)
+# ============================================================
+
+pause_session() {
+    local mac=$1 expiry=$2 now=$3 total=$4 reason=${5:-Automatically}
+    local remaining=$(( expiry - now ))
+    [ "$remaining" -le 0 ] && return
+    [ -z "$total" ] && total=$remaining
+
+    iptables -t nat -D HOTSPOT -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+    iptables -t filter -D HOTSPOT_FWD -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+
+    _lock
+    $BB grep -v "^$mac " "$SESSION_FILE" > "${SESSION_FILE}.tmp" 2>/dev/null
+    $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
+    
+    $BB grep -v "^$mac " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
+    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    echo "$mac paused $remaining $total $(_fmt_secs "$remaining")" >> "$USERS_FILE"
+    _unlock
+
+    $BB grep -v "^$mac " "$ACTIVITY_FILE" > /tmp/activity_pause.tmp 2>/dev/null
+    $BB mv /tmp/activity_pause.tmp "$ACTIVITY_FILE"
+
+    # Fire the "session paused" alert. Fire-and-forget (same pattern as the
+    # expiry alert) so the watchdog never blocks on a network call. The
+    # session_paused event key lets the admin mute just this alert from the
+    # www2 UI. reason defaults to "Automatically" (inactivity timeout).
+    _P_ACTIVE=$($BB grep -c '.' "$SESSION_FILE" 2>/dev/null)
+    [ -n "$_P_ACTIVE" ] || _P_ACTIVE=0
+    _P_MSG=$(tpl_render "$TPL_SESSION_PAUSED" \
+        reason "$reason" \
+        remainingtime "$(_fmt_secs "$remaining")" \
+        totaltime "$(_fmt_secs "$total")" \
+        mac "$mac" \
+        activeusrcount "${_P_ACTIVE:-0}")
+    ( /lmepisowifi/hotspot/notify.sh "$_P_MSG" "" session_paused "$mac" >/dev/null 2>&1 </dev/null & )
+}
+
+check_inactivity() {
+    [ -z "$INACTIVITY_TIMEOUT" ] && return
+    [ "$INACTIVITY_TIMEOUT" -le 0 ] 2>/dev/null && return
+    [ -f "$SESSION_FILE" ] || return
+
+    local NOW mac expiry total pkts record last_pkts last_active inactive_for
+    local TO_PAUSE entry FWD_DUMP
+    NOW=$($BB awk '{print int($1)}' /proc/uptime)
+    FWD_DUMP=$(iptables -t filter -L HOTSPOT_FWD -v -n 2>/dev/null)
+    TO_PAUSE=""
+
+    _lock
+    while read -r mac expiry total; do
+        [ -n "$mac" ] && [ -n "$expiry" ] || continue
+        [ "$expiry" -gt "$NOW" ] || continue
+        is_whitelisted "$mac" && continue
+
+        pkts=$(printf '%s' "$FWD_DUMP" | $BB grep -i "MAC $mac" | $BB awk 'NR==1{print $1+0}')
+        [ -z "$pkts" ] && continue
+
+        record=$($BB grep "^$mac " "$ACTIVITY_FILE" 2>/dev/null)
+        last_pkts=$(printf '%s' "$record" | $BB awk '{print $2}')
+        last_active=$(printf '%s' "$record" | $BB awk '{print $3}')
+
+        if [ -n "$last_pkts" ] && [ "$pkts" = "$last_pkts" ]; then
+            last_active=${last_active:-$NOW}
+            inactive_for=$(( NOW - last_active ))
+            if [ "$inactive_for" -ge "$INACTIVITY_TIMEOUT" ]; then
+                [ -z "$total" ] && total=$(( expiry - NOW ))
+                TO_PAUSE="$TO_PAUSE ${mac}|${expiry}|${total}"
+            fi
+        else
+            (
+                $BB grep -v "^$mac " "$ACTIVITY_FILE" 2>/dev/null
+                echo "$mac $pkts $NOW"
+            ) > /tmp/activity_upd.tmp
+            $BB mv /tmp/activity_upd.tmp "$ACTIVITY_FILE"
+        fi
+    done < "$SESSION_FILE"
+    _unlock
+
+    for entry in $TO_PAUSE; do
+        mac=$(printf '%s' "$entry"   | $BB awk -F'|' '{print $1}')
+        expiry=$(printf '%s' "$entry" | $BB awk -F'|' '{print $2}')
+        total=$(printf '%s' "$entry" | $BB awk -F'|' '{print $3}')
+        pause_session "$mac" "$expiry" "$NOW" "$total"
+    done
+}
+
+write_coin_config() {
+    mkdir -p /tmp/coin_sessions
+    rm -f /tmp/coin_sessions/*.result /tmp/coin_sessions/* /tmp/coin_lock /tmp/coin_strikes.txt /tmp/coin_queue.txt 2>/dev/null
+    # Always write coin_config.env regardless of COIN_ENABLED so hotspot.cgi
+    # can read and update all vars at runtime without restarting the script.
+    {
+        printf 'NODEMCU_IP="%s"\n'          "$NODEMCU_IP"
+        printf 'NODEMCU_MAC="%s"\n'         "$NODEMCU_MAC"
+        printf 'NODEMCU_PORT="%s"\n'        "$NODEMCU_PORT"
+        printf 'COIN_PSK="%s"\n'            "$COIN_PSK"
+        printf 'COIN_TIMEOUT="%s"\n'        "$COIN_TIMEOUT"
+        printf 'COIN_RATES="%s"\n'          "$COIN_RATES"
+        printf 'COIN_STRIKE_THRESHOLD="%s"\n' "$COIN_STRIKE_THRESHOLD"
+        printf 'COIN_COOLDOWN="%s"\n'       "$COIN_COOLDOWN"
+        printf 'COIN_ENABLED="%s"\n'        "$COIN_ENABLED"
+        printf 'HOTSPOT_BR="%s"\n'          "$HOTSPOT_BR"
+        printf 'SESSION_FILE="%s"\n'        "$SESSION_FILE"
+        printf 'PAUSED_FILE="%s"\n'         "$PAUSED_FILE"
+        printf 'BB="%s"\n'                  "$BB"
+        # QoS vars — also written so hotspot.cgi can update them live
+        printf 'GLOBAL_RATE="%s"\n'         "$GLOBAL_RATE"
+        printf 'PER_USER_RATE="%s"\n'       "$PER_USER_RATE"
+        printf 'PER_USER_BURST="%s"\n'      "$PER_USER_BURST"
+        printf 'UNAUTH_RATE="%s"\n'         "$UNAUTH_RATE"
+        printf 'INACTIVITY_TIMEOUT="%s"\n'  "$INACTIVITY_TIMEOUT"
+        printf 'PORTAL_IP="%s"\n'           "$PORTAL_IP"
+        printf 'PORTAL_PORT="%s"\n'         "$PORTAL_PORT"
+        printf 'ANTI_TETHER="%s"\n'         "${ANTI_TETHER:-0}"
+    } > /tmp/coin_config.env
+    if [ "$COIN_ENABLED" = "1" ]; then
+        touch /tmp/coin_enabled
+    else
+        rm -f /tmp/coin_enabled
+    fi
+}
+
+# ============================================================
+# redirect.sh (captive-portal 302 CGI) — SINGLE source of truth
+# ------------------------------------------------------------
+# Previously this file was generated in TWO places (initial startup and
+# apply_portal_ip_change), which meant any hand-edited redirect.sh was
+# clobbered on every boot / IP change. This helper is the only generator.
+#
+# The emitted script resolves the portal IP DYNAMICALLY at request time and,
+# critically, NEVER produces an empty host: an empty Location host makes the
+# browser re-request the same URL, causing ERR_TOO_MANY_REDIRECTS. The current
+# PORTAL_IP/PORTAL_PORT/WWW2_PORT are baked in as the guaranteed last-resort
+# fallback so the target is always a reachable portal address.
+# ============================================================
+write_redirect_cgi() {
+    $BB mkdir -p /lmepisowifi/hotspot/cgi-bin
+    # NB: unquoted heredoc — ${PORTAL_IP}/${PORTAL_PORT}/${WWW2_PORT} expand NOW
+    # (baked defaults); every runtime CGI var is escaped as \$VAR.
+    cat > /lmepisowifi/hotspot/cgi-bin/redirect.sh <<EOF
+#!/bin/sh
+# 404 handler + captive-portal redirector (dynamic IP, host-agnostic).
+BB="busybox"
+[ -f /tmp/coin_config.env ] && . /tmp/coin_config.env
+
+# 1. patched httpd exports the local socket addr the client actually hit
+_srv_ip="\$SERVER_ADDR"
+_srv_port="\$SERVER_PORT"
+
+# 2. fallback: ask the kernel which local IP faces this client
+if [ -z "\$_srv_ip" ] && [ -n "\$REMOTE_ADDR" ]; then
+    _srv_ip=\$(ip -4 route get "\$REMOTE_ADDR" 2>/dev/null \\
+        | \$BB awk '{for(i=1;i<=NF;i++) if(\$i=="src"){print \$(i+1); exit}}')
+fi
+
+# 3. config override, then the baked-in portal IP
+[ -z "\$_srv_ip" ] && _srv_ip="\${PORTAL_IP:-${PORTAL_IP}}"
+
+# 4. HARD guarantee: never allow an empty host (empty host => redirect loop)
+_srv_ip="\${_srv_ip:-${PORTAL_IP}}"
+_srv_port="\${_srv_port:-\${PORTAL_PORT:-${PORTAL_PORT}}}"
+
+case "\${REQUEST_URI%%\\?*}" in
+    /admin|/admin/|/admin/*)
+        _loc="http://\${_srv_ip}:${WWW2_PORT}/"
+        ;;
+    *)
+        _cb="\$(\$BB date +%s)"
+        _loc="http://\${_srv_ip}:\${_srv_port}/index.html?v=\${_cb}"
+        ;;
+esac
+
+echo "Status: 302 Found"
+echo "Location: \${_loc}"
+echo "Content-Type: text/html"
+echo "Cache-Control: no-cache, no-store"
+echo "Pragma: no-cache"
+echo "Connection: close"
+echo ""
+echo "<!DOCTYPE html><html><head>"
+echo "<meta http-equiv=\\"refresh\\" content=\\"0;url=\${_loc}\\">"
+echo "</head><body>"
+echo "Redirecting to <a href=\\"\${_loc}\\">\${_loc}</a>..."
+echo "</body></html>"
+EOF
+    $BB chmod +x /lmepisowifi/hotspot/cgi-bin/redirect.sh 2>/dev/null
+}
+
+# ============================================================
+# PORTAL IP CHANGE — live apply without hotspot restart
+# Called by the watchdog when /tmp/hotspot_portal_ip_reload appears.
+# Rebuilds the bridge IP, firewall, DHCP, httpd, and redirect.sh
+# to match the new PORTAL_IP (and optionally PORTAL_PORT).
+# ============================================================
+apply_portal_ip_change() {
+    local new_ip="$1" new_port="${2:-$PORTAL_PORT}"
+    # old_ip/old_port are passed explicitly by the caller (3rd/4th args) when
+    # available. Do NOT fall back to reading $PORTAL_IP/$PORTAL_PORT here as
+    # the "current" value — the watchdog loop re-sources /tmp/coin_config.env
+    # every tick (which hotspot.cgi's save_coin_env_var already updated to
+    # the NEW port before this function runs), so by the time we get here
+    # those globals may already equal new_ip/new_port. Trusting them for
+    # "old" would make the old-httpd kill below a no-op and leak a stray
+    # busybox httpd bound to the previous port forever.
+    local old_ip="${3:-$PORTAL_IP}" old_port="${4:-$PORTAL_PORT}"
+    local old_subnet new_subnet _pb
+
+    old_subnet=$(cat /tmp/hotspot_subnet.mark 2>/dev/null)
+    [ -z "$old_subnet" ] && old_subnet=$(printf '%s' "$old_ip" | $BB sed 's/\.[^.]*$/.0\/24/')
+    new_subnet=$(printf '%s' "$new_ip" | $BB sed 's/\.[^.]*$/.0\/24/')
+
+    # 1. Update in-memory variables (watchdog will use them immediately)
+    PORTAL_IP="$new_ip"
+    PORTAL_PORT="$new_port"
+
+    # 2. Reconfigure the bridge interface to the new gateway IP
+    ifconfig "$HOTSPOT_BR" "$PORTAL_IP" netmask 255.255.255.0 up 2>/dev/null
+
+    # 3. Tear down old firewall INPUT rate-limit rules (port-specific)
+    iptables -t filter -D INPUT -p tcp --dport "$old_port" \
+        -m state --state NEW -m comment --comment "lmehspt_ratelimit" -j DROP 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport "$old_port" \
+        -m state --state NEW -j DROP 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport "$old_port" \
+        -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null
+    iptables -t filter -D INPUT -p tcp --dport "$old_port" \
+        -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -j ACCEPT 2>/dev/null
+
+    # 4. Tear down old NAT chains (flush + delete so setup_firewall can recreate)
+    iptables -t nat -D PREROUTING -i "$HOTSPOT_BR" -j HOTSPOT 2>/dev/null
+    iptables -t nat -F HOTSPOT 2>/dev/null
+    iptables -t nat -X HOTSPOT 2>/dev/null
+    iptables -t nat -D POSTROUTING -s "$old_subnet" -j MASQUERADE 2>/dev/null
+
+    # 5. Tear down old filter chain
+    iptables -t filter -D FORWARD -i "$HOTSPOT_BR" -j HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -F HOTSPOT_FWD 2>/dev/null
+    iptables -t filter -X HOTSPOT_FWD 2>/dev/null
+
+    # 6. Rebuild firewall for new IP/port (writes new subnet marker)
+    setup_firewall
+    restore_fw_sessions
+    setup_whitelist
+
+    # 7. Restart DHCP with new pool.
+    #    Only wipe the lease file when the pool itself changed (new_subnet
+    #    != old_subnet). A port-only change -- or any change that leaves
+    #    the /24 the same -- means every lease already in that file is
+    #    still valid; deleting it would forget currently-connected clients
+    #    and let the fresh udhcpd hand their in-use IP to someone else.
+    [ -f /tmp/hotspot_dhcp.pid ] && { kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null; rm -f /tmp/hotspot_dhcp.pid; }
+    for _pid in $($BB ps | $BB grep "hotspot_dhcp.conf" | $BB grep -v grep | $BB awk '{print $1}'); do
+        kill -9 "$_pid" 2>/dev/null
+    done
+    [ "$new_subnet" != "$old_subnet" ] && rm -f /tmp/udhcpd.leases
+    start_dhcp
+
+    # 8. Restart captive-portal httpd on new IP:port
+    # Match on the hotspot's httpd.conf rather than just "$old_ip:$old_port" —
+    # that string can be stale (see comment above old_ip/old_port) and would
+    # silently fail to match, leaving the previous instance running forever.
+    # Killing every hotspot-portal httpd NOT bound to the new address is
+    # self-healing: it also mops up any stray instance left behind by a
+    # prior occurrence of that bug, without needing a reboot.
+    for _pid in $($BB ps | $BB grep httpd | $BB grep -v grep | $BB grep -F "hotspot/httpd.conf" | $BB grep -v -F "$PORTAL_IP:$PORTAL_PORT" | $BB awk '{print $1}'); do
+        kill -9 "$_pid" 2>/dev/null
+    done
+    ensure_port80_clear
+    $BB httpd -p "$PORTAL_IP:$PORTAL_PORT" -h /lmepisowifi/hotspot \
+        -c /lmepisowifi/hotspot/httpd.conf 2>/dev/null
+    $BB chmod +x /lmepisowifi/hotspot/cgi-bin/*.sh 2>/dev/null
+
+    # 9. Regenerate redirect.sh with the new portal URL (single source of truth)
+    write_redirect_cgi
+
+    # 10. Refresh coin_config.env so coin.sh and detect.sh pick up new IP
+    write_coin_config
+}
+
+
+# Runs busybox ntpd as a CLIENT daemon. Its -S handler maintains
+# /tmp/ntp_synced so income.sh can tell when the clock is genuinely
+# synchronized before trusting the date for period resets.
+# Client mode routes out the WAN default route (br0) automatically — we
+# deliberately do NOT pass -I (that would turn ntpd into a SERVER bound
+# to the interface and listen on UDP/123).
+# ============================================================
+start_ntp() {
+    # NTP must only run while the hotspot is enabled. The watchdog that calls
+    # this only exists when HOTSPOT_ENABLED=1, but re-check here so a runtime
+    # toggle to 0 (written into coin_config.env and re-sourced each tick) stops
+    # us from reviving ntpd for a disabled hotspot.
+    [ "${HOTSPOT_ENABLED:-1}" = "1" ] || return 0
+
+    # Ensure DNS resolution is healthy before starting or checking ntpd
+    check_and_fix_dns
+
+    # Don't spawn a second instance (avoids two daemons fighting over the clock).
+    # We use ps | grep here because BusyBox pidof fails to find ntpd when run via the multicall binary.
+    $BB ps w | $BB grep "ntpd -S" | $BB grep -v grep >/dev/null 2>&1 && return 0
+    [ -x "$NTP_EVENT" ] || $BB chmod +x "$NTP_EVENT" 2>/dev/null
+    NTP_PEERS=""
+    for s in $NTP_SERVERS; do NTP_PEERS="$NTP_PEERS -p $s"; done
+    [ -n "$NTP_PEERS" ] || return 0
+
+    # NOTE: we deliberately do NOT pass -N. On this RTL9607C busybox build the
+    # high-priority -N flag needs CAP_SYS_NICE; without it ntpd aborts at launch
+    # and no daemon is left running (the reported `ps | grep ntp` showed none).
+    # No -n  -> ntpd daemonizes itself; no -I -> client mode (routes out the WAN
+    # default route, never binds UDP/123 as a server). -S handler maintains the
+    # /tmp/ntp_synced marker income.sh relies on. We still background + disown
+    # the call and confirm a pid appeared, retrying once, so a transient failure
+    # to fork doesn't silently leave income resets paused forever.
+    _try=0
+    while [ "$_try" -lt 2 ]; do
+        ( $BB ntpd -S "$NTP_EVENT" $NTP_PEERS >/dev/null 2>&1 & )
+        $BB sleep 1
+        $BB ps w | $BB grep "ntpd -S" | $BB grep -v grep >/dev/null 2>&1 && return 0
+        _try=$(( _try + 1 ))
+    done
+    return 1
+}
+
+# Guard: if the admin UI stopped the hotspot, exit without starting.
+# Default is "1" (missing var → start normally) so the very first run,
+# before the admin page has ever saved anything, still works.
+if [ "${HOTSPOT_ENABLED:-1}" != "1" ] && [ "$1" != "--force" ] && [ -z "$LMEHSPT_LIB_ONLY" ]; then
+    exit 0
+fi
+
+if [ -z "$LMEHSPT_LIB_ONLY" ]; then
+wait_for_wlan_ready
+cleanup_old_hotspot
+
+
+if [ ! -f "$BOOT_MARKER" ]; then
+    touch "$SESSION_FILE" 2>/dev/null
+    _lock
+    sync_to_persistent_db
+    _unlock
+    touch "$BOOT_MARKER"
+fi
+
+(
+    cd /lmepisowifi/hotspot
+
+    # OS captive-portal probe paths must be served by busybox httpd.
+    # BusyBox httpd only executes CGI when the URL path starts with /cgi-bin/
+    # or matches a file-extension interpreter mapping in httpd.conf.
+    # Probe paths like /generate_204, /ncsi.txt, /hotspot-detect.html have
+    # fixed names dictated by each OS — we cannot make busybox execute them
+    # as CGI.  Symlinks to index.html are the correct approach: unauthenticated
+    # probe requests hit the captive portal page (which causes the OS popup);
+    # authenticated MACs have an iptables nat RETURN rule that bypasses DNAT
+    # entirely, so their probes go directly to the real internet and get the
+    # correct 204/Success response there.  detect.sh remains in cgi-bin/ and
+    # is callable directly at /cgi-bin/detect.sh if ever needed.
+
+    # Create the 302 redirect CGI script (single source of truth). This is the
+    # magic that reliably triggers the "Sign in to network" prompt for any
+    # arbitrary OS probe path by returning a standard HTTP 302 Found status code.
+    write_redirect_cgi
+    $BB chmod +x cgi-bin/detect.sh 2>/dev/null
+
+    # Create httpd.conf.
+    #
+    # Primary path (custom "404to302" directive, added via our httpd.c patch):
+    # for ANY unknown/not-found URL the patched httpd emits a real "302 Found"
+    # with "Location: /cgi-bin/redirect.sh" directly from send_headers(), before
+    # it would ever try to serve an error-page body. The browser then makes an
+    # ordinary (non-error) GET to /cgi-bin/redirect.sh, which BusyBox executes as
+    # CGI and which resolves the real portal IP (SERVER_ADDR) and answers with the
+    # final 302 to the splash page. A relative "/cgi-bin/redirect.sh" is used on
+    # purpose so nothing here is tied to PORTAL_IP/port (no regeneration on IP
+    # change); redirect.sh itself supplies the absolute, host-correct target.
+    #
+    # Fallback path (E404): on an UNPATCHED busybox build the 404to302 line is an
+    # unknown directive and is simply ignored, so E404 still serves the tiny
+    # static redirect.html (whose meta-refresh/JS hits the same CGI). E404 must
+    # point at a static file, not a CGI, because an unpatched build would serve a
+    # CGI error target as raw source. On a patched build E404 stays dormant
+    # because the 404 is turned into a 302 before any error page is considered.
+cat > httpd.conf <<'EOF'
+404to302:cgi-bin/redirect.sh
+EOF
+
+
+    # Static E404 target referenced above. Kept host-agnostic (relative URL,
+    # no embedded PORTAL_IP/port) so it never needs regenerating on a live
+    # portal IP/port change (see apply_portal_ip_change). The meta-refresh +
+    # JS both fire an ordinary (non-error) GET to /cgi-bin/redirect.sh, which
+    # BusyBox executes as CGI and answers with the real 302 Found.
+
+    # /admin -> www2 admin UI. Served as a real static page (not a 404), so it
+
+    # /admin -> www2 admin UI. Served as a real static page (not a 404), so it
+    # works even on busybox builds that don't run the E404 CGI. The target host
+    # is resolved client-side from the address the visitor actually used
+    # (location.hostname), so the portal IP is never hardcoded here; only the
+    # www2 port (${WWW2_PORT}) is baked in. A meta-refresh + link fallback (using
+    # the configured PORTAL_IP) covers the rare no-JavaScript case.
+    $BB mkdir -p admin
+    cat > admin/index.html <<EOF
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin</title>
+<script>
+(function(){
+  var h = location.hostname || "${PORTAL_IP}";
+  location.replace(location.protocol + "//" + h + ":${WWW2_PORT}/");
+})();
+</script>
+<meta http-equiv="refresh" content="1;url=http://${PORTAL_IP}:${WWW2_PORT}/">
+</head>
+<body style="font-family:sans-serif;text-align:center;margin-top:3em">
+Redirecting to the admin dashboard&hellip;
+<p><a id="l" href="http://${PORTAL_IP}:${WWW2_PORT}/">Continue</a></p>
+<script>
+(function(){
+  var h = location.hostname || "${PORTAL_IP}";
+  document.getElementById("l").href = location.protocol + "//" + h + ":${WWW2_PORT}/";
+})();
+</script>
+</body>
+</html>
+EOF
+)
+
+setup_network
+setup_firewall
+restore_fw_sessions
+setup_whitelist
+start_dhcp
+WAN_INT=$(resolve_wan_int)
+setup_qos
+write_coin_config
+check_and_fix_dns
+start_ntp
+
+if ! $BB ps | $BB grep "httpd" | $BB grep -v grep | $BB grep -q -F "$PORTAL_IP:$PORTAL_PORT"; then
+    ensure_port80_clear
+    $BB httpd -p $PORTAL_IP:$PORTAL_PORT -h /lmepisowifi/hotspot -c /lmepisowifi/hotspot/httpd.conf
+    $BB chmod +x /lmepisowifi/hotspot/cgi-bin/*.sh
+fi
+
+( 
+    LAST_SNAPSHOT=0
+    LAST_QOS_SYNC=0
+    LAST_INCOME=0
+    LAST_PORT80_SCAN=0
+    while true; do
+        # Re-source the runtime config every tick so config_set / qos_apply
+        # changes take effect without a hotspot restart.
+        # INACTIVITY_TIMEOUT is read by check_inactivity() each call.
+        # Rate vars (GLOBAL_RATE etc.) are used by setup_qos on the next
+        # self-heal trigger, which fires within 1s of the root qdisc being removed.
+        [ -f /tmp/coin_config.env ] && . /tmp/coin_config.env
+
+        # QoS reload requested by hotspot.cgi (qos_apply action).
+        # This is safer than letting the CGI delete qdiscs directly because
+        # the watchdog knows the correct WAN_INT (may differ from br0 if
+        # the repurpose-as-WAN feature is active).
+        if [ -f /tmp/hotspot_qos_reload ]; then
+            rm -f /tmp/hotspot_qos_reload
+            setup_qos
+            restore_qos_sessions
+        fi
+
+        # Portal IP/port change requested by hotspot.cgi (ifaces_set action).
+        # apply_portal_ip_change() rebuilds bridge IP, firewall, DHCP, httpd,
+        # and redirect.sh atomically without requiring a full hotspot restart.
+        if [ -f /tmp/hotspot_portal_ip_reload ]; then
+            rm -f /tmp/hotspot_portal_ip_reload
+            _new_pip=$(cat /tmp/hotspot_portal_ip_new 2>/dev/null)
+            _new_ppt=$(cat /tmp/hotspot_portal_port_new 2>/dev/null)
+            _old_pip=$(cat /tmp/hotspot_portal_ip_old 2>/dev/null)
+            _old_ppt=$(cat /tmp/hotspot_portal_port_old 2>/dev/null)
+            rm -f /tmp/hotspot_portal_ip_new /tmp/hotspot_portal_port_new \
+                  /tmp/hotspot_portal_ip_old /tmp/hotspot_portal_port_old
+            [ -n "$_new_pip" ] && apply_portal_ip_change "$_new_pip" "${_new_ppt:-$PORTAL_PORT}" "$_old_pip" "$_old_ppt"
+        fi
+
+        # Anti-tether hot-toggle: if ANTI_TETHER changed since last tick, apply.
+        _at_want="${ANTI_TETHER:-0}"
+        if [ "${_at_last:-}" != "$_at_want" ]; then
+            _at_last="$_at_want"
+            teardown_anti_tether 2>/dev/null
+            case "$_at_want" in 1|yes|true) setup_anti_tether ;; esac
+        fi
+
+        # Re-evaluate upstream interface (repurpose may have been toggled)
+        _new_wan=$(resolve_wan_int)
+        if [ "$_new_wan" != "$WAN_INT" ]; then
+            tc qdisc del dev "$WAN_INT" root 2>/dev/null
+            WAN_INT="$_new_wan"
+            setup_qos
+            restore_qos_sessions
+        fi
+
+        # Normalise rate variables (handles bare m/k/g and mbps/kbps suffixes)
+        GLOBAL_RATE=$(_norm_rate "$GLOBAL_RATE")
+        PER_USER_RATE=$(_norm_rate "$PER_USER_RATE")
+        UNAUTH_RATE=$(_norm_rate "$UNAUTH_RATE")
+
+        need_setup=0
+        for iface in $HOTSPOT_INTERFACES; do
+            iface_in_bridge "$iface" || need_setup=1
+        done
+        # Reverse check: an interface still enslaved in HOTSPOT_BR that was
+        # removed from HOTSPOT_INTERFACES (unbound). The loop above only
+        # ever catches interfaces missing FROM the bridge, so a pure removal
+        # would otherwise never trigger setup_network at all.
+        for ifpath in /sys/class/net/"$HOTSPOT_BR"/brif/*; do
+            [ -e "$ifpath" ] || continue
+            bm=$($BB basename "$ifpath")
+            case " $HOTSPOT_INTERFACES " in
+                *" $bm "*) ;;
+                *) need_setup=1 ;;
+            esac
+        done
+        [ "$need_setup" = "1" ] && setup_network
+
+        if ! iptables -t nat -L HOTSPOT -n >/dev/null 2>&1 || ! iptables -t filter -L HOTSPOT_FWD -n >/dev/null 2>&1; then
+            setup_firewall
+            restore_fw_sessions
+            setup_whitelist
+        fi
+
+        if ! $BB ps | $BB grep -v grep | $BB grep -q "hotspot_dhcp.conf"; then start_dhcp; fi
+        if ! tc qdisc show dev $WAN_INT 2>/dev/null | $BB grep -q "sfq\|htb"; then
+            setup_qos
+            restore_qos_sessions   # immediately re-add per-user classes so active
+                                   # sessions aren't stuck in the unauth bucket
+        fi
+
+        if [ -f "$SESSION_FILE" ]; then
+            NOW=$($BB awk '{print int($1)}' /proc/uptime)
+            _SES_TMP="${SESSION_FILE}.tmp"
+            > "$_SES_TMP"
+            
+            _lock
+            while read -r mac expiry total; do
+                if [ -n "$mac" ] && [ -n "$expiry" ]; then
+                    if [ "$NOW" -gt "$expiry" ]; then
+                        iptables -t nat -D HOTSPOT -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+                        iptables -t filter -D HOTSPOT_FWD -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+                        $BB grep -v "^$mac " "$ACTIVITY_FILE" > /tmp/activity_exp.tmp 2>/dev/null
+                        $BB mv /tmp/activity_exp.tmp "$ACTIVITY_FILE" 2>/dev/null
+                        del_user_qos "$mac"
+                        
+                        $BB grep -v "^$mac " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
+                        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+                        
+                        _exp_active=$($BB grep -c '.' "$SESSION_FILE" 2>/dev/null)
+                        [ -n "$_exp_active" ] || _exp_active=0
+                        _exp_msg=$(tpl_render "$TPL_SESSION_EXPIRED" \
+                            mac "$mac" \
+                            activeusrcount "$_exp_active")
+                        ( /lmepisowifi/hotspot/notify.sh "$_exp_msg" "" session_expired >/dev/null 2>&1 </dev/null & )
+                    else
+                        [ -z "$total" ] && total=$(( expiry - NOW ))
+                        echo "$mac $expiry $total" >> "$_SES_TMP"
+                    fi
+                fi
+            done < "$SESSION_FILE"
+            $BB mv "$_SES_TMP" "$SESSION_FILE"
+            _unlock
+        fi
+
+        check_inactivity
+
+        NOW=$($BB awk '{print int($1)}' /proc/uptime)
+        if [ $((NOW - LAST_SNAPSHOT)) -ge 300 ]; then
+            _lock
+            sync_to_persistent_db
+            _unlock
+            LAST_SNAPSHOT=$NOW
+        fi
+
+        if [ $((NOW - LAST_QOS_SYNC)) -ge 30 ]; then
+            _lock
+            restore_qos_sessions
+            _unlock
+            LAST_QOS_SYNC=$NOW
+        fi
+
+        # Every 60s, keep the NTP client alive and poke income.sh so the
+        # daily/monthly/yearly buckets roll over (and rollover reports fire)
+        # at the period boundary even with no coin activity. income.sh only
+        # writes flash when something changes, and only resets once NTP has
+        # genuinely synced the clock.
+        if [ $((NOW - LAST_INCOME)) -ge 60 ]; then
+            start_ntp
+            /lmepisowifi/hotspot/income.sh get >/dev/null 2>&1
+            # Drain queued notifications now that we have a periodic internet check
+            ( /lmepisowifi/hotspot/notify.sh --drain >/dev/null 2>&1 </dev/null & )
+            LAST_INCOME=$NOW
+        fi
+
+        # Port 80 watchdog — only relevant while PORTAL_PORT="80". Throttled
+        # like the other periodic maintenance above since it's a safety net
+        # (the real-time triggers are the explicit calls at hotspot startup
+        # and on a live portal-port change); boa respawning mid-session is
+        # an edge case, not something that needs sub-second reaction time.
+        if [ "$PORTAL_PORT" = "80" ] && [ $((NOW - LAST_PORT80_SCAN)) -ge 10 ]; then
+            ensure_port80_clear
+            LAST_PORT80_SCAN=$NOW
+        fi
+
+        # Default route watchdog: if vendor firmware (nas*, etc.) steals the
+        # default route, restore it so hotspot clients keep internet access.
+        _ww=$(resolve_wan_int)
+        if [ "$_ww" != "$WAN_INT_DEFAULT" ]; then
+            # Repurpose mode: use the gateway learned by udhcpc
+            _ww_gw_f="/tmp/repurpose_gw_${_ww}"
+            [ -f "$_ww_gw_f" ] && _ww_gw=$($BB tr -d '\r\n' < "$_ww_gw_f" 2>/dev/null)
+        else
+            _ww_gw="$(resolve_br0_gateway)"
+        fi
+        if [ -n "$_ww_gw" ]; then
+            _cur_def=$(ip route show default 2>/dev/null | head -1)
+            case "$_cur_def" in
+                *"dev $_ww"*) ;; # correct interface — leave it alone
+                *)
+                    ip route del default 2>/dev/null
+                    ip route add default via "$_ww_gw" dev "$_ww" 2>/dev/null
+                    ;;
+            esac
+        fi
+
+        $BB sleep 1
+    done
+) &
+echo $! > /tmp/hotspot_watchdog.pid
+fi # end LMEHSPT_LIB_ONLY guard — nothing below this line runs in --lib moded

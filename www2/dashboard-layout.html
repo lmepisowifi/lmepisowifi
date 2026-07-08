@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .layout-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-surface);
+            margin-bottom: 8px;
+            cursor: default;
+            user-select: none;
+        }
+        .layout-item.hidden-card { opacity: .45; }
+        .layout-drag { color: var(--text-secondary); font-size: 16px; cursor: grab; flex-shrink: 0; }
+        .layout-drag:active { cursor: grabbing; }
+        .layout-label { flex: 1; font-size: 14px; color: var(--text-primary); }
+        .layout-vis-toggle {
+            width: 42px; height: 24px; border-radius: 12px;
+            background: #555; position: relative; cursor: pointer;
+            transition: background .2s; flex-shrink: 0;
+        }
+        .layout-vis-toggle.on { background: #fff; }
+        .layout-vis-knob {
+            position: absolute; width: 16px; height: 16px;
+            border-radius: 50%; background: #fff;
+            top: 4px; left: 4px;
+            transition: left .2s, background .2s;
+            box-shadow: 0 1px 3px rgba(0,0,0,.4);
+        }
+        .layout-vis-toggle.on .layout-vis-knob { left: 22px; background: #555; }
+        .move-btn {
+            background: none; border: 1px solid var(--border-color);
+            color: var(--text-secondary); border-radius: 4px;
+            width: 26px; height: 26px; font-size: 13px;
+            cursor: pointer; line-height: 1; padding: 0; flex-shrink: 0;
+        }
+        .move-btn:hover { border-color: #888; color: var(--text-primary); }
+        .move-btn:disabled { opacity: .25; cursor: default; }
+        .preview-hint { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+    </style>
+</head>
+<body>
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:560px;">
+    <div class="card">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Dashboard Card Layout</span>
+            <button class="btn btn-sm btn-outline-secondary" onclick="resetLayout()">Reset to Default</button>
+        </div>
+        <div class="card-body">
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px;">
+                Drag or use ▲ ▼ to reorder. Toggle the switch to show or hide a card on the home dashboard.
+                Changes are saved automatically and take effect immediately on the home page.
+            </p>
+            <div id="layout-list"></div>
+            <div class="preview-hint mt-3">
+                <a href="/index.html" class="text-decoration-none" style="font-size:12px;">← Back to dashboard</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = {positionClass:'toast-bottom-right',timeOut:2000,progressBar:true,closeButton:false};
+
+var CARD_LABELS = {
+    system:  'System',
+    network: 'Network',
+    lan:     'LAN Ports',
+    pon:     'PON Transceiver',
+    wan:     'WAN Profiles',
+    hotspot: 'Hotspot Statistics'
+};
+var DEFAULT_ORDER = ['system','network','lan','pon','wan','hotspot'];
+
+// ── In-memory layout + server persistence ─────────────────────────────────────
+// _layout is populated once from the server on load; all mutations update it
+// in place and fire a background save.  This avoids per-keystroke round-trips
+// while keeping the persisted file current.
+var _layout = null;
+
+function _defaultLayout() {
+    return DEFAULT_ORDER.map(function(id){ return {id:id, visible:true}; });
+}
+
+function _mergeDefaults(stored) {
+    var ids = stored.map(function(c){ return c.id; });
+    DEFAULT_ORDER.forEach(function(id){
+        if (ids.indexOf(id) === -1) stored.push({id:id, visible:true});
+    });
+    return stored;
+}
+
+function loadLayout() {
+    fetch('/cgi-bin/lme.cgi?action=get_layout', {cache:'no-store'})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            _layout = Array.isArray(d) ? _mergeDefaults(d) : _defaultLayout();
+        })
+        .catch(function(){ _layout = _defaultLayout(); })
+        .then(function(){ render(); });
+}
+
+function saveLayout() {
+    fetch('/cgi-bin/lme.cgi?action=save_layout', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(_layout)
+    }).catch(function(){
+        toastr['warning']('Failed to save layout.', 'Save Error');
+    });
+}
+
+// ── Render list ───────────────────────────────────────────────────────────────
+function render() {
+    var layout = _layout;
+    if (!layout) return;
+    var list = document.getElementById('layout-list');
+    list.innerHTML = '';
+
+    layout.forEach(function(entry, idx) {
+        var item = document.createElement('div');
+        item.className = 'layout-item' + (entry.visible ? '' : ' hidden-card');
+        item.setAttribute('data-id', entry.id);
+        item.setAttribute('draggable', 'true');
+
+        // Drag handle
+        var drag = document.createElement('span');
+        drag.className = 'layout-drag';
+        drag.textContent = '⠿';
+        drag.title = 'Drag to reorder';
+
+        // Up button
+        var up = document.createElement('button');
+        up.className = 'move-btn';
+        up.textContent = '▲';
+        up.title = 'Move up';
+        up.disabled = idx === 0;
+        up.onclick = function(){ moveCard(idx, -1); };
+
+        // Down button
+        var dn = document.createElement('button');
+        dn.className = 'move-btn';
+        dn.textContent = '▼';
+        dn.title = 'Move down';
+        dn.disabled = idx === layout.length - 1;
+        dn.onclick = function(){ moveCard(idx, 1); };
+
+        // Label
+        var lbl = document.createElement('span');
+        lbl.className = 'layout-label';
+        lbl.textContent = CARD_LABELS[entry.id] || entry.id;
+
+        // Visibility toggle
+        var tog = document.createElement('div');
+        tog.className = 'layout-vis-toggle' + (entry.visible ? ' on' : '');
+        tog.title = entry.visible ? 'Visible — click to hide' : 'Hidden — click to show';
+        var knob = document.createElement('div');
+        knob.className = 'layout-vis-knob';
+        tog.appendChild(knob);
+        tog.onclick = function(){ toggleVisible(idx); };
+
+        item.appendChild(drag);
+        item.appendChild(up);
+        item.appendChild(dn);
+        item.appendChild(lbl);
+        item.appendChild(tog);
+        list.appendChild(item);
+    });
+
+    attachDragHandlers();
+}
+
+function moveCard(idx, dir) {
+    var newIdx = idx + dir;
+    if (newIdx < 0 || newIdx >= _layout.length) return;
+    var tmp = _layout[idx]; _layout[idx] = _layout[newIdx]; _layout[newIdx] = tmp;
+    saveLayout();
+    render();
+    toastr.success('Layout saved');
+}
+
+function toggleVisible(idx) {
+    _layout[idx].visible = !_layout[idx].visible;
+    saveLayout();
+    render();
+    toastr.success(_layout[idx].visible ? 'Card shown' : 'Card hidden');
+}
+
+function resetLayout() {
+    _layout = _defaultLayout();
+    saveLayout();
+    render();
+    toastr.success('Layout reset to default');
+}
+
+// ── Drag-and-drop ─────────────────────────────────────────────────────────────
+var _dragSrc = null;
+
+function attachDragHandlers() {
+    var items = document.querySelectorAll('.layout-item');
+    items.forEach(function(el) {
+        el.addEventListener('dragstart', function(e) {
+            _dragSrc = el;
+            e.dataTransfer.effectAllowed = 'move';
+            el.style.opacity = '.4';
+        });
+        el.addEventListener('dragend', function() {
+            el.style.opacity = '';
+            document.querySelectorAll('.layout-item').forEach(function(i){
+                i.style.borderColor = '';
+            });
+        });
+        el.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            el.style.borderColor = 'var(--accent-color)';
+        });
+        el.addEventListener('dragleave', function() {
+            el.style.borderColor = '';
+        });
+        el.addEventListener('drop', function(e) {
+            e.preventDefault();
+            el.style.borderColor = '';
+            if (_dragSrc === el) return;
+            var srcId = _dragSrc.getAttribute('data-id');
+            var dstId = el.getAttribute('data-id');
+            var srcIdx = _layout.findIndex(function(c){return c.id === srcId;});
+            var dstIdx = _layout.findIndex(function(c){return c.id === dstId;});
+            if (srcIdx < 0 || dstIdx < 0) return;
+            var moved = _layout.splice(srcIdx, 1)[0];
+            _layout.splice(dstIdx, 0, moved);
+            saveLayout();
+            render();
+            toastr.success('Layout saved');
+        });
+    });
+}
+
+window.addEventListener('DOMContentLoaded', loadLayout);
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+globals.env
+ota.env
+VERSION
+hotspot_data/
+*.ota_old
+dist/
+build/

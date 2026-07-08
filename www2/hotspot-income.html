@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .income-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 14px;
+        }
+        .income-card {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px 18px;
+            background: var(--bg-surface-hover);
+        }
+        .income-label {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+            color: var(--text-secondary); margin-bottom: 6px;
+        }
+        .income-value { font-size: 26px; font-weight: 700; color: var(--text-primary); line-height: 1.1; }
+        .income-value .peso { font-size: 17px; font-weight: 600; color: var(--text-secondary); margin-right: 2px; }
+        .income-card.total { background: rgba(13,110,253,.10); border-color: rgba(13,110,253,.35); }
+        .meta-row { font-size: 12px; color: var(--text-secondary); margin-top: 12px; display:flex; gap:14px; flex-wrap:wrap; }
+        .sync-ok   { color:#81c784; }
+        .sync-warn { color:#ffb74d; }
+        .controls-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+        .status-txt { font-size:12px; color:var(--text-secondary); margin-left:auto; }
+        /* counter header row: label on the left, tiny reset button on the right */
+        .income-card .card-top { display:flex; align-items:flex-start; justify-content:space-between; }
+        .inc-reset {
+            border:1px solid var(--border-color); background:transparent; color:var(--text-secondary);
+            border-radius:5px; font-size:10px; line-height:1; padding:4px 7px; cursor:pointer;
+            text-transform:uppercase; letter-spacing:.05em; transition:all .15s;
+        }
+        .inc-reset:hover  { color:var(--text-primary); border-color:var(--text-secondary); }
+        .inc-reset.danger:hover { color:#ff6b6b; border-color:#ff6b6b; }
+        .form-hint { font-size:11px; color:var(--text-secondary); margin-top:3px; }
+        .field-row { margin-bottom:12px; }
+        .field-row label { font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px; }
+        /* toggle */
+        .nf-toggle { width:46px; height:26px; border-radius:13px; background:#444; position:relative;
+            cursor:pointer; transition:background .25s; flex-shrink:0; }
+        .nf-toggle::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
+            border-radius:50%; background:#fff; transition:transform .25s; }
+        .nf-toggle.on { background:#0d6efd; }
+        .nf-toggle.on::after { transform:translateX(20px); }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:960px;">
+
+    <!-- ── Income ── -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Income</span>
+            <span class="status-txt" id="income-status">Loading…</span>
+        </div>
+        <div class="card-body">
+            <div class="income-grid">
+                <div class="income-card">
+                    <div class="card-top"><div class="income-label">Today</div>
+                        <button class="inc-reset" onclick="resetIncome('daily','Today')">Reset</button></div>
+                    <div class="income-value"><span class="peso">&#8369;</span><span id="inc-daily">0</span></div></div>
+                <div class="income-card">
+                    <div class="card-top"><div class="income-label">This Month</div>
+                        <button class="inc-reset" onclick="resetIncome('monthly','This Month')">Reset</button></div>
+                    <div class="income-value"><span class="peso">&#8369;</span><span id="inc-monthly">0</span></div></div>
+                <div class="income-card">
+                    <div class="card-top"><div class="income-label">This Year</div>
+                        <button class="inc-reset" onclick="resetIncome('yearly','This Year')">Reset</button></div>
+                    <div class="income-value"><span class="peso">&#8369;</span><span id="inc-yearly">0</span></div></div>
+                <div class="income-card total">
+                    <div class="card-top"><div class="income-label">All-time Total</div>
+                        <button class="inc-reset danger" onclick="resetIncome('total','All-time Total')">Reset</button></div>
+                    <div class="income-value"><span class="peso">&#8369;</span><span id="inc-total">0</span></div></div>
+            </div>
+            <div class="meta-row">
+                <span id="inc-date"></span>
+                <span id="inc-sync"></span>
+            </div>
+            <div class="form-hint" style="margin-top:10px;">
+                Income counts coin-slot sales. Buckets reset automatically when the day, month, or year
+                changes (using NTP-synced time). Stored in <code>/lmepisowifi/hotspot_data/</code>.
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Notifications ── -->
+    <div class="card">
+        <div class="card-header">Notifications (Telegram / Discord)</div>
+        <div class="card-body">
+            <div class="controls-row mb-3">
+                <span style="font-size:13px;">Enable alerts</span>
+                <div class="nf-toggle" id="nf-enabled" onclick="toggleEnabled()"></div>
+                <span id="nf-enabled-label" style="font-size:12px;color:var(--text-secondary);">Off</span>
+            </div>
+
+            <div class="field-row">
+                <label>Provider</label>
+                <select id="nf-provider" class="form-select" style="max-width:240px;" onchange="onProviderChange()">
+                    <option value="telegram">Telegram</option>
+                    <option value="discord">Discord</option>
+                </select>
+            </div>
+
+            <!-- Telegram fields -->
+            <div id="tg-fields">
+                <div class="field-row">
+                    <label>Bot Token</label>
+                    <input type="text" id="nf-tg-token" class="form-control" placeholder="123456789:ABCdef...">
+                    <div class="form-hint">From @BotFather. The bot must be allowed to message your chat.</div>
+                </div>
+                <div class="field-row">
+                    <label>Chat ID</label>
+                    <input type="text" id="nf-tg-chat" class="form-control" placeholder="-1001234567890 or 123456789">
+                    <div class="form-hint">Your user ID, group ID, or channel ID.</div>
+                </div>
+            </div>
+
+            <!-- Discord fields -->
+            <div id="dc-fields" style="display:none;">
+                <div class="field-row">
+                    <label>Webhook URL</label>
+                    <input type="text" id="nf-dc-webhook" class="form-control" placeholder="https://discord.com/api/webhooks/...">
+                    <div class="form-hint">Server Settings &rarr; Integrations &rarr; Webhooks &rarr; New Webhook &rarr; Copy URL.</div>
+                </div>
+            </div>
+
+            <div class="controls-row mt-2">
+                <button class="btn btn-primary" id="nf-save" onclick="saveNotify()">Save</button>
+                <button class="btn btn-outline-secondary" id="nf-test" onclick="testNotify()">Send Test</button>
+                <span class="status-txt" id="nf-status"></span>
+            </div>
+
+            <div class="form-hint" style="margin-top:14px;">
+                Alerts fire on: coin sales (amount, time added, total, remaining), session pauses &amp; resumes,
+                session expiry, voucher redemptions, anti-troll suspensions, and income reports.
+                Requires the device to reach the internet over HTTPS.
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Per-event alerts (mute individual notifications) ── -->
+    <div class="card mt-3">
+        <div class="card-header">Which alerts to send</div>
+        <div class="card-body">
+            <div class="form-hint" style="margin-bottom:14px;">
+                Turn individual alerts on or off. For example, switch off
+                <em>Session Resumed</em> if you only care about pauses. These
+                only apply while <strong>Enable alerts</strong> is on above.
+            </div>
+            <div id="evt-toggles"></div>
+            <div class="field-row mt-3">
+                <label>Rapid pause/resume cooldown</label>
+                <input type="number" id="nf-dedup" class="form-control" style="max-width:160px;" min="0" max="3600" step="5" placeholder="30">
+                <div class="form-hint">Seconds to wait before repeating the same pause/resume alert for the
+                    same device — stops button-mashing spam. Set to <code>0</code> to disable.</div>
+            </div>
+            <div class="controls-row mt-3">
+                <button class="btn btn-primary" id="evt-save" onclick="saveNotify()">Save</button>
+                <span class="status-txt" id="evt-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Message Templates ── -->
+    <div class="card mt-3">
+        <div class="card-header">Message Templates</div>
+        <div class="card-body">
+            <div class="form-hint" style="margin-bottom:14px;">
+                Customize the wording of each alert. Use <code>*placeholder*</code> tokens for dynamic values
+                and <code>%0A</code> for line breaks (same syntax as the MikroTik edition — press Enter
+                instead if you prefer, it's converted automatically). Click a chip below to insert it.
+                <code>*ramusage*</code> (live RAM used, e.g. "128 MB") and <code>*cpuusage*</code> (live CPU
+                load, e.g. "8%" — the % is already included, don't add your own) are available in every template.
+            </div>
+
+            <div class="field-row">
+                <label>Event</label>
+                <select id="tpl-select" class="form-select" style="max-width:360px;" onchange="onTplSelect()"></select>
+            </div>
+
+            <div id="tpl-chips" style="margin-bottom:8px;"></div>
+
+            <textarea id="tpl-text" class="form-control" rows="8" style="font-family:monospace;font-size:13px; min-height: 150px;"
+                      oninput="onTplEdit()"></textarea>
+
+            <div class="form-hint" style="margin-top:6px;margin-bottom:4px;">Preview</div>
+            <div id="tpl-preview"
+                 style="white-space:pre-wrap;font-family:monospace;font-size:13px;border:1px solid var(--border-color);
+                        border-radius:8px;padding:10px 12px;background:var(--bg-surface-hover);min-height:54px;"></div>
+
+            <div class="controls-row mt-3">
+                <button class="btn btn-primary" id="tpl-save" onclick="saveTemplates()">Save All</button>
+                <button class="btn btn-outline-secondary" onclick="resetTemplates()">Reset All to Default</button>
+                <span class="status-txt" id="tpl-status"></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-top-right', timeOut:3500, closeButton:true, preventDuplicates:true, newestOnTop:true };
+
+var overlayEl  = document.getElementById('overlay');
+var overlayTxt = document.getElementById('overlay-text');
+function showOverlay(m){ overlayTxt.textContent=m||''; overlayEl.style.display='flex'; }
+function hideOverlay(){ overlayEl.style.display='none'; }
+
+var _enabled = false;
+var _incomeTimer = null;
+
+function fmtNum(n){ n=Number(n)||0; return n.toLocaleString(); }
+
+// ── Income ──
+function loadIncome(){
+    fetch('/cgi-bin/hotspot.cgi?action=income', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            document.getElementById('inc-daily').textContent   = fmtNum(d.daily);
+            document.getElementById('inc-monthly').textContent = fmtNum(d.monthly);
+            document.getElementById('inc-yearly').textContent  = fmtNum(d.yearly);
+            document.getElementById('inc-total').textContent   = fmtNum(d.total);
+            var dt = [];
+            if (d.day)  dt.push('Day: '+d.day);
+            if (d.month) dt.push('Month: '+d.month);
+            if (d.year) dt.push('Year: '+d.year);
+            document.getElementById('inc-date').textContent = dt.join('  •  ');
+            var sync = document.getElementById('inc-sync');
+            if (d.synced){ sync.textContent='● Clock synced'; sync.className='sync-ok'; }
+            else { sync.textContent='● Clock not synced (NTP pending) — resets paused'; sync.className='sync-warn'; }
+            document.getElementById('income-status').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        })
+        .catch(function(){ document.getElementById('income-status').textContent = 'Failed to load income'; });
+}
+
+// ── Manual reset of a single counter ──
+function resetIncome(which, label){
+    var msg = (which === 'total')
+        ? 'Reset the ALL-TIME TOTAL to \u20b10? This wipes lifetime earnings and cannot be undone.'
+        : 'Reset the "' + label + '" counter to \u20b10?';
+    if (!confirm(msg)) return;
+    fetch('/cgi-bin/hotspot.cgi?action=income_reset', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+        body:'which=' + encodeURIComponent(which)
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d && d.ok){ toastr.success(label + ' counter reset'); loadIncome(); }
+        else { toastr.error('Reset failed: ' + ((d && d.error) || '')); }
+    })
+    .catch(function(){ toastr.error('Reset request failed'); });
+}
+
+// ── Notification config ──
+function setEnabledUI(on){
+    _enabled = !!on;
+    var t = document.getElementById('nf-enabled');
+    var l = document.getElementById('nf-enabled-label');
+    t.classList.toggle('on', _enabled);
+    l.textContent = _enabled ? 'On' : 'Off';
+}
+function toggleEnabled(){ setEnabledUI(!_enabled); }
+
+// ── Per-event alert toggles ──
+// Every muteable event and its friendly label. test_alert is intentionally
+// excluded — the Send Test button always bypasses per-event muting.
+var EVT_LIST = [
+    { key:'new_sale',         label:'New Sale (coin → time)' },
+    { key:'coins_inserted',   label:'Coins Inserted (below tier)' },
+    { key:'anti_troll',       label:'Anti-Troll Suspension' },
+    { key:'session_expired',  label:'Session Expired' },
+    { key:'session_paused',   label:'Session Paused (auto & manual)' },
+    { key:'session_resumed',  label:'Session Resumed' },
+    { key:'voucher_redeemed', label:'Voucher Redeemed' },
+    { key:'daily_report',     label:'Daily Income Report' },
+    { key:'monthly_report',   label:'Monthly Income Report' },
+    { key:'yearly_report',    label:'Yearly Income Report' }
+];
+var _evtState = {};   // key -> bool (true = send)
+
+function buildEvtToggles(){
+    var box = document.getElementById('evt-toggles');
+    if (!box) return;
+    box.innerHTML = '';
+    EVT_LIST.forEach(function(ev){
+        if (!(ev.key in _evtState)) _evtState[ev.key] = true;
+        var row = document.createElement('div');
+        row.className = 'controls-row mb-2';
+        var lbl = document.createElement('span');
+        lbl.style.cssText = 'font-size:13px;flex:1;';
+        lbl.textContent = ev.label;
+        var tog = document.createElement('div');
+        tog.className = 'nf-toggle' + (_evtState[ev.key] ? ' on' : '');
+        tog.onclick = (function(k, t){ return function(){
+            _evtState[k] = !_evtState[k];
+            t.classList.toggle('on', _evtState[k]);
+        }; })(ev.key, tog);
+        row.appendChild(lbl);
+        row.appendChild(tog);
+        box.appendChild(row);
+    });
+}
+
+function setEvtStateFrom(events){
+    EVT_LIST.forEach(function(ev){
+        // Default to enabled when the backend omits a flag (older config)
+        _evtState[ev.key] = (events && ev.key in events) ? !!events[ev.key] : true;
+    });
+    buildEvtToggles();
+}
+
+function onProviderChange(){
+    var p = document.getElementById('nf-provider').value;
+    document.getElementById('tg-fields').style.display = (p==='telegram') ? '' : 'none';
+    document.getElementById('dc-fields').style.display = (p==='discord')  ? '' : 'none';
+}
+
+function loadNotify(){
+    fetch('/cgi-bin/hotspot.cgi?action=notify_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            setEnabledUI(d.enabled);
+            document.getElementById('nf-provider').value = d.provider || 'telegram';
+            document.getElementById('nf-tg-token').value  = d.tg_bot_token || '';
+            document.getElementById('nf-tg-chat').value   = d.tg_chat_id || '';
+            document.getElementById('nf-dc-webhook').value = d.discord_webhook || '';
+            document.getElementById('nf-dedup').value = (d.dedup_window != null) ? d.dedup_window : 30;
+            setEvtStateFrom(d.events);
+            onProviderChange();
+        })
+        .catch(function(){ toastr.error('Could not load notification settings'); });
+}
+
+function buildNotifyBody(){
+    var p = document.getElementById('nf-provider').value;
+    var body = 'enabled='   + (_enabled ? '1' : '0') +
+           '&provider=' + encodeURIComponent(p) +
+           '&tg_bot_token=' + encodeURIComponent(document.getElementById('nf-tg-token').value.trim()) +
+           '&tg_chat_id='   + encodeURIComponent(document.getElementById('nf-tg-chat').value.trim()) +
+           '&discord_webhook=' + encodeURIComponent(document.getElementById('nf-dc-webhook').value.trim());
+    // Append per-event mute flags (evt_<key>=1|0)
+    EVT_LIST.forEach(function(ev){
+        body += '&evt_' + ev.key + '=' + (_evtState[ev.key] ? '1' : '0');
+    });
+    // Anti-spam cooldown window (seconds)
+    var dw = parseInt(document.getElementById('nf-dedup').value, 10);
+    if (isNaN(dw) || dw < 0) dw = 30;
+    body += '&dedup_window=' + dw;
+    return body;
+}
+
+function saveNotify(){
+    var btn = document.getElementById('nf-save');
+    btn.disabled = true;
+    return fetch('/cgi-bin/hotspot.cgi?action=notify_set', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+        body: buildNotifyBody()
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Notification settings saved'); }
+        else { toastr.error('Save failed: '+(d.error||'')); }
+    })
+    .catch(function(){ toastr.error('Save request failed'); })
+    .finally(function(){ btn.disabled = false; });
+}
+
+function testNotify(){
+    var btn = document.getElementById('nf-test');
+    btn.disabled = true;
+    showOverlay('Saving & sending test…');
+    // Save current form first so the test uses the latest values
+    saveNotify()
+        .then(function(){
+            return fetch('/cgi-bin/hotspot.cgi?action=notify_test', { method:'POST',
+                headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body:'' });
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (d.ok){ toastr.info('Test sent — check your '+document.getElementById('nf-provider').value+' chat.'); }
+            else { toastr.error('Test failed: '+(d.error||'')); }
+        })
+        .catch(function(){ toastr.error('Test request failed'); })
+        .finally(function(){ hideOverlay(); btn.disabled = false; });
+}
+
+// ── Message Templates ──
+var TPL_EVENTS = [
+    { key:'new_sale', label:'New Sale (coin → time granted)',
+      sample:{ totaltime:'2h 30m', addedtime:'15m', remainingtime:'1h 45m', insertcoinamt:'5',
+                mac:'AA:BB:CC:DD:EE:FF', activeusrcount:'3', dailyamt:'150', monthlyamt:'4200', yearlyamt:'38500',
+                date:'2026-06-30 14:23:11' } },
+    { key:'coins_inserted', label:'Coins Inserted (below minimum tier)',
+      sample:{ insertcoinamt:'1', mac:'AA:BB:CC:DD:EE:FF' } },
+    { key:'anti_troll', label:'Anti-Troll Suspension',
+      sample:{ mac:'AA:BB:CC:DD:EE:FF', strikes:'3', strikemax:'3', cooldownmins:'5' } },
+    { key:'session_expired', label:'Session Expired',
+      sample:{ mac:'AA:BB:CC:DD:EE:FF', activeusrcount:'2' } },
+    { key:'session_paused', label:'Session Paused (auto-inactivity or manual)',
+      sample:{ reason:'Automatically', remainingtime:'1h 45m', totaltime:'2h 0m',
+               mac:'AA:BB:CC:DD:EE:FF', activeusrcount:'2' } },
+    { key:'session_resumed', label:'Session Resumed (paused → resumed)',
+      sample:{ remainingtime:'45m', totaltime:'2h 0m', mac:'AA:BB:CC:DD:EE:FF', activeusrcount:'3' } },
+    { key:'voucher_redeemed', label:'Voucher Redeemed',
+      sample:{ voucher:'ABC123', addedtime:'1h 0m', totaltime:'1h 0m', remainingtime:'1h 0m', mac:'AA:BB:CC:DD:EE:FF' } },
+    { key:'daily_report', label:'Daily Income Report',
+      sample:{ label:'2026-06-29', amount:'1250' } },
+    { key:'monthly_report', label:'Monthly Income Report',
+      sample:{ label:'2026-06', amount:'18400' } },
+    { key:'yearly_report', label:'Yearly Income Report',
+      sample:{ label:'2026', amount:'212000' } },
+    { key:'test_alert', label:'Test Alert (Send Test button)', sample:{} }
+];
+var UNIVERSAL_SAMPLE = { ramusage:'128 MB', cpuusage:'8%' };
+var tplValues = {};   // key -> raw template text (literal %0A for line breaks)
+var tplCurKey = TPL_EVENTS[0].key;
+
+function tplEventByKey(k){ for (var i=0;i<TPL_EVENTS.length;i++) if (TPL_EVENTS[i].key===k) return TPL_EVENTS[i]; }
+
+function renderTplPreview(text, sample){
+    var out = text || '';
+    var all = Object.assign({}, sample, UNIVERSAL_SAMPLE);
+    Object.keys(all).forEach(function(name){
+        out = out.split('*'+name+'*').join(all[name]);
+    });
+    out = out.split('%0A').join('\n');
+    return out;
+}
+
+function populateTplChips(ev){
+    var box = document.getElementById('tpl-chips');
+    box.innerHTML = '';
+    var names = Object.keys(ev.sample).concat(Object.keys(UNIVERSAL_SAMPLE));
+    names.concat(['↵ line break']).forEach(function(name){
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn btn-outline-secondary btn-sm me-1 mb-1';
+        b.style.fontSize = '11px';
+        var token = (name === '↵ line break') ? '%0A' : ('*' + name + '*');
+        b.textContent = (name === '↵ line break') ? name : token;
+        b.onclick = function(){ insertAtCursor(document.getElementById('tpl-text'), token); onTplEdit(); };
+        box.appendChild(b);
+    });
+}
+
+function insertAtCursor(el, text){
+    var start = el.selectionStart, end = el.selectionEnd;
+    el.value = el.value.slice(0, start) + text + el.value.slice(end);
+    el.selectionStart = el.selectionEnd = start + text.length;
+    el.focus();
+}
+
+function onTplSelect(){
+    tplCurKey = document.getElementById('tpl-select').value;
+    var ev = tplEventByKey(tplCurKey);
+    document.getElementById('tpl-text').value = tplValues[tplCurKey] || '';
+    populateTplChips(ev);
+    updateTplPreview();
+}
+
+function onTplEdit(){
+    tplValues[tplCurKey] = document.getElementById('tpl-text').value;
+    updateTplPreview();
+}
+
+function updateTplPreview(){
+    var ev = tplEventByKey(tplCurKey);
+    var text = document.getElementById('tpl-text').value;
+    document.getElementById('tpl-preview').textContent = renderTplPreview(text, ev.sample) || '(empty — default will be used)';
+}
+
+function loadTemplates(){
+    var sel = document.getElementById('tpl-select');
+    sel.innerHTML = '';
+    TPL_EVENTS.forEach(function(ev){
+        var o = document.createElement('option');
+        o.value = ev.key; o.textContent = ev.label;
+        sel.appendChild(o);
+    });
+    return fetch('/cgi-bin/hotspot.cgi?action=notify_templates_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            tplValues = (d && d.templates) || {};
+            tplCurKey = TPL_EVENTS[0].key;
+            sel.value = tplCurKey;
+            onTplSelect();
+        })
+        .catch(function(){ toastr.error('Could not load message templates'); });
+}
+
+function saveTemplates(){
+    // Capture whatever's currently in the textarea before building the body
+    tplValues[tplCurKey] = document.getElementById('tpl-text').value;
+
+    var body = TPL_EVENTS.map(function(ev){
+        // Convert real newlines (from pressing Enter) into the %0A token
+        var v = (tplValues[ev.key] || '').replace(/\r\n|\r|\n/g, '%0A');
+        return ev.key + '=' + encodeURIComponent(v);
+    }).join('&');
+
+    var btn = document.getElementById('tpl-save');
+    btn.disabled = true;
+    fetch('/cgi-bin/hotspot.cgi?action=notify_templates_set', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+        body: body
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Templates saved'); }
+        else { toastr.error('Save failed: '+(d.error||'')); }
+    })
+    .catch(function(){ toastr.error('Save request failed'); })
+    .finally(function(){ btn.disabled = false; });
+}
+
+function resetTemplates(){
+    if (!confirm('Reset ALL message templates to their default wording? This discards your customizations.')) return;
+    fetch('/cgi-bin/hotspot.cgi?action=notify_templates_reset', { method:'POST',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body:'' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (d.ok){ toastr.success('Templates reset to default'); loadTemplates(); }
+            else { toastr.error('Reset failed: '+(d.error||'')); }
+        })
+        .catch(function(){ toastr.error('Reset request failed'); });
+}
+
+// ── Init ──
+window.addEventListener('DOMContentLoaded', function(){
+    loadIncome();
+    loadNotify();
+    loadTemplates();
+    _incomeTimer = setInterval(loadIncome, 15000);
+});
+window.addEventListener('beforeunload', function(){ if(_incomeTimer) clearInterval(_incomeTimer); });
+</script>
+</body>
+</html>

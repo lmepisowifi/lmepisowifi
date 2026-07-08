@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint { font-size: 11.5px; color: var(--text-secondary); margin-top: 3px; }
+        .kv { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+        .kv .k { font-size:13px; color:var(--text-secondary); }
+        .kv .v { font-size:13px; color:var(--text-primary); font-weight:600; }
+        .status-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+            border-radius:5px; font-size:12px; font-weight:600; }
+        .badge-ok   { background: rgba(76,175,80,.18);  color:#9ae6a4; }
+        .badge-new  { background: rgba(255,193,7,.18);   color:#ffd666; }
+        .badge-busy { background: rgba(13,110,253,.18);  color:#8ab6ff; }
+        .badge-err  { background: rgba(220,53,69,.18);   color:#f1a1a9; }
+        #ota-log { background: var(--bg-input, #111); border:1px solid var(--border-color,#333);
+            border-radius:6px; padding:10px; font-family:monospace; font-size:12px;
+            white-space:pre-wrap; max-height:240px; overflow:auto; display:none; margin-top:12px; }
+        .notes-box { font-size:12.5px; color:var(--text-secondary); border-left:3px solid var(--accent-color,#0d6efd);
+            padding:6px 10px; margin-top:8px; display:none; }
+    </style>
+</head>
+<body>
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Software Update</span>
+                        <span id="ota-badge" class="status-badge badge-ok">
+                            <span id="ota-badge-txt">Idle</span>
+                        </span>
+                    </div>
+                    <div class="card-body">
+
+                        <div class="kv"><span class="k">Installed version</span><span class="v" id="cur-ver">—</span></div>
+                        <div class="kv"><span class="k">Latest on GitHub</span><span class="v" id="lat-ver">—</span></div>
+                        <div class="notes-box" id="notes-box"></div>
+
+                        <div class="form-check form-switch mt-3">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   id="auto-toggle" onchange="onToggleAuto()">
+                            <label class="form-check-label" for="auto-toggle" style="font-size:13px">
+                                Automatic updates
+                                <span style="color:var(--text-secondary)">— check every 6 hours and install automatically</span>
+                            </label>
+                        </div>
+
+                        <div class="d-grid gap-2 mt-3">
+                            <button class="btn btn-secondary" id="check-btn" onclick="doCheck()">Check for updates</button>
+                            <button class="btn btn-primary" id="update-btn" onclick="doUpdate()" style="display:none">Update now</button>
+                        </div>
+
+                        <div id="ota-log"></div>
+
+                        <div class="field-hint mt-3">
+                            Updates are downloaded from
+                            <code>github.com/lmepisowifi/lmepisowifimoddedwebinterface</code>,
+                            verified by SHA-256, and applied atomically. If the device is unhealthy
+                            afterward it rolls back automatically. Your users, vouchers, income and
+                            portal customisations are preserved.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Rollback</div>
+                    <div class="card-body">
+                        <p class="field-hint" style="margin-bottom:12px">
+                            Restore the previous version kept from the last update (available only
+                            immediately after an update, before the next one).
+                        </p>
+                        <div class="d-grid">
+                            <button class="btn btn-outline-warning" id="rollback-btn" onclick="doRollback()">Roll back to previous version</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mt-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Changelog</span>
+                        <button class="btn btn-sm btn-secondary" onclick="loadChangelog()">Refresh</button>
+                    </div>
+                    <div class="card-body">
+                        <div id="changelog" style="font-family:monospace;font-size:12.5px;white-space:pre-wrap;max-height:320px;overflow:auto;color:var(--text-secondary)">Loading…</div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+    <script>
+    toastr.options = { positionClass:'toast-top-right', timeOut:4000, progressBar:true };
+
+    var pollTimer = null;
+
+    function setBadge(text, cls) {
+        var b = document.getElementById('ota-badge');
+        var t = document.getElementById('ota-badge-txt');
+        b.className = 'status-badge ' + cls;
+        t.textContent = text;
+    }
+
+    function loadStatus() {
+        return fetch('/cgi-bin/ota.cgi?action=status', { cache:'no-store' })
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+                if (j.version) document.getElementById('cur-ver').textContent = j.version;
+                return j.status || 'idle';
+            }).catch(function(){ return 'idle'; });
+    }
+
+    function doCheck() {
+        var btn = document.getElementById('check-btn');
+        btn.disabled = true; btn.textContent = 'Checking…';
+        fetch('/cgi-bin/ota.cgi?action=check', { cache:'no-store' })
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+                btn.disabled = false; btn.textContent = 'Check for updates';
+                if (j.current) document.getElementById('cur-ver').textContent = j.current;
+                if (j.error) { toastr.error(j.error, 'Check failed'); setBadge('Error','badge-err'); return; }
+                document.getElementById('lat-ver').textContent = j.latest || '—';
+                var notes = document.getElementById('notes-box');
+                if (j.notes) { notes.textContent = j.notes; notes.style.display = 'block'; }
+                else notes.style.display = 'none';
+                if (j.update_available) {
+                    setBadge('Update available','badge-new');
+                    document.getElementById('update-btn').style.display = '';
+                    toastr.info('Version ' + j.latest + ' is available.', 'Update available');
+                } else {
+                    setBadge('Up to date','badge-ok');
+                    document.getElementById('update-btn').style.display = 'none';
+                    toastr.success('You are on the latest version.', 'Up to date');
+                }
+            })
+            .catch(function(){
+                btn.disabled = false; btn.textContent = 'Check for updates';
+                toastr.error('Could not reach the device.', 'Error');
+            });
+    }
+
+    function startPolling() {
+        var logEl = document.getElementById('ota-log');
+        logEl.style.display = 'block';
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(function() {
+            fetch('/cgi-bin/ota.cgi?action=log', { cache:'no-store' })
+                .then(function(r){ return r.text(); })
+                .then(function(t){ logEl.textContent = t; logEl.scrollTop = logEl.scrollHeight; })
+                .catch(function(){});
+            loadStatus().then(function(st){
+                if (st === 'success') {
+                    clearInterval(pollTimer); pollTimer = null;
+                    setBadge('Up to date','badge-ok');
+                    document.getElementById('update-btn').style.display = 'none';
+                    toastr.success('Update complete.', 'Done');
+                    setTimeout(function(){ location.reload(); }, 2500);
+                } else if (st === 'failed' || st === 'rolledback') {
+                    clearInterval(pollTimer); pollTimer = null;
+                    setBadge(st === 'rolledback' ? 'Rolled back' : 'Failed', 'badge-err');
+                    toastr.error('Update did not complete — see the log. The device was restored.', 'Update failed');
+                } else {
+                    setBadge('Working: ' + st, 'badge-busy');
+                }
+            });
+        }, 2000);
+    }
+
+    function doUpdate() {
+        if (!confirm('Download and install the latest version now?\n\nThe portal and admin UI will restart briefly. If anything is wrong it rolls back automatically.')) return;
+        document.getElementById('update-btn').disabled = true;
+        setBadge('Working: starting', 'badge-busy');
+        fetch('/cgi-bin/ota.cgi?action=apply', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'confirm=1'
+        })
+        .then(function(r){ return r.text(); })
+        .then(function(t){
+            if (t.trim() === 'OK') { startPolling(); }
+            else { toastr.error(t, 'Error'); document.getElementById('update-btn').disabled = false; }
+        })
+        .catch(function(){ /* httpd may restart mid-request — poll anyway */ startPolling(); });
+    }
+
+    function doRollback() {
+        if (!confirm('Roll back to the previous version?')) return;
+        setBadge('Working: rollback', 'badge-busy');
+        fetch('/cgi-bin/ota.cgi?action=rollback', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'confirm=1'
+        })
+        .then(function(r){ return r.text(); })
+        .then(function(t){ if (t.trim() === 'OK') startPolling(); else toastr.error(t,'Error'); })
+        .catch(function(){ startPolling(); });
+    }
+
+    function loadConfig() {
+        fetch('/cgi-bin/ota.cgi?action=config', { cache:'no-store' })
+            .then(function(r){ return r.json(); })
+            .then(function(j){ document.getElementById('auto-toggle').checked = (j.auto === '1'); })
+            .catch(function(){});
+    }
+
+    function onToggleAuto() {
+        var on = document.getElementById('auto-toggle').checked ? 1 : 0;
+        fetch('/cgi-bin/ota.cgi?action=setauto', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'auto=' + on
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+            if (j.auto === '1') toastr.success('New versions install automatically during the 6-hour check.', 'Automatic updates on');
+            else toastr.info('You will be notified of updates but choose when to install.', 'Automatic updates off');
+        })
+        .catch(function(){ toastr.error('Could not save the setting.', 'Error'); });
+    }
+
+    function loadChangelog() {
+        var el = document.getElementById('changelog');
+        el.textContent = 'Loading…';
+        fetch('/cgi-bin/ota.cgi?action=changelog', { cache:'no-store' })
+            .then(function(r){ return r.text(); })
+            .then(function(t){ el.textContent = (t && t.trim()) ? t : 'No changelog available.'; })
+            .catch(function(){ el.textContent = 'Could not load changelog.'; });
+    }
+
+    // initial paint
+    loadConfig();
+    loadChangelog();
+    loadStatus().then(function(st){
+        if (st && st !== 'idle' && st !== 'success') { startPolling(); }
+    });
+    doCheck();
+    </script>
+</body>
+</html>

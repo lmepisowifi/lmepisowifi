@@ -1,0 +1,670 @@
+/* ========================================= FONT ========================================= */
+@font-face {
+    font-family: "Nunito";
+    src: url("/graphics/Nunito.woff2?v=1.0.0") format("woff2"),
+         url("/graphics/Nunito.woff?v=1.0.0") format("woff");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+
+/* ========================================= THEME VARIABLES ========================================= */
+:root {
+    --bg-body: #121212;
+    --bg-surface: #1e1e1e;
+    --bg-surface-hover: #2d2d2d;
+    --bg-input: #2a2a2a;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0a0;
+    --accent-color: #ffffff;
+    --accent-hover: #d4d4d4;
+    --border-color: #333333;
+    
+    /* Bootstrap dark-theme overrides */
+    --bs-body-bg: var(--bg-body);
+    --bs-body-color: var(--text-primary);
+    --bs-border-color: var(--border-color);
+    --bs-border-color-translucent: var(--border-color);
+    --bs-card-bg: var(--bg-surface);
+    --bs-card-border-color: var(--border-color);
+    --bs-card-cap-bg: var(--bg-surface-hover);
+    --bs-dropdown-bg: var(--bg-surface);
+    --bs-dropdown-border-color: var(--border-color);
+    --bs-dropdown-link-color: var(--text-secondary);
+    --bs-dropdown-link-hover-bg: var(--bg-surface-hover);
+    --bs-dropdown-link-hover-color: var(--text-primary);
+    --bs-dropdown-link-active-bg: var(--bg-surface-hover);
+    --bs-dropdown-link-active-color: var(--text-primary);
+    --bs-input-bg: var(--bg-input);
+    --bs-input-color: var(--text-primary);
+    --bs-input-border-color: var(--border-color);
+    --bs-input-focus-border-color: var(--accent-color);
+    --bs-input-focus-box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.1);
+    --bs-navbar-color: var(--text-secondary);
+    --bs-navbar-hover-color: var(--text-primary);
+    --bs-navbar-active-color: var(--accent-color);
+    --bs-navbar-brand-color: var(--text-primary);
+    --bs-navbar-brand-hover-color: var(--accent-color);
+    --bs-nav-link-color: var(--text-secondary);
+    --bs-nav-link-hover-color: var(--text-primary);
+}
+
+/* ========================================= GLOBAL RESET ========================================= */
+*,
+*::before,
+*::after {
+    font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+    -webkit-tap-highlight-color: transparent !important;
+}
+
+html,
+body {
+    background-color: var(--bg-body) !important;
+    color: var(--text-primary) !important;
+    scrollbar-color: var(--border-color) var(--bg-body);
+}
+
+::selection {
+    background-color: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+/* ========================================= NAVBAR ========================================= */
+.navbar {
+    background: var(--bg-surface) !important;
+    border-bottom: 1px solid var(--border-color);
+    padding-top: 0;
+    padding-bottom: 0;
+    height: 46px;
+}
+
+.navbar-brand:hover {
+    color: var(--accent-color) !important;
+}
+
+.nav-link {
+    color: var(--text-secondary) !important;
+    font-size: 13px;
+    height: 46px;
+    display: flex !important;
+    align-items: center;
+    padding: 0 18px !important;
+    border-right: 1px solid var(--border-color);
+    transition: color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+
+.nav-link:hover {
+    color: var(--text-primary) !important;
+    background: var(--bg-surface-hover) !important;
+}
+
+/* Keeps the underline for the active page you are currently on */
+.nav-link.active {
+    color: var(--accent-color) !important;
+    box-shadow: inset 0 -3px 0 var(--accent-color), inset 0 -6px 12px -4px color-mix(in srgb, var(--accent-color) 20%, transparent) !important;
+    background: linear-gradient(to top, color-mix(in srgb, var(--accent-color) 8%, transparent), transparent) !important;
+}
+
+/* Removes the underline when clicking a dropdown, but makes the text white */
+.nav-link.show {
+    color: var(--accent-color) !important;
+    box-shadow: none !important; 
+    background: var(--bg-surface-hover) !important;
+}
+
+.navbar-nav .dropdown-toggle::after {
+    margin-left: 6px;
+}
+
+.dropdown-item {
+    color: var(--text-secondary) !important;
+    font-size: 13px;
+    padding: 8px 16px !important;
+    transition: background 0.15s, color 0.15s;
+}
+
+.dropdown-item:hover,
+.dropdown-item:focus {
+    background: var(--bg-surface-hover) !important;
+    color: var(--text-primary) !important;
+}
+
+.dropdown-item.active {
+    color: var(--accent-color) !important;
+    /* Move the line from bottom (0 -3px) to left (3px 0) */
+    box-shadow: inset 3px 0 0 var(--accent-color), 
+                inset 6px 0 12px -4px color-mix(in srgb, var(--accent-color) 20%, transparent) !important;
+    /* Change gradient direction from bottom-to-top to left-to-right */
+    background: linear-gradient(to right, color-mix(in srgb, var(--accent-color) 8%, transparent), transparent) !important;
+    /* Optional: Rounds the right edge slightly to match your other theme */
+    border-radius: 0 !important; 
+}
+
+/* ========================================= CARDS ========================================= */
+.card {
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 6px !important;
+    overflow: hidden;
+}
+
+.card-header {
+    background: var(--bg-surface-hover) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 14px !important;
+    height: 38px;
+    display: flex;
+    align-items: center;
+}
+
+.card-body {
+    padding: 16px !important;
+}
+
+/* ========================================= INPUTS ========================================= */
+.form-control,
+.form-select {
+    background-color: var(--bg-input) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
+    border-radius: 4px !important;
+    font-size: 13px !important;
+    height: 34px !important;
+    padding: 0 10px !important;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: var(--accent-color) !important;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08) !important;
+    outline: none !important;
+}
+
+.form-control::placeholder {
+    color: var(--text-secondary) !important;
+    opacity: 1 !important;
+}
+
+.form-label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 5px !important;
+}
+
+/* Floating labels */
+.form-floating label {
+    color: var(--text-secondary) !important;
+    font-size: 13px;
+}
+
+.form-floating .form-control {
+    height: 46px !important;
+    padding: 12px 10px 0 !important;
+}
+
+.form-floating > .form-control:focus ~ label,
+.form-floating > .form-control:not(:placeholder-shown) ~ label {
+    opacity: 0.75;
+    transform: scale(0.8) translateY(-0.6rem) translateX(0.05rem);
+    color: var(--text-secondary) !important;
+}
+
+/* Fix double text on floating labels by making the real placeholder transparent */
+.form-floating .form-control::placeholder {
+    color: transparent !important;
+    opacity: 0 !important;
+}
+
+/* ========================================= BUTTONS ========================================= */
+.btn {
+    font-size: 13px !important;
+    border-radius: 4px !important;
+    padding: 6px 14px !important;
+    transition: background 0.2s, color 0.2s, border-color 0.2s !important;
+}
+
+/* Primary = white fill */
+.btn-primary {
+    background: var(--accent-color) !important;
+    border-color: var(--accent-color) !important;
+    color: #111 !important;
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover) !important;
+    border-color: var(--accent-hover) !important;
+    color: #111 !important;
+}
+
+.btn-primary:disabled {
+    background: var(--bg-surface-hover) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-secondary) !important;
+    opacity: 0.5 !important;
+    cursor: not-allowed !important;
+}
+
+/* Outline danger = logout */
+.btn-outline-danger {
+    color: #ff6b6b !important;
+    border-color: rgba(255, 107, 107, 0.4) !important;
+    background: transparent !important;
+    font-size: 12px !important;
+}
+
+.btn-outline-danger:hover {
+    background: rgba(255, 107, 107, 0.1) !important;
+    border-color: #ff6b6b !important;
+}
+
+/* ========================================= APPLY OVERLAY (wlan24.html) ========================================= */
+#overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+}
+
+#overlay.visible {
+    opacity: 1;
+    pointer-events: all;
+}
+
+#overlay-blur {
+    position: absolute;
+    inset: 0;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+#overlay-msg {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+#overlay-spinner {
+    width: 22px;
+    height: 22px;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--accent-color);
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#overlay-text {
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8);
+    text-align: center;
+}
+
+/* ========================================= LOGIN PAGE ========================================= */
+.login-wrap {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-body);
+    padding: 0 20px !important; 
+}
+
+.login-box {
+    width: 100%;
+    max-width: 360px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px 28px 28px 28px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+.login-title {
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.login-box input {
+    height: 36px;
+    padding: 0 12px;
+    font-size: 14px;
+    margin-bottom: 12px;
+}
+
+.form-floating {
+    height: 48px !important;
+    min-height: 48px !important;
+}
+
+.form-control-sm {
+    height: 34px;
+    font-size: 13px;
+}
+
+.login-container {
+    width: 100%;
+    max-width: 320px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.login-logo {
+    width: 100%;
+    max-width: 280px;
+    height: auto;
+    margin-bottom: 20px;
+    display: block;
+}
+
+.form-floating > .form-control {
+    height: 48px !important;
+    min-height: 48px !important;
+    padding-top: 1.25rem;
+    padding-bottom: 0.25rem;
+    font-size: 14px;
+}
+
+.form-floating > label {
+    padding: 0.8rem 0.75rem;
+    font-size: 13px;
+}
+
+.form-floating > .form-control:focus ~ label,
+.form-floating > .form-control:not(:placeholder-shown) ~ label {
+    transform: scale(0.85) translateY(-0.75rem) translateX(0.15rem);
+    opacity: 0.8;
+}
+
+/* ========================================= DROPDOWN MENU ANIMATION ========================================= */
+.dropdown-menu {
+    /* 1. Base Styles */
+    background: var(--bg-surface) !important;
+    border-radius: 0px !important;
+    margin-top: 0px !important;
+    
+    /* 2. The Closed State */
+    display: block;          /* Keep in DOM for transitions to work */
+    max-height: 0;           /* Collapse vertically */
+    overflow: hidden;        /* Hide content */
+    opacity: 0;
+    visibility: hidden;      /* Prevents invisible menu from blocking mouse clicks */
+    padding: 0 !important;   /* Force 0 padding to kill the gap (Overrides Bootstrap) */
+    border: none !important; /* Prevent ghost border line (Overrides Bootstrap) */
+    
+    /* Smooth transitions for opening and closing */
+    transition: max-height 0.3s ease-in-out, 
+                opacity 0.25s ease, 
+                padding 0.3s ease, 
+                visibility 0.3s;
+}
+
+/* 3. The Open State */
+.dropdown-menu.show {
+    max-height: 350px;       /* Keeps shrink time proportional to expansion */
+    opacity: 1;
+    visibility: visible;
+    padding: 4px 0 !important; 
+    border: 1px solid var(--border-color) !important;
+}
+
+/* ========================================= HEADER & MISC FIXES ========================================= */
+
+/* Disable clicks only if it's NOT a dropdown toggle */
+.nav-link.active:not(.dropdown-toggle),
+.dropdown-item.active {
+    pointer-events: none;
+    cursor: default;
+}
+
+/* Style the icon specifically */
+.header-icon {
+    width: 75px;
+    height: 40px;
+    object-fit: contain;
+    margin-left: -7.5px;
+}
+
+.navbar-brand {
+    display: flex;
+    align-items: center;
+    padding: 0 !important;
+    font-size: 14px;
+    margin-left: 0 !important;
+    height: 46px;
+    color: var(--text-primary) !important;
+    border-right: none;
+}
+
+/* Add breathing room to the text so it doesn't hit the right line */
+.brand-text {
+    margin-right: 12px;
+    color: var(--accent-color) !important;
+}
+
+/* The Vertical Line */
+.header-divider {
+    width: 1px;
+    height: 20px;
+    background-color: rgba(255, 255, 255, 1);
+    margin-right: 12px;
+}
+
+/* Remove the glowing/expanding outline on click */
+.navbar-toggler:focus,
+.navbar-toggler:active,
+.navbar-toggler-icon:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+/* Remove dropdown-menu margin in collapsed hamburger nav */
+@media (max-width: 991.98px) {
+}
+
+/* ========================================= MOBILE MENU BLUR FIX ========================================= */
+@media (max-width: 991.98px) {
+    .navbar-collapse {
+        position: absolute;
+        top: 46px; 
+        left: 0;
+        right: 0;
+        background-color: rgba(30, 30, 30, 0.75) !important; 
+        backdrop-filter: blur(12px); 
+        -webkit-backdrop-filter: blur(12px); 
+        padding: 15px;
+        border-bottom: 1px solid var(--border-color);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        z-index: 1050;
+    }
+
+    .nav-link {
+        height: auto !important;
+        padding: 12px 18px !important;
+        border-right: none !important; 
+        border-radius: 0px;
+    }
+
+    .nav-link.active {
+        box-shadow: inset 3px 0 0 var(--accent-color), 
+                    inset 6px 0 12px -4px color-mix(in srgb, var(--accent-color) 20%, transparent) !important;
+        background: linear-gradient(to right, color-mix(in srgb, var(--accent-color) 8%, transparent), transparent) !important;
+        border-radius: 0 !important; 
+    }
+
+    /* Fixed rule: Split padding issue */
+    .dropdown-menu {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+
+    .dropdown-menu.show {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 4px 0 4px 15px !important; /* Indent only when open */
+    }
+
+    .navbar-collapse .btn-outline-danger {
+        margin-top: 15px;
+        width: 100%;
+    }
+
+}
+
+/* Fix for bluish highlight on saved usernames */
+input:-webkit-autofill,
+input:-webkit-autofill:hover, 
+input:-webkit-autofill:focus, 
+input:-webkit-autofill:active {
+    /* Transitions the background color to match your input bg */
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+    
+    /* Forces the text color to stay light/white */
+    -webkit-text-fill-color: var(--text-primary) !important;
+    
+    /* Ensures the font remains Nunito */
+    font-family: "Nunito", sans-serif !important;
+    
+    /* Keeps your existing border style */
+    border: 1px solid var(--border-color) !important;
+}
+
+/* Optional: Subtle white glow when a saved field is focused */
+input:-webkit-autofill:focus {
+    border-color: var(--accent-color) !important;
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset, 0 0 0 3px rgba(255, 255, 255, 0.08) !important;
+}
+
+/* ========================================= APPLY OVERLAY ========================================= */
+#overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+}
+
+#overlay.visible {
+    opacity: 1;
+    pointer-events: all;
+}
+
+#overlay-blur {
+    position: absolute;
+    inset: 0;
+    backdrop-filter: blur(0px);
+    -webkit-backdrop-filter: blur(0px);
+    transition: backdrop-filter 0.35s ease,
+                -webkit-backdrop-filter 0.35s ease;
+}
+
+#overlay.visible #overlay-blur {
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+
+#overlay-msg {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+#overlay-spinner {
+    /* Increased from 24px to 32px */
+    width: 32px !important;
+    height: 32px !important;
+    
+    /* Keep the border proportional (increase to 3px if it looks too thin) */
+    border: 3px solid rgba(255, 255, 255, 0.2) !important;
+    border-top-color: var(--accent-color) !important;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+}
+
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+#overlay-text {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 8px rgba(255, 255, 255, 0.1);
+    text-align: center;
+}
+
+/* ========================================= ALERTS ========================================= */
+.alert {
+    padding: 8px 12px !important; /* Reduced from default 1rem */
+    font-size: 12px !important;    /* Matches your small labels */
+    margin-bottom: 12px !important;
+    border-radius: 4px !important;
+    min-height: auto !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Optional: If you are using a standard <div> for the error instead of .alert */
+.error-msg {
+    padding: 6px 10px;
+    font-size: 12px;
+    background: rgba(255, 107, 107, 0.1);
+    border: 1px solid rgba(255, 107, 107, 0.3);
+    color: #ff6b6b;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+/* ========================================= DESKTOP NAVBAR FIXES ========================================= */
+@media (min-width: 992px) {
+    
+    /* 1. Fix: Keep underline & gradient background visible when the active dropdown is open */
+    .nav-link.active.dropdown-toggle.show {
+        color: var(--accent-color) !important;
+        box-shadow: inset 0 -3px 0 var(--accent-color), 
+                    inset 0 -6px 12px -4px color-mix(in srgb, var(--accent-color) 20%, transparent) !important;
+        background: linear-gradient(to top, color-mix(in srgb, var(--accent-color) 8%, transparent), transparent) !important;
+    }
+
+    /* 2. Fix: Force active menu text to stay white/accent-colored on desktop */
+    .nav-link.active,
+    .navbar-nav .nav-link.active.show {
+        color: var(--accent-color) !important;
+    }
+}

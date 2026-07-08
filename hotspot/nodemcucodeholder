@@ -1,0 +1,1090 @@
+// coin_nodemcu.ino — Piso Wifi Coin Slot Controller
+// ESP8266 NodeMCU
+//
+// FIRST BOOT (no saved config):
+//   → Starts open AP "PisoWifi-Setup"
+//   → Connect to it, browse to 192.168.4.1
+//   → Fill in WiFi network, PSK, coin settings, hit Save
+//   → Reboots and connects to your hotspot network as STA
+//
+// FACTORY RESET (hardware):
+//   → Wire a momentary button between D1 (GPIO5) and GND
+//   → Hold it during power-on for 3+ seconds
+//
+// FACTORY RESET (software, no extra hardware):
+//   → From the portal machine, curl or wget:
+//      http://<nodemcu-ip>:8080/reset
+//   → Only accepts connections from PORTAL_IP (set in config)
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+#include <MD5Builder.h>
+#include <LittleFS.h>
+
+// ── PIN DEFINITIONS ───────────────────────────────────────────────────
+const int COIN_PIN        = D6;  // GPIO12  pulse input from coin acceptor
+const int COIN_ENABLE_PIN = D7;  // GPIO13  inhibit line
+const int RESET_PIN       = D1;  // GPIO5   external button to GND → hold 3s on boot
+
+// Most PH coin acceptors: HIGH=accept, LOW=block. Flip if yours is inverted.
+const int COIN_ENABLE_ACTIVE = HIGH;
+
+// ── COMPILE-TIME DEFAULTS (all overridden by saved config) ────────────
+#define DEFAULT_PSK         "ReplaceWithSomethingLongAndRandom!"
+#define DEFAULT_PORTAL_IP   "192.168.99.1"
+#define DEFAULT_PORTAL_PORT 808
+#define DEFAULT_COIN_VALUE  1     // pesos per pulse
+#define DEFAULT_TIMEOUT     30    // coin session seconds
+#define CONFIG_PATH         "/cfg.txt"
+#define AP_SSID             "PisoWifi-Setup"
+
+// Firmware version — bump ONLY when THIS sketch actually changes. The portal's
+// ota.sh compares it against the release manifest's nodemcu_version and pushes a
+// self-flash ONLY when they differ, so a portal-only update (www2/hotspot files)
+// never needlessly reflashes the coin slot.
+#define FW_VERSION          "1.0.0"
+// No AP password — open so owner can connect immediately on first setup
+
+// ── CONFIG STRUCT ─────────────────────────────────────────────────────
+struct Config {
+    char     ssid[64];
+    char     pass[64];
+    char     psk[128];
+    char     portal_ip[16];
+    uint16_t portal_port;
+    uint8_t  coin_value;    // pesos per pulse
+    uint8_t  timeout_sec;   // coin session timeout
+};
+Config cfg;
+
+// ── SERVERS ───────────────────────────────────────────────────────────
+// Two separate instances: setup mode uses port 80, normal mode uses port 8080.
+// Only one is ever started depending on the boot path.
+ESP8266WebServer setupServer(80);
+ESP8266WebServer coinServer(8080);
+WiFiClient       wifiClient;
+bool             isSetupMode = false;
+
+// ── COIN SESSION STATE ────────────────────────────────────────────────
+volatile int           coinPesos        = 0;
+bool                   sessionActive    = false;
+volatile bool          finalizing       = false;  // True when waiting for pulses to settle
+String                 activeSid        = "";
+volatile unsigned long sessionStartMs   = 0;      
+unsigned long          sessionTimeoutMs = 30000UL;
+volatile bool          cancelRequested  = false;  
+
+// For anti-tamper / pulse limiting
+volatile unsigned long lastPulseMs      = 0;
+
+// Piezo igniter ("BBQ lighter") fraud: a spark touched to the pulse wire
+// induces a clean FALLING edge that looks identical to a real coin pulse to
+// an edge-only debounce — so it walked straight through the old gap<15 check.
+// Genuine coin-acceptor optos pull the line LOW for the full mechanical/optical
+// transit time of the coin (tens of ms); a piezo discharge is a near-instant
+// transient, just a spike. Measuring how long the line actually stays LOW lets
+// us reject the spike while still counting real coins.
+// Calibrate MIN by logging real pulse widths from your acceptor (Serial.println
+// the width in onCoinPulse during testing) — different acceptor models vary.
+const unsigned long PULSE_MIN_WIDTH_US = 8000UL;    // reject anything shorter (spike)
+const unsigned long PULSE_MAX_WIDTH_US = 200000UL;  // reject anything longer (stuck/noise)
+volatile unsigned long pulseFallUs     = 0;
+volatile bool          pulseInProgress = false;
+// --- NEW VARIABLES FOR AUTO-DETECT ---
+volatile unsigned long lastEdgeMs = 0;
+volatile int           activeState = LOW; // Assumes NO by default
+bool   pendingResult  = false;
+String pendingBody    = "";
+int    pendingRetries = 0;
+
+// One-time, short-lived nonce backing the signed /reset flow (see coin.sh).
+String        resetNonce    = "";
+unsigned long nonceIssuedMs = 0;
+const unsigned long NONCE_TTL_MS = 30000UL;   // a fetched nonce is valid 30s
+
+// Deferred Wi-Fi credential switch requested via /setwifi. We ACK the portal
+// first, then re-associate ~1.5s later so the HTTP reply drains and the portal
+// has time to retune the AP onto the new SSID before we drop the old link.
+bool          wifiChangePending = false;
+unsigned long wifiChangeReqMs   = 0;      // millis() when /setwifi was accepted
+const unsigned long WIFI_CHANGE_DELAY_MS = 1500UL;
+
+// ── AUTO-REBOOT + HEAP WATCHDOG ────────────────────────────────────
+// Why reboot at all: this firmware leans hard on Arduino String
+// concatenation (every coin pulse, /status poll and result POST builds
+// throwaway Strings) plus HTTPClient, which fragments the ESP8266's small
+// heap over time. Left running for weeks the largest free block shrinks
+// until an allocation fails and the device locks up mid-session. A short,
+// scheduled reboot during an idle moment resets the heap to a clean state.
+//
+// 1 day vs 3 days: 1 day is the safer pick here *because* of that heavy
+// String/HTTPClient churn — a 24h cycle keeps fragmentation from ever
+// building up, and the reboot only ever happens while the machine is idle
+// (see serviceReboot() below), so customers never notice it. Bump this to
+// 3UL * 24UL if your unit stays healthy longer and you'd rather reboot less.
+const unsigned long REBOOT_INTERVAL_MS   = 24UL * 60UL * 60UL * 1000UL; // 1 day
+const unsigned long POST_SESSION_WAIT_MS = 60UL * 1000UL;              // extra grace minute after a session ends
+
+// Heap safety net: if free heap sits below HEAP_LOW_BYTES for
+// HEAP_LOW_CONFIRM consecutive samples, queue a reboot. Consecutive-sample
+// confirmation stops a momentary dip (e.g. during a TLS/HTTP POST) from
+// triggering a needless reboot.
+const unsigned long HEAP_LOW_BYTES   = 8000UL;   // ~8 KB danger floor
+const unsigned long HEAP_CHECK_MS    = 10000UL;  // sample free heap every 10s
+const uint8_t       HEAP_LOW_CONFIRM = 3;        // 3 low reads in a row (~30s) → reboot
+
+// Set true once a reboot is queued (by the schedule or the heap watchdog).
+// The actual ESP.restart() is deferred until the machine is idle — see
+// serviceReboot() in loop(). rebootReason is kept for optional debugging.
+bool          rebootPending    = false;
+const char*   rebootReason     = "";
+unsigned long lastSessionEndMs = 0;       // millis() when the last coin session ended
+
+
+// ══════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════════════════════════════
+
+String md5_hex(const String& s) {
+    MD5Builder b;
+    b.begin();
+    b.add((uint8_t*)s.c_str(), s.length());
+    b.calculate();
+    return b.toString();
+}
+
+// Constant-time signature compare — avoids leaking the expected MAC byte by
+// byte via response-timing differences (String '==' early-exits on first
+// mismatch). Cheap and behaviour-preserving for valid signatures.
+bool sig_ok(const String& sig, const String& plain) {
+    String expected = md5_hex(plain);
+    if (sig.length() != expected.length()) return false;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < expected.length(); i++)
+        diff |= (uint8_t)sig[i] ^ (uint8_t)expected[i];
+    return diff == 0;
+}
+
+void setCoinAcceptor(bool en) {
+    // Re-initialize the pin mode every time, in case a spark reset it
+    pinMode(COIN_ENABLE_PIN, OUTPUT);
+    digitalWrite(COIN_ENABLE_PIN, en ? COIN_ENABLE_ACTIVE : !COIN_ENABLE_ACTIVE);
+}
+
+void IRAM_ATTR onCoinPulse() {
+    unsigned long nowUs = micros();
+    unsigned long nowMs = millis();
+    int currentState = digitalRead(COIN_PIN);
+
+    // ── AUTO-DETECT NO vs NC ─────────────────────────────────────────
+    // If the line has been quiet for > 500ms, this edge MUST be 
+    // the start of a new coin pulse. We lock in whatever state 
+    // it just transitioned TO as the "active" pulse state.
+    if (nowMs - lastEdgeMs > 500) {
+        activeState = currentState;
+        pulseInProgress = false; // Reset in case of prior glitches
+    }
+    lastEdgeMs = nowMs;
+
+    if (currentState == activeState) {
+        // Leading edge: Pulse started. Record it and wait for it to end.
+        pulseFallUs = nowUs;
+        pulseInProgress = true;
+        return;
+    }
+
+    // Trailing edge: Pulse ended (returned to resting state).
+    if (!pulseInProgress) return;
+    pulseInProgress = false;
+
+    // Check pulse width to reject piezo sparks (<8ms) or stuck sensors (>200ms)
+    unsigned long widthUs = nowUs - pulseFallUs;
+    if (widthUs < PULSE_MIN_WIDTH_US || widthUs > PULSE_MAX_WIDTH_US) return;
+
+    if (sessionActive) {
+        // Hardware debounce: ignore physically impossible fast pulses (<15ms).
+        unsigned long gap = nowMs - lastPulseMs;
+        if (gap < 15) return;
+
+        lastPulseMs    = nowMs;
+        coinPesos     += cfg.coin_value;
+        sessionStartMs = nowMs;   // each valid coin extends the timeout window
+    }
+}
+
+// JSON-safe escape (SSIDs can contain quotes/backslashes)
+String jsonEscape(const String& s) {
+    String r;
+    r.reserve(s.length());
+    for (char c : s) {
+        if      (c == '"')  r += "\\\"";
+        else if (c == '\\') r += "\\\\";
+        else if (c == '\n') r += "\\n";
+        else if (c == '\r') r += "\\r";
+        else                r += c;
+    }
+    return r;
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// CONFIG STORAGE — LittleFS, KEY=VALUE lines
+// ══════════════════════════════════════════════════════════════════════
+
+void setConfigDefaults() {
+    strncpy(cfg.ssid,      "",                 sizeof(cfg.ssid));
+    strncpy(cfg.pass,      "",                 sizeof(cfg.pass));
+    strncpy(cfg.psk,       DEFAULT_PSK,        sizeof(cfg.psk));
+    strncpy(cfg.portal_ip, DEFAULT_PORTAL_IP,  sizeof(cfg.portal_ip));
+    cfg.portal_port = DEFAULT_PORTAL_PORT;
+    cfg.coin_value  = DEFAULT_COIN_VALUE;
+    cfg.timeout_sec = DEFAULT_TIMEOUT;
+}
+
+// Returns true only if config exists and has a valid SSID
+bool loadConfig() {
+    if (!LittleFS.exists(CONFIG_PATH)) return false;
+    File f = LittleFS.open(CONFIG_PATH, "r");
+    if (!f) return false;
+
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        int eq = line.indexOf('=');
+        if (eq < 1) continue;
+        String k = line.substring(0, eq);
+        String v = line.substring(eq + 1);
+
+        if      (k == "SSID")    v.toCharArray(cfg.ssid,      sizeof(cfg.ssid));
+        else if (k == "PASS")    v.toCharArray(cfg.pass,      sizeof(cfg.pass));
+        else if (k == "PSK")     v.toCharArray(cfg.psk,       sizeof(cfg.psk));
+        else if (k == "IP")      v.toCharArray(cfg.portal_ip, sizeof(cfg.portal_ip));
+        else if (k == "PORT")    cfg.portal_port = (uint16_t)v.toInt();
+        else if (k == "COINVAL") cfg.coin_value  = (uint8_t)v.toInt();
+        else if (k == "TIMEOUT") cfg.timeout_sec = (uint8_t)v.toInt();
+    }
+    f.close();
+    return strlen(cfg.ssid) > 0;
+}
+
+bool saveConfig() {
+    File f = LittleFS.open(CONFIG_PATH, "w");
+    if (!f) return false;
+    f.println("SSID="    + String(cfg.ssid));
+    f.println("PASS="    + String(cfg.pass));
+    f.println("PSK="     + String(cfg.psk));
+    f.println("IP="      + String(cfg.portal_ip));
+    f.println("PORT="    + String(cfg.portal_port));
+    f.println("COINVAL=" + String(cfg.coin_value));
+    f.println("TIMEOUT=" + String(cfg.timeout_sec));
+    f.close();
+    return true;
+}
+
+void wipeConfig() {
+    LittleFS.remove(CONFIG_PATH);
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// SETUP MODE — AP + web server on port 80
+// ══════════════════════════════════════════════════════════════════════
+
+static const char SETUP_PAGE[] PROGMEM = R"HTML(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PisoWifi NodeMCU Setup</title>
+<style>
+:root{
+  --bg-body:#121212;--bg-surface:#1e1e1e;--bg-surface-hover:#2d2d2d;--bg-input:#2a2a2a;
+  --text-primary:#e0e0e0;--text-secondary:#a0a0a0;--accent:#ffffff;--accent-hover:#d4d4d4;
+  --border-color:#333333;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-body);color:var(--text-primary);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:16px;max-width:480px;margin:0 auto;line-height:1.5}
+.card{background:var(--bg-surface);border:1px solid var(--border-color);
+  border-radius:12px;padding:20px 18px}
+h2{color:var(--text-primary);font-size:20px;font-weight:700;margin-bottom:4px}
+.sub{color:var(--text-secondary);font-size:12px;margin-bottom:16px}
+h3{color:var(--text-secondary);font-size:11px;margin:20px 0 8px;text-transform:uppercase;
+  letter-spacing:1px;border-bottom:1px solid var(--border-color);padding-bottom:6px}
+label{display:block;font-size:12px;color:var(--text-secondary);margin:10px 0 4px}
+input,select{width:100%;padding:9px 11px;background:var(--bg-input);
+  border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary);font-size:14px}
+input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 .2rem rgba(255,255,255,.1)}
+input::placeholder{color:#666}
+.row{display:flex;gap:8px}
+.row>div{flex:1}
+button{width:100%;padding:10px;border:1px solid var(--border-color);border-radius:8px;
+  font-size:14px;cursor:pointer;font-weight:600;margin-top:6px;
+  background:var(--bg-surface-hover);color:var(--text-primary);transition:background .15s,border-color .15s}
+button:hover:not(:disabled){border-color:var(--accent)}
+#saveBtn{background:var(--accent);color:var(--bg-body);border-color:var(--accent);
+  margin-top:18px;padding:12px;font-size:15px}
+#saveBtn:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover)}
+button:disabled{opacity:.5;cursor:not-allowed}
+#netList{margin-top:8px;max-height:180px;overflow-y:auto}
+.net{padding:9px 11px;background:var(--bg-body);border:1px solid var(--border-color);border-radius:8px;
+  margin-bottom:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:border-color .15s,background .15s}
+.net:hover{border-color:var(--accent);background:var(--bg-surface-hover)}
+.net-right{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary)}
+.lock{color:#ffb74d}
+#msg{margin-top:14px;padding:10px 12px;border-radius:8px;font-size:13px;display:none;line-height:1.5;white-space:pre-line}
+.ok{background:rgba(76,175,80,.15);color:#81c784;border:1px solid rgba(76,175,80,.3)}
+.err{background:rgba(244,67,54,.15);color:#ef9a9a;border:1px solid rgba(244,67,54,.3)}
+.info{background:rgba(255,255,255,.06);color:var(--text-primary);border:1px solid var(--border-color)}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>NodeMCU Coin Slot Setup</h2>
+<div class="sub">Connect once, saves to flash. Reboot re-connects automatically.</div>
+
+<h3>WiFi Network</h3>
+<button id="scanBtn" onclick="scan()">Scan for Networks</button>
+<div id="netList"></div>
+<label>SSID</label>
+<input id="ssid" type="text" placeholder="Network name (tap above or type manually)">
+<label>Password <span style="color:#555">— leave blank if open network</span></label>
+<input id="pass" type="password" placeholder="WiFi password" autocomplete="new-password">
+
+<h3>Coin Acceptor</h3>
+<label>Shared PSK <span style="color:#555">— must exactly match COIN_PSK in lmehspt.sh</span></label>
+<input id="psk" type="text" placeholder="e.g. ReplaceWithSomethingLongAndRandom!">
+<div class="row">
+  <div><label>Pesos / Pulse</label>
+       <input id="coinval" type="number" value="1" min="1" max="20"
+              title="How many pesos each coin pulse = (e.g. 5 for a ₱5 acceptor)"></div>
+  <div><label>Session Timeout (seconds)</label>
+       <input id="timeout" type="number" value="30" min="10" max="120"></div>
+</div>
+
+<h3>Portal Server</h3>
+<div class="row">
+  <div><label>Portal IP</label>
+       <input id="ip" type="text" value="192.168.99.1"></div>
+  <div><label>Portal Port</label>
+       <input id="port" type="number" value="808"></div>
+</div>
+
+<button id="saveBtn" onclick="save()">Save &amp; Connect</button>
+<div id="msg"></div>
+</div>
+
+<script>
+function scan() {
+  var nb = document.getElementById('scanBtn');
+  var nl = document.getElementById('netList');
+  nb.disabled = true; nb.textContent = 'Scanning...';
+  nl.innerHTML = '';
+  fetch('/scan').then(function(r){return r.json();}).then(function(nets){
+    nb.disabled = false; nb.textContent = 'Scan for Networks';
+    if (!nets.length) { nl.innerHTML='<div style="color:#666;padding:8px;font-size:13px">No networks found — try again</div>'; return; }
+    nl.innerHTML = nets.map(function(n){
+      return '<div class="net" onclick="pick(\''+n.ssid.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+ '\','+n.enc+')">'
+        +'<span style="font-size:14px">'+n.ssid+'</span>'
+        +'<span class="net-right">'+(n.enc?'<span class="lock"></span>':'')+n.rssi+'dBm</span>'
+        +'</div>';
+    }).join('');
+  }).catch(function(){
+    nb.disabled=false; nb.textContent='Scan for Networks';
+    nl.innerHTML='<div style="color:#f88;padding:8px;font-size:13px">Scan failed — try again</div>';
+  });
+}
+function pick(ssid, enc) {
+  document.getElementById('ssid').value = ssid;
+  document.getElementById('pass').value = '';
+  document.getElementById('pass').focus();
+}
+function save() {
+  var ssid=document.getElementById('ssid').value.trim();
+  var psk =document.getElementById('psk').value.trim();
+  if (!ssid) { showMsg('SSID is required.','err'); return; }
+  if (!psk)  { showMsg('PSK is required — it must match COIN_PSK in lmehspt.sh.','err'); return; }
+  var btn = document.getElementById('saveBtn');
+  btn.disabled=true; btn.textContent='Saving...';
+  var data = new URLSearchParams({
+    ssid: ssid,
+    pass: document.getElementById('pass').value,
+    psk:  psk,
+    ip:   document.getElementById('ip').value.trim(),
+    port: document.getElementById('port').value,
+    coinval: document.getElementById('coinval').value,
+    timeout: document.getElementById('timeout').value
+  });
+  fetch('/save', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:data.toString()})
+  .then(function(r){return r.json();})
+  .then(function(j){
+    if (j.ok) {
+      showMsg('Saved! NodeMCU is rebooting and connecting to "'+ssid+'".\n\nIt will disappear from this AP. If it fails to connect it will come back as PisoWifi-Setup.','ok');
+    } else {
+      btn.disabled=false; btn.textContent='Save & Connect';
+      showMsg('Error: '+(j.error||'Unknown'),'err');
+    }
+  })
+  .catch(function(){
+    // Connection dropped on reboot — expected, treat as success
+    showMsg('Config saved. NodeMCU is rebooting — this AP will disappear shortly.','ok');
+  });
+}
+function showMsg(t,cls) {
+  var m=document.getElementById('msg');
+  m.textContent=t; m.className=cls; m.style.display='block';
+}
+</script>
+</body>
+</html>
+)HTML";
+
+void serve_setup_page() {
+    setupServer.send_P(200, "text/html", SETUP_PAGE);
+}
+
+void handle_scan() {
+    // Must be in AP+STA mode for scanning to work while AP is active
+    int n = WiFi.scanNetworks();
+    String j = "[";
+    for (int i = 0; i < n; i++) {
+        if (i) j += ",";
+        j += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\","
+             "\"rssi\":"    + String(WiFi.RSSI(i)) + ","
+             "\"enc\":"     + (WiFi.encryptionType(i) == ENC_TYPE_NONE ? "false" : "true") + "}";
+    }
+    j += "]";
+    setupServer.send(200, "application/json", j);
+}
+
+void handle_save() {
+    String ssid    = setupServer.arg("ssid");
+    String pass    = setupServer.arg("pass");
+    String psk     = setupServer.arg("psk");
+    String ip      = setupServer.arg("ip");
+    String port    = setupServer.arg("port");
+    String coinval = setupServer.arg("coinval");
+    String timeout = setupServer.arg("timeout");
+
+    if (ssid.length() == 0 || ssid.length() > 63) {
+        setupServer.send(200, "application/json", "{\"ok\":false,\"error\":\"Invalid SSID\"}");
+        return;
+    }
+    if (psk.length() == 0 || psk.length() > 127) {
+        setupServer.send(200, "application/json", "{\"ok\":false,\"error\":\"PSK required (max 127 chars)\"}");
+        return;
+    }
+    if (ip.length() == 0) ip = DEFAULT_PORTAL_IP;
+
+    ssid.toCharArray(cfg.ssid,      sizeof(cfg.ssid));
+    pass.toCharArray(cfg.pass,      sizeof(cfg.pass));
+    psk.toCharArray(cfg.psk,        sizeof(cfg.psk));
+    ip.toCharArray(cfg.portal_ip,   sizeof(cfg.portal_ip));
+    cfg.portal_port = port.toInt()    > 0 ? (uint16_t)port.toInt()    : DEFAULT_PORTAL_PORT;
+    cfg.coin_value  = coinval.toInt() > 0 ? (uint8_t)coinval.toInt()  : DEFAULT_COIN_VALUE;
+    cfg.timeout_sec = timeout.toInt() > 0 ? (uint8_t)timeout.toInt()  : DEFAULT_TIMEOUT;
+
+    if (saveConfig()) {
+        setupServer.send(200, "application/json", "{\"ok\":true}");
+        delay(1500);
+        ESP.restart();
+    } else {
+        setupServer.send(200, "application/json",
+            "{\"ok\":false,\"error\":\"LittleFS write failed — check partition table\"}");
+    }
+}
+
+void startSetupMode() {
+    isSetupMode = true;
+    // AP+STA so we can scan WiFi networks while hosting the AP
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(AP_SSID);  // open — no password
+
+    setupServer.on("/",     HTTP_GET,  serve_setup_page);
+    setupServer.on("/scan", HTTP_GET,  handle_scan);
+    setupServer.on("/save", HTTP_POST, handle_save);
+    // Redirect everything else to the setup page
+    setupServer.onNotFound([]() {
+        setupServer.sendHeader("Location", "/", true);
+        setupServer.send(302, "text/plain", "");
+    });
+    setupServer.begin();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// NORMAL MODE — Coin slot + admin, server on port 8080
+// ══════════════════════════════════════════════════════════════════════
+
+void post_result() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    HTTPClient http;
+    String url = String("http://") + cfg.portal_ip + ":"
+                 + cfg.portal_port + "/cgi-bin/coin_result.sh";
+    http.begin(wifiClient, url);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    if (http.POST(pendingBody) > 0) {
+        if (http.getString().indexOf("\"ok\":true") >= 0) {
+            pendingResult  = false;
+            pendingBody    = "";
+            pendingRetries = 0;
+        }
+    }
+    http.end();
+}
+
+void endSession() {
+    setCoinAcceptor(false);         // block coins immediately
+    sessionActive  = false;
+    finalizing     = false;
+    sessionStartMs = 0;
+
+    int finalAmount = coinPesos;
+    coinPesos = 0;
+
+    String plain = String(cfg.psk) + ":" + activeSid + ":"
+                   + String(finalAmount) + ":end";
+    pendingBody    = "sid=" + activeSid + "&amount="
+                     + String(finalAmount) + "&sig=" + md5_hex(plain);
+    pendingRetries = 0;
+    pendingResult  = true;
+    activeSid      = "";
+    lastSessionEndMs = millis();   // start the post-session grace clock for any queued reboot
+    post_result();
+}
+
+// ── DEFERRED REBOOT SERVICE ────────────────────────────────────────
+// Called every loop(). Decides WHEN to reboot, never interrupting a paying
+// customer:
+//   1. Queue a reboot if the daily interval elapsed, or if free heap has
+//      been below the danger floor for HEAP_LOW_CONFIRM checks in a row.
+//   2. Once queued, hold off while a coin session is active/finalizing
+//      (someone is inserting coins), then wait POST_SESSION_WAIT_MS after it
+//      ends and re-check — if a NEW session started in that minute, wait
+//      again. Only reboot once the machine has been idle for the full grace
+//      minute.
+void serviceReboot() {
+    static unsigned long bootMs      = millis();
+    static unsigned long lastHeapChk = 0;
+    static uint8_t       heapStrikes = 0;
+
+    // 1a) Scheduled interval reached? (elapsed-subtraction is rollover-safe)
+    if (!rebootPending && (millis() - bootMs) >= REBOOT_INTERVAL_MS) {
+        rebootPending = true;
+        rebootReason  = "scheduled";
+    }
+
+    // 1b) Heap watchdog — sample periodically, require consecutive low reads
+    if (millis() - lastHeapChk >= HEAP_CHECK_MS) {
+        lastHeapChk = millis();
+        if (ESP.getFreeHeap() < HEAP_LOW_BYTES) {
+            if (++heapStrikes >= HEAP_LOW_CONFIRM && !rebootPending) {
+                rebootPending = true;
+                rebootReason  = "low_heap";
+            }
+        } else {
+            heapStrikes = 0;   // recovered — reset the strike counter
+        }
+    }
+
+    if (!rebootPending) return;
+
+    // 2) A reboot is queued — but never cut off a paying customer.
+    if (sessionActive || finalizing) return;                          // coins being inserted → wait
+    if ((millis() - lastSessionEndMs) < POST_SESSION_WAIT_MS) return; // grace minute not up, or a new session just started
+
+    // Idle, grace minute elapsed, no new session → safe to reboot now.
+    setCoinAcceptor(false);   // make sure the slot is blocked across the reboot
+    delay(50);
+    ESP.restart();
+}
+
+void handle_coin_start() {
+    if (sessionActive && coinServer.arg("sid") == activeSid) {
+        coinServer.send(200, "application/json", "{\"ok\":true,\"resumed\":true}");
+        return;
+    }
+    if (sessionActive) {
+        coinServer.send(409, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
+        return;
+    }
+
+    String sid = coinServer.arg("sid");
+    String sig = coinServer.arg("sig");
+    String to  = coinServer.arg("timeout");
+
+    if (sid.length() != 16) {
+        coinServer.send(400, "application/json", "{\"ok\":false,\"error\":\"bad_sid\"}");
+        return;
+    }
+    if (!sig_ok(sig, String(cfg.psk) + ":" + sid + ":start")) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_sig\"}");
+        return;
+    }
+
+sessionActive    = true;
+    finalizing       = false;
+    cancelRequested  = false;
+    activeSid        = sid;
+    coinPesos        = 0;
+    sessionStartMs   = millis();
+    lastPulseMs      = millis(); // Init
+    
+    sessionTimeoutMs = (to.length() > 0)
+                       ? (unsigned long)to.toInt() * 1000UL
+                       : (unsigned long)cfg.timeout_sec * 1000UL;
+    setCoinAcceptor(true);
+    coinServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Ends the session early on the user's signal ("Done" / "Cancel" in the UI).
+// Does NOT call endSession() directly — see loop() for why.
+void handle_coin_cancel() {
+    String sid = coinServer.arg("sid");
+    String sig = coinServer.arg("sig");
+
+    // Already ended (timed out naturally just before this arrived, or a duplicate click)
+    if (!sessionActive || sid != activeSid) {
+        coinServer.send(200, "application/json", "{\"ok\":true,\"msg\":\"already_ended\"}");
+        return;
+    }
+    if (!sig_ok(sig, String(cfg.psk) + ":" + sid + ":cancel")) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_sig\"}");
+        return;
+    }
+
+    // Just signal — loop() picks this up so it can wait for trailing coin pulses securely
+    cancelRequested = true;
+    coinServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handle_coin_status() {
+    String sid = coinServer.arg("sid");
+    String sig = coinServer.arg("sig");
+
+    if (sid != activeSid || !sessionActive) {
+        coinServer.send(404, "application/json", "{\"ok\":false,\"amount\":0}");
+        return;
+    }
+    if (!sig_ok(sig, String(cfg.psk) + ":" + sid + ":poll")) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_sig\"}");
+        return;
+    }
+
+    int amt = coinPesos;
+
+    long remMs = (long)sessionTimeoutMs - (long)(millis() - sessionStartMs);
+    if (remMs < 0) remMs = 0;
+    int remaining = remMs / 1000;
+
+    String sig2 = md5_hex(String(cfg.psk) + ":" + sid + ":" + String(amt) + ":status");
+    coinServer.send(200, "application/json",
+        "{\"ok\":true,\"amount\":" + String(amt) + ",\"remaining\":" + String(remaining) +
+        ",\"sig\":\"" + sig2 + "\"}");
+}
+
+// Soft factory reset — only accepts requests from the portal IP
+// Issues a fresh one-time nonce for the signed reset flow. Restricted to the
+// portal IP so a random hotspot client can't farm nonces; the nonce is
+// useless anyway without the PSK to sign it.
+void handle_nonce() {
+    String caller = coinServer.client().remoteIP().toString();
+    if (caller != String(cfg.portal_ip)) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"forbidden\"}");
+        return;
+    }
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%08x%08x",
+             (unsigned)os_random(), (unsigned)os_random());
+    resetNonce    = String(buf);
+    nonceIssuedMs = millis();
+    coinServer.send(200, "application/json",
+        "{\"ok\":true,\"nonce\":\"" + resetNonce + "\"}");
+}
+
+void handle_admin_reset() {
+    String caller = coinServer.client().remoteIP().toString();
+    if (caller != String(cfg.portal_ip)) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"forbidden\"}");
+        return;
+    }
+    // Require a fresh, single-use nonce signed with the PSK:
+    //   token = md5(PSK:nonce:reset)   (matches coin.sh's reset flow)
+    // The old code trusted the source IP alone (spoofable on the shared
+    // hotspot LAN), making /reset an unauthenticated config-wipe DoS.
+    if (resetNonce.length() == 0 || (millis() - nonceIssuedMs) > NONCE_TTL_MS) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"no_nonce\"}");
+        return;
+    }
+    String token = coinServer.arg("token");
+    bool good = sig_ok(token, String(cfg.psk) + ":" + resetNonce + ":reset");
+    resetNonce = "";   // single-use: burn the nonce regardless of outcome
+    if (!good) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_token\"}");
+        return;
+    }
+    coinServer.send(200, "application/json",
+        "{\"ok\":true,\"msg\":\"wiped, rebooting into setup AP\"}");
+    wipeConfig();
+    delay(1000);
+    ESP.restart();
+}
+
+// /setwifi — the portal (wlanbasic.cgi) hands us the NEW credentials for the
+// SSID we ride on, right before it retunes that AP. We save them, ACK, and
+// switch over a moment later (see wifiChangePending in loop) so this reply is
+// delivered and the AP has time to come up on the new name first. Without this
+// handshake, renaming the AP would silently strand the coin slot offline.
+//
+// Auth mirrors /reset: portal-IP only + a single-use, PSK-signed nonce that
+// also binds the exact ssid+pass:  token = md5(PSK:nonce:ssid:pass:setwifi)
+void handle_set_wifi() {
+    String caller = coinServer.client().remoteIP().toString();
+    if (caller != String(cfg.portal_ip)) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"forbidden\"}");
+        return;
+    }
+    if (resetNonce.length() == 0 || (millis() - nonceIssuedMs) > NONCE_TTL_MS) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"no_nonce\"}");
+        return;
+    }
+    String newSsid = coinServer.arg("ssid");
+    String newPass = coinServer.arg("pass");
+    String token   = coinServer.arg("token");
+    bool good = sig_ok(token, String(cfg.psk) + ":" + resetNonce + ":" +
+                              newSsid + ":" + newPass + ":setwifi");
+    resetNonce = "";   // single-use: burn the nonce regardless of outcome
+    if (!good) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_token\"}");
+        return;
+    }
+    if (newSsid.length() == 0 || newSsid.length() > 63) {
+        coinServer.send(200, "application/json", "{\"ok\":false,\"error\":\"bad_ssid\"}");
+        return;
+    }
+    if (newPass.length() > 63) {   // WPA-PSK max, and fits cfg.pass[64]
+        coinServer.send(200, "application/json", "{\"ok\":false,\"error\":\"bad_pass\"}");
+        return;
+    }
+    // Persist the new credentials now, but keep the current link up until we
+    // ACK. The actual re-association is deferred to loop() so this response is
+    // delivered and the portal can switch the AP over first.
+    newSsid.toCharArray(cfg.ssid, sizeof(cfg.ssid));
+    newPass.toCharArray(cfg.pass, sizeof(cfg.pass));
+    bool saved = saveConfig();
+    coinServer.send(200, "application/json",
+        String("{\"ok\":") + (saved ? "true" : "false") +
+        ",\"msg\":\"credentials accepted, switching shortly\"}");
+    if (saved) {
+        wifiChangePending = true;
+        wifiChangeReqMs   = millis();   // apply after WIFI_CHANGE_DELAY_MS elapses
+    }
+}
+
+// ── OTA SELF-UPDATE ──────────────────────────────────────────────────────────
+// The portal (ota.sh) pushes a new firmware image to us as part of its own OTA,
+// but ONLY when our FW_VERSION differs from the release. Auth + flow mirror the
+// /reset and /setwifi endpoints exactly:
+//
+//   portal: GET /version                     → {"ok":true,"fw":"x.y.z"}   (gate)
+//   portal: GET /nonce                        → fresh single-use nonce
+//   portal: GET /update?md5=<hex>&token=<t>    t = md5(PSK:nonce:md5:update)
+//
+// On a valid signed request we pull the .bin from OUR OWN portal over the
+// already-trusted hotspot LAN (cfg.portal_ip:cfg.portal_port, /firmware/
+// coin_nodemcu.bin) — no TLS, no GitHub on the ESP — self-flash it with an
+// ENFORCED MD5 check, and reboot. On ANY failure (bad token, short download,
+// MD5 mismatch) the new image is never committed: Update leaves the running
+// firmware active, so a corrupt or spoofed push cannot brick the coin slot.
+//
+// FLASH-LAYOUT REQUIREMENT: build with a size that reserves an OTA region,
+// e.g. arduino-cli FQBN option ...:eesz=4M2M (4MB flash / 2MB FS) or the
+// Arduino IDE "Flash Size: 4MB (FS:1MB OTA:~1019KB)". Without an OTA slot,
+// Update.begin() will fail and the push is safely refused.
+
+// Report running firmware version. Portal-IP only — no reason to let a random
+// hotspot client fingerprint the coin slot's firmware.
+void handle_version() {
+    String caller = coinServer.client().remoteIP().toString();
+    if (caller != String(cfg.portal_ip)) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"forbidden\"}");
+        return;
+    }
+    coinServer.send(200, "application/json",
+        String("{\"ok\":true,\"fw\":\"") + FW_VERSION + "\"}");
+}
+
+void handle_update() {
+    String caller = coinServer.client().remoteIP().toString();
+    if (caller != String(cfg.portal_ip)) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"forbidden\"}");
+        return;
+    }
+    if (resetNonce.length() == 0 || (millis() - nonceIssuedMs) > NONCE_TTL_MS) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"no_nonce\"}");
+        return;
+    }
+    String md5   = coinServer.arg("md5");
+    String token = coinServer.arg("token");
+    // Signed, single-use, and bound to the exact image we may flash:
+    //   token = md5(PSK:nonce:md5:update)
+    bool good = sig_ok(token, String(cfg.psk) + ":" + resetNonce + ":" + md5 + ":update");
+    resetNonce = "";   // single-use: burn the nonce regardless of outcome
+    if (!good) {
+        coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_token\"}");
+        return;
+    }
+    md5.toLowerCase();
+    if (md5.length() != 32) {
+        coinServer.send(200, "application/json", "{\"ok\":false,\"error\":\"bad_md5\"}");
+        return;
+    }
+    // Never interrupt a paying customer — the portal retries on its next run.
+    if (sessionActive || finalizing) {
+        coinServer.send(200, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
+        return;
+    }
+    // ACK first so the portal's wget gets a definitive reply before we spend
+    // several seconds downloading + flashing (and then rebooting on success).
+    coinServer.send(200, "application/json",
+        "{\"ok\":true,\"msg\":\"updating, will reboot on success\"}");
+    delay(50);                 // let the reply drain before we block on the download
+
+    setCoinAcceptor(false);    // block coins while we flash
+
+    // Pull from our own portal over the trusted hotspot LAN (plain HTTP — no TLS
+    // memory pressure on the ESP; the link is already IP-restricted + signed).
+    String url = String("http://") + cfg.portal_ip + ":" + cfg.portal_port
+                 + "/firmware/coin_nodemcu.bin";
+    WiFiClient uc;
+    HTTPClient http;
+    if (!http.begin(uc, url)) return;
+    http.setTimeout(20000);
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) { http.end(); return; }
+    int len = http.getSize();
+    if (len <= 0) { http.end(); return; }
+
+    if (!Update.begin((size_t)len)) { http.end(); return; }  // no OTA slot / too big
+    Update.setMD5(md5.c_str());                              // enforce integrity
+    size_t written = Update.writeStream(*http.getStreamPtr());
+    http.end();
+
+    if (written == (size_t)len && Update.end()) {   // end() verifies size + MD5
+        delay(200);
+        ESP.restart();                              // boot into the new image
+    }
+    // else: download short or MD5 mismatch → image NOT committed, current
+    // firmware stays live. Portal sees FW_VERSION unchanged and can retry.
+}
+
+bool connectWiFi() {
+    WiFi.persistent(false);        // don't rewrite creds to flash every boot (wear)
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);  // we manage reconnects manually; avoids DHCP races
+    WiFi.begin(cfg.ssid, cfg.pass);
+
+    // The ONT's hotspot AP can take 90-180s to come up at cold boot — far
+    // longer than this device. Wait patiently (up to ~150s) so we don't give
+    // up before the SSID is even broadcasting. yield()/delay() keeps the WiFi
+    // stack and watchdog fed during the wait.
+    const unsigned long TIMEOUT_MS = 150000UL;
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - start) < TIMEOUT_MS) {
+        delay(250);
+        yield();
+    }
+
+    if (WiFi.status() != WL_CONNECTED) return false;
+
+    // WLAN may still be bridged to br0 (192.168.8.1) when we first associate —
+    // the hotspot daemon can take tens of seconds to move WLAN to br1 (portal IP).
+    // On each mismatch: disconnect, wait 5s, then call begin() (not reconnect())
+    // to force a clean DHCP DISCOVER; reconnect() can reuse the old br0 lease
+    // and return the wrong gateway even after br1 has taken over.
+    const unsigned long GW_WAIT_MS = 60000UL;
+    unsigned long gwStart = millis();
+    while (WiFi.gatewayIP().toString() != String(cfg.portal_ip)) {
+        if (millis() - gwStart >= GW_WAIT_MS) {
+            WiFi.disconnect();
+            return false;   // br1 didn't bind in time; loop() watchdog will keep retrying
+        }
+        WiFi.disconnect();
+        delay(5000);
+        yield();
+        WiFi.begin(cfg.ssid, cfg.pass);
+        unsigned long rStart = millis();
+        while (WiFi.status() != WL_CONNECTED && (millis() - rStart) < 15000UL) {
+            delay(250);
+            yield();
+        }
+        if (WiFi.status() != WL_CONNECTED) return false;
+    }
+
+    return true;
+}
+
+void startNormalMode() {
+    isSetupMode = false;
+
+    // Best-effort connect. CRITICAL: never wipeConfig() on failure here. At
+    // cold boot the ONT hotspot AP may simply not be up yet, and erasing the
+    // saved credentials is what made the device "reset itself" into setup mode
+    // during ONT boot. Instead we always start the coin server and let the
+    // loop() watchdog + SDK auto-reconnect keep trying until the AP appears.
+    // Genuinely-wrong credentials are recovered via the D1 factory-reset button
+    // or the signed /reset endpoint — not by self-wiping on a transient miss.
+    connectWiFi();
+
+    coinServer.on("/start",   handle_coin_start);
+    coinServer.on("/status",  handle_coin_status);
+    coinServer.on("/cancel",  handle_coin_cancel);
+    coinServer.on("/nonce",   handle_nonce);
+    coinServer.on("/reset",   handle_admin_reset);
+    coinServer.on("/setwifi", handle_set_wifi);
+    coinServer.on("/version", handle_version);
+    coinServer.on("/update",  handle_update);
+    coinServer.begin();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ARDUINO SETUP & LOOP
+// ══════════════════════════════════════════════════════════════════════
+
+void setup() {
+        pinMode(D0, INPUT_PULLUP);
+    pinMode(D2, INPUT_PULLUP);
+    pinMode(D3, INPUT_PULLUP); // Has on-board 10k pullup, but software pullup adds stability
+    pinMode(D4, INPUT_PULLUP); // Has on-board LED, safe to pull up
+    pinMode(D5, INPUT_PULLUP);
+    pinMode(COIN_PIN,        INPUT_PULLUP);
+    pinMode(COIN_ENABLE_PIN, OUTPUT);
+    setCoinAcceptor(false);   // block coins on boot until a session starts
+
+    // ── Factory reset via D1 button held 3s ─────────────────────────
+    // Wire a momentary button between D1 (GPIO5) and GND.
+    // Hold during power-on → wipes /cfg.txt → reboots into setup AP.
+    pinMode(RESET_PIN, INPUT_PULLUP);
+    if (digitalRead(RESET_PIN) == LOW) {
+        unsigned long held = millis();
+        while (digitalRead(RESET_PIN) == LOW) {
+            if (millis() - held > 3000) {
+                if (LittleFS.begin()) wipeConfig();
+                delay(200);
+                ESP.restart();
+            }
+        }
+        // Released before 3s — normal boot, don't reset
+    }
+
+    attachInterrupt(digitalPinToInterrupt(COIN_PIN), onCoinPulse, CHANGE);
+
+    setConfigDefaults();
+
+    if (!LittleFS.begin()) {
+        // Filesystem mount failed — can't save config, go to setup mode
+        // (setup page will show save error; owner should check partition table)
+        startSetupMode();
+        return;
+    }
+
+    if (loadConfig()) {
+        startNormalMode();
+    } else {
+        startSetupMode();
+    }
+}
+
+void loop() {
+    if (isSetupMode) {
+        setupServer.handleClient();
+        return;
+    }
+
+    coinServer.handleClient();
+
+    // Deferred Wi-Fi credential switch requested via /setwifi. Applied a moment
+    // after we ACK so the HTTP reply drains and the portal has time to retune
+    // the AP onto the new SSID before we drop the old association. The 15s
+    // watchdog further below then keeps retrying until the new AP appears.
+    // Elapsed-subtraction compare so it stays correct across millis() rollover.
+    if (wifiChangePending && (millis() - wifiChangeReqMs) >= WIFI_CHANGE_DELAY_MS) {
+        wifiChangePending = false;
+        WiFi.disconnect();
+        delay(100);
+        WiFi.begin(cfg.ssid, cfg.pass);   // new creds already saved to cfg
+    }
+
+// --- ANTI-SPARK / EMI HEALING ---
+    // Continuously re-assert the coin slot enable pin during an active session.
+    // If a piezo spark scrambles the ESP8266's GPIO registers and turns D7 into 
+    // an INPUT, this forces it back to an OUTPUT almost instantly.
+    if (sessionActive && !finalizing) {
+        pinMode(COIN_ENABLE_PIN, OUTPUT);
+        digitalWrite(COIN_ENABLE_PIN, COIN_ENABLE_ACTIVE);
+    }
+    // PHASE 1: Initiate shutdown (user clicked Done/Cancel OR time ran out naturally)
+    if (sessionActive && !finalizing && (cancelRequested || (millis() - sessionStartMs) >= sessionTimeoutMs)) {
+        finalizing = true;
+        setCoinAcceptor(false); // Instantly block new physical coins from entering the slot
+    }
+
+    // PHASE 2: Wait for any currently-dropping coin to finish its pulses
+    if (sessionActive && finalizing) {
+        // 500ms of absolute silence means the coin has completely passed the sensor
+        if (millis() - lastPulseMs > 500) {
+            cancelRequested = false;
+            finalizing = false;
+            endSession(); // Shuts down session natively and posts the full correct amount
+        }
+    }
+
+    // Retry pending result POST after WiFi recovery (up to 10 attempts, 5s apart)
+    if (pendingResult && pendingRetries < 10) {
+        static unsigned long lastRetry = 0;
+        if (millis() - lastRetry > 5000) {
+            lastRetry = millis();
+            pendingRetries++;
+            post_result();
+        }
+    }
+
+    // WiFi watchdog — reconnect check every 15s.
+    // wrongGwStrikes: tolerate up to 3 consecutive wrong-gateway readings (45s)
+    // before forcing re-DHCP, so a slow br0→br1 bridge transition doesn't cause
+    // a tight disconnect/reconnect storm that prevents the correct lease arriving.
+    static unsigned long lastWifiCheck = 0;
+    static uint8_t wrongGwStrikes = 0;
+    if (millis() - lastWifiCheck > 15000) {
+        lastWifiCheck = millis();
+
+        if (WiFi.status() != WL_CONNECTED) {
+            wrongGwStrikes = 0;
+            WiFi.begin(cfg.ssid, cfg.pass);   // full begin → clean DHCP DISCOVER
+        }
+        else if (WiFi.gatewayIP().toString() != String(cfg.portal_ip)) {
+            // Wrong gateway (WLAN still on br0, or rogue DHCP).
+            // Give br1 time to bind before forcing re-DHCP.
+            if (++wrongGwStrikes >= 3) {
+                wrongGwStrikes = 0;
+                WiFi.disconnect();
+                delay(1000);
+                WiFi.begin(cfg.ssid, cfg.pass);  // reconnect immediately, don't wait for next cycle
+            }
+        }
+        else {
+            wrongGwStrikes = 0;                  // correct gateway — all good
+        }
+    }
+
+    // Scheduled daily reboot + heap watchdog. Defers the actual restart until
+    // the machine is idle so an active coin session is never interrupted.
+    serviceReboot();
+
+    delay(10);
+}

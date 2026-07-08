@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint { font-size: 11.5px; color: var(--text-secondary); margin-top: 3px; }
+        code { color: #ccc; font-size: 12px; }
+
+        /* ── Interface grid ───────────────────────────────────── */
+        .iface-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px,1fr));
+            gap: 10px;
+            margin-top: 12px;
+        }
+        .iface-card {
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px 14px;
+            cursor: pointer;
+            transition: border-color .18s, background .18s;
+            user-select: none;
+            position: relative;
+        }
+        .iface-card:hover { border-color: #555; background: var(--bg-surface-hover); }
+        .iface-card.selected {
+            border-color: var(--accent-color);
+            background: rgba(255,255,255,.06);
+        }
+        .iface-card.in-bridge {
+            border-color: #81c784;
+            background: rgba(76,175,80,.07);
+        }
+        .iface-card.in-bridge.selected {
+            border-color: #81c784;
+        }
+        .iface-check {
+            position: absolute; top: 10px; right: 10px;
+            width: 16px; height: 16px; border-radius: 50%;
+            background: var(--border-color);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 9px; color: transparent;
+            transition: background .15s, color .15s;
+        }
+        .iface-card.selected .iface-check {
+            background: #fff; color: #222;
+        }
+        /* Deselected in-bridge state handled below */
+        .iface-name  { font-size: 14px; font-weight: 700; margin-bottom: 2px; padding-right: 20px; }
+        .iface-meta  { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+        .iface-state {
+            display: inline-block; padding: 1px 7px; border-radius: 3px;
+            font-size: 10px; font-weight: 700; margin-top: 4px;
+            text-transform: uppercase; letter-spacing: .06em;
+        }
+        .iface-state.up   { background: rgba(76,175,80,.2); color: #81c784; }
+        .iface-state.down { background: rgba(255,255,255,.07); color: #888; }
+
+        /* ── Bridge members ───────────────────────────────────── */
+        .bridge-member {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 7px 10px; border-bottom: 1px solid rgba(255,255,255,.04);
+            font-size: 13px; font-family: monospace;
+        }
+        .bridge-member:last-child { border-bottom: none; }
+
+        /* ── Warning banner ───────────────────────────────────── */
+        .warn-banner {
+            background: rgba(255,152,0,.1); border: 1px solid rgba(255,152,0,.3);
+            border-radius: 6px; padding: 10px 14px; font-size: 12.5px;
+            color: #ffb74d; margin-bottom: 16px; display: none;
+        }
+        .warn-banner.visible { display: block; }
+
+        /* ── In-bridge but DESELECTED from config (will be removed) ── */
+        .iface-card.in-bridge:not(.selected) {
+            border-color: #e67e22;
+            background: rgba(230,126,34,.07);
+        }
+        .iface-card.in-bridge:not(.selected):hover {
+            border-color: #e67e22;
+            background: rgba(230,126,34,.13);
+        }
+        .iface-card.in-bridge:not(.selected) .iface-check {
+            background: rgba(230,126,34,.25);
+            color: #e67e22;
+        }
+
+        /* ── Mobile ───────────────────────────────────────────── */
+        @media (max-width: 575px) {
+            .iface-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px,1fr));
+                gap: 8px;
+            }
+            .iface-card { padding: 10px 11px; }
+            .iface-name { font-size: 13px; }
+            .iface-meta { font-size: 10px; }
+            .iface-state { font-size: 9px; padding: 1px 5px; }
+            .warn-banner { font-size: 11.5px; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:860px;">
+
+    <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+        <h5 class="mb-0" style="font-size:15px;">Hotspot — Interface Binding</h5>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadIfaces()">Refresh</button>
+    </div>
+
+    <!-- ── Warning when hotspot is running ──────────────────── -->
+    <div class="warn-banner" id="running-warn">
+        ⚠ The hotspot is currently <strong>running</strong>. Interface changes will take effect
+        on the next hotspot start. Stop the hotspot first if you need changes to apply immediately.
+    </div>
+
+    <!-- ── Bridge name ──────────────────────────────────────── -->
+    <div class="card mb-3">
+        <div class="card-header">Bridge Interface</div>
+        <div class="card-body">
+            <div class="row g-3 align-items-end">
+                <div class="col-12 col-sm-5">
+                    <label class="form-label">Bridge Device Name</label>
+                    <input type="text" class="form-control" id="bridge-name" placeholder="br1">
+                    <div class="field-hint">The bridge device that enslaves hotspot ports (e.g. <code>br1</code>)</div>
+                </div>
+                <div class="col-12 col-sm-4">
+                    <label class="form-label">Portal IP Address</label>
+                    <input type="text" class="form-control" id="portal-ip" placeholder="192.168.99.1">
+                    <div class="field-hint">IP assigned to the bridge / captive portal</div>
+                </div>
+                <div class="col-12 col-sm-3">
+                    <label class="form-label">Portal Port</label>
+                    <input type="number" class="form-control" id="portal-port" placeholder="808" min="1" max="65535" oninput="checkPortalPort()">
+                    <div class="field-hint">HTTP port for the portal</div>
+                    <div class="field-hint" id="port80-warning" style="display:none;color:var(--bs-danger,#dc3545);">
+                        ⚠ Port 80 also kills the router's own "boa" admin httpd and clears any vendor firewall rules blocking port 80, so the portal can bind it. Runs continuously as a watchdog while set to 80.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Current bridge members (live kernel state) ───────── -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Current Bridge Members <span id="bridge-name-label" style="color:var(--text-secondary);font-size:12px;">(loading…)</span></span>
+        </div>
+        <div class="card-body p-0" id="bridge-members-wrap">
+            <div style="padding:16px;color:var(--text-secondary);font-size:13px;" id="bridge-members-empty">Loading…</div>
+            <div id="bridge-members-list"></div>
+        </div>
+    </div>
+
+    <!-- ── Available interfaces (click to select) ───────────── -->
+    <div class="card mb-3">
+        <div class="card-header">Available Interfaces</div>
+        <div class="card-body">
+            <div class="field-hint mb-3">
+                Tap a card to add or remove it from <code>HOTSPOT_INTERFACES</code>.
+                &nbsp;
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#81c784;margin-right:3px;vertical-align:middle;"></span><span style="color:#81c784;">Green</span> = in bridge now.
+                &nbsp;
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.5);margin-right:3px;vertical-align:middle;"></span><span style="color:var(--text-primary);">White ✓</span> = selected in config.
+                &nbsp;
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#e67e22;margin-right:3px;vertical-align:middle;"></span><span style="color:#e67e22;">Amber ×</span> = in bridge but removed from config.
+                Interfaces beginning with <code>lo</code>, <code>br</code>, <code>sit</code> are hidden.
+            </div>
+            <div class="iface-grid" id="iface-grid">
+                <div style="color:var(--text-secondary);font-size:13px;grid-column:1/-1;">Loading interfaces…</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="d-flex gap-2 flex-wrap mb-4">
+        <button class="btn btn-primary" onclick="saveIfaces()">Save Interface Config</button>
+        <button class="btn btn-outline-secondary" onclick="loadIfaces()">Discard</button>
+    </div>
+
+</div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
+function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
+function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
+function checkPortalPort(){
+    var v = document.getElementById('portal-port').value.trim();
+    document.getElementById('port80-warning').style.display = (v === '80') ? 'block' : 'none';
+}
+
+var _data = {};
+var _selected = [];  // list of interface names currently selected in the UI
+
+function loadIfaces(){
+    fetch('/cgi-bin/hotspot.cgi?action=ifaces_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (!d.ok){ toastr.error('Failed to load interface data'); return; }
+            _data = d;
+            _selected = (d.hotspot_interfaces || '').split(/\s+/).filter(Boolean);
+
+            document.getElementById('bridge-name').value  = d.hotspot_br   || '';
+            document.getElementById('portal-ip').value    = d.portal_ip    || '';
+            document.getElementById('portal-port').value  = d.portal_port  || '';
+            checkPortalPort();
+            document.getElementById('bridge-name-label').textContent = '(' + (d.hotspot_br||'br1') + ')';
+
+            // Running warn
+            document.getElementById('running-warn').classList.toggle('visible', d.hotspot_running);
+
+            // Bridge members
+            renderBridgeMembers(d.bridge_members || []);
+
+            // Interface cards
+            renderIfaceGrid(d.interfaces || []);
+        })
+        .catch(function(){ toastr.error('Network error'); });
+}
+
+function renderBridgeMembers(members){
+    var empty = document.getElementById('bridge-members-empty');
+    var list  = document.getElementById('bridge-members-list');
+    if (!members.length){
+        empty.textContent = 'No interfaces currently in the bridge (or bridge does not exist).';
+        empty.style.display='block'; list.innerHTML=''; return;
+    }
+    empty.style.display='none';
+    list.innerHTML = members.map(function(m){
+        return '<div class="bridge-member">'+
+               '<span><code>'+escHtml(m.name)+'</code> &nbsp;<span style="color:var(--text-secondary);font-size:12px;">'+escHtml(m.mac||'')+'</span></span>'+
+               '<span class="iface-state '+(m.up?'up':'down')+'">'+( m.up?'up':'down')+'</span>'+
+               '</div>';
+    }).join('');
+}
+
+function bridgeTag(inBridge, inSel){
+    if (inBridge && inSel)  return '&nbsp;<span style="font-size:10px;color:#81c784;">in bridge</span>';
+    if (inBridge && !inSel) return '&nbsp;<span style="font-size:10px;color:#e67e22;">⚠ will remove</span>';
+    if (!inBridge && inSel) return '&nbsp;<span style="font-size:10px;color:#6ea8fe;">will add</span>';
+    return '';
+}
+
+function renderIfaceGrid(ifaces){
+    var grid = document.getElementById('iface-grid');
+    if (!ifaces.length){
+        grid.innerHTML='<div style="color:var(--text-secondary);font-size:13px;grid-column:1/-1;">No interfaces found.</div>';
+        return;
+    }
+    grid.innerHTML = ifaces.map(function(ifc){
+        var inBridge  = ifc.in_bridge;
+        var inSel     = _selected.indexOf(ifc.name) !== -1;
+        var cls = 'iface-card' + (inSel?' selected':'') + (inBridge?' in-bridge':'');
+        // ✓ only when explicitly selected; × = in bridge but deselected from config
+        var checkIcon = inSel ? '✓' : (inBridge ? '×' : '');
+        return '<div class="'+cls+'" id="ifc-'+ifc.name+'" onclick="toggleIface(\''+escAttr(ifc.name)+'\')" data-iface="'+escAttr(ifc.name)+'">'+
+               '<div class="iface-check">'+checkIcon+'</div>'+
+               '<div class="iface-name">'+escHtml(ifc.name)+'</div>'+
+               '<div class="iface-meta">'+escHtml(ifc.mac||'—')+'</div>'+
+               (ifc.type?'<div class="iface-meta">'+escHtml(ifc.type)+'</div>':'')+
+               '<div>'+
+               '<span class="iface-state '+(ifc.up?'up':'down')+'">'+(ifc.up?'up':'down')+'</span>'+
+               '<span class="iface-br-tag">'+bridgeTag(inBridge,inSel)+'</span>'+
+               '</div>'+
+               '</div>';
+    }).join('');
+}
+
+function toggleIface(name){
+    var idx = _selected.indexOf(name);
+    if (idx !== -1){
+        _selected.splice(idx,1);
+    } else {
+        _selected.push(name);
+    }
+    var card = document.getElementById('ifc-'+name);
+    if (!card) return;
+    var inBridge = card.classList.contains('in-bridge');
+    var inSel    = _selected.indexOf(name) !== -1;
+    card.className = 'iface-card' + (inSel?' selected':'') + (inBridge?' in-bridge':'');
+    card.querySelector('.iface-check').textContent = inSel ? '✓' : (inBridge ? '×' : '');
+    var brTag = card.querySelector('.iface-br-tag');
+    if (brTag) brTag.innerHTML = bridgeTag(inBridge, inSel);
+}
+
+function saveIfaces(){
+    var br     = document.getElementById('bridge-name').value.trim();
+    var pip    = document.getElementById('portal-ip').value.trim();
+    var pport  = document.getElementById('portal-port').value.trim();
+    var ifaces = _selected.join(' ');
+
+    if (!br)    { toastr.warning('Bridge name is required (e.g. br1)'); return; }
+    if (!ifaces){ toastr.warning('Select at least one interface'); return; }
+
+    showOverlay('Saving interface config…');
+    fetch('/cgi-bin/hotspot.cgi?action=ifaces_set', {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body: 'hotspot_br='         + encodeURIComponent(br)
+            + '&hotspot_interfaces='+ encodeURIComponent(ifaces)
+            + '&portal_ip='         + encodeURIComponent(pip)
+            + '&portal_port='       + encodeURIComponent(pport)
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        hideOverlay();
+        if (d.ok) toastr.success('Interface config saved to lmehspt.sh');
+        else      toastr.error('Save failed: '+(d.error||''));
+    })
+    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+}
+
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escAttr(s){ return String(s).replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
+
+window.addEventListener('DOMContentLoaded', loadIfaces);
+</script>
+</body>
+</html>

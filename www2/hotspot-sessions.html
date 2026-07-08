@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .session-table { width:100%; border-collapse:collapse; font-size:13px; }
+        .session-table th {
+            color:var(--text-secondary); font-size:11px; text-transform:uppercase;
+            letter-spacing:.06em; padding:6px 12px; border-bottom:1px solid var(--border-color); text-align:left;
+        }
+        .session-table td { padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:middle; }
+        .session-table tr:last-child td { border-bottom:none; }
+        .session-table tr:hover td { background:var(--bg-surface-hover); }
+        .time-bar-wrap { height:4px; background:rgba(255,255,255,.08); border-radius:2px; min-width:80px; }
+        .time-bar      { height:100%; border-radius:2px; background:#fff; transition:width 1s linear; }
+        .empty-state   { color:var(--text-secondary); font-size:13px; text-align:center; padding:28px 0; }
+        code { color:#ccc; font-size:12px; }
+        .status-pill {
+            display:inline-block; padding:2px 9px; border-radius:3px; font-size:11px; font-weight:700;
+        }
+        .status-pill.active { background:rgba(76,175,80,.2); color:#81c784; }
+        .status-pill.paused { background:rgba(255,152,0,.2); color:#ffb74d; }
+
+        /* Kick all button */
+        .kick-all-wrap { margin-bottom:14px; display:flex; justify-content:flex-end; gap:8px; align-items:center; }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:960px;">
+
+    <div class="kick-all-wrap">
+        <span id="session-count" style="font-size:13px;color:var(--text-secondary);"></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadSessions()">Refresh</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="kickAll()" id="kick-all-btn" style="display:none;">Kick All</button>
+    </div>
+
+    <div class="card">
+        <div class="card-header">Active &amp; Paused Sessions</div>
+        <div class="card-body p-0">
+            <div style="overflow-x:auto; min-height:80px;" id="sessions-wrap">
+                <div class="empty-state" id="sessions-empty">Loading…</div>
+                <table class="session-table" id="sessions-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th>MAC</th>
+                            <th>IP</th>
+                            <th>Remaining</th>
+                            <th>Progress</th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="sessions-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ── Time Adjust Modal ── -->
+<div class="modal fade" id="timeModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:320px;margin-left:auto;margin-right:auto;">
+        <div class="modal-content" style="border:1px solid var(--border-color);">
+            <div class="modal-header py-2 px-3">
+                <div>
+                    <div class="fw-semibold" id="tm-title" style="font-size:14px;"></div>
+                    <code id="tm-mac" style="font-size:11px;color:var(--text-secondary);"></code>
+                </div>
+                <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal" style="font-size:12px;"></button>
+            </div>
+            <div class="modal-body px-3 pb-2 pt-3">
+                <div class="d-flex gap-2 justify-content-center align-items-end mb-3">
+                    <div class="text-center">
+                        <label for="tm-days" style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">Days</label>
+                        <input id="tm-days" type="number" min="0" max="365" value="0"
+                               class="form-control form-control-sm text-center fw-semibold"
+                               style="width:68px;font-size:18px;padding:6px 4px;"
+                               oninput="_tmUpdatePreview()">
+                    </div>
+                    <span style="font-size:20px;font-weight:300;color:var(--text-secondary);padding-bottom:6px;">:</span>
+                    <div class="text-center">
+                        <label for="tm-hours" style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">Hours</label>
+                        <input id="tm-hours" type="number" min="0" max="23" value="0"
+                               class="form-control form-control-sm text-center fw-semibold"
+                               style="width:68px;font-size:18px;padding:6px 4px;"
+                               oninput="_tmUpdatePreview()">
+                    </div>
+                    <span style="font-size:20px;font-weight:300;color:var(--text-secondary);padding-bottom:6px;">:</span>
+                    <div class="text-center">
+                        <label for="tm-minutes" style="font-size:11px;color:var(--text-secondary);display:block;margin-bottom:4px;">Mins</label>
+                        <input id="tm-minutes" type="number" min="0" max="59" value="30"
+                               class="form-control form-control-sm text-center fw-semibold"
+                               style="width:68px;font-size:18px;padding:6px 4px;"
+                               oninput="_tmUpdatePreview()">
+                    </div>
+                </div>
+                <p id="tm-preview" style="font-size:12px;color:var(--text-secondary);text-align:center;margin:0;min-height:18px;"></p>
+            </div>
+            <div class="modal-footer py-2 px-3" style="border-top:1px solid var(--border-color);">
+                <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-sm btn-primary" id="tm-confirm" onclick="confirmTimeModal()">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
+function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
+function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
+
+function fmtTime(s){
+    var d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60), sec=s%60;
+    if (d>0) return d+'d '+h+'h '+m+'m';
+    if (h>0) return h+'h '+m+'m';
+    if (m>0) return m+'m '+sec+'s';
+    return sec+'s';
+}
+
+var _sessions = [];
+
+function loadSessions(){
+    var empty = document.getElementById('sessions-empty');
+    var tbl   = document.getElementById('sessions-table');
+    var tbody = document.getElementById('sessions-tbody');
+    var cnt   = document.getElementById('session-count');
+    var kab   = document.getElementById('kick-all-btn');
+    empty.textContent='Loading…'; empty.style.display='block'; tbl.style.display='none';
+
+    fetch('/cgi-bin/hotspot.cgi?action=sessions', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(arr){
+            _sessions = arr;
+            cnt.textContent = arr.length ? arr.length + ' session' + (arr.length>1?'s':'') : '';
+            kab.style.display = arr.length ? '' : 'none';
+            if (!arr.length){
+                empty.textContent='No active sessions'; empty.style.display='block'; tbl.style.display='none'; return;
+            }
+            tbody.innerHTML='';
+            arr.forEach(function(s){
+                var pct = s.total>0 ? Math.max(0,Math.min(100,Math.round((s.remaining/s.total)*100))) : 0;
+                var pill = s.paused
+                    ? '<span class="status-pill paused">Paused</span>'
+                    : '<span class="status-pill active">Active</span>';
+                var tr=document.createElement('tr');
+                tr.innerHTML=
+                    '<td><code>'+s.mac+'</code></td>'+
+                    '<td><code>'+s.ip+'</code></td>'+
+                    '<td style="white-space:nowrap;">'+fmtTime(s.remaining)+'</td>'+
+                    '<td>'+
+                        '<div class="time-bar-wrap"><div class="time-bar" style="width:'+pct+'%;"></div></div>'+
+                        '<div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">'+fmtTime(s.used)+' used / '+fmtTime(s.total)+' total</div>'+
+                    '</td>'+
+                    '<td>'+pill+'</td>'+
+                    '<td>'+
+                        '<div style="display:flex;flex-direction:column;gap:3px;min-width:108px;">'+
+                            '<div style="display:flex;gap:3px;">'+
+                                '<button class="btn btn-sm btn-outline-primary flex-fill" onclick="openTimeModal(\'add\',\''+s.mac+'\',this)">+Time</button>'+
+                                '<button class="btn btn-sm btn-outline-warning flex-fill" onclick="openTimeModal(\'remove\',\''+s.mac+'\',this)">−Time</button>'+
+                            '</div>'+
+                            '<div style="display:flex;gap:3px;">'+
+                                '<button class="btn btn-sm btn-outline-secondary flex-fill" onclick="kickUser(\''+s.mac+'\',this)">Kick</button>'+
+                                '<button class="btn btn-sm btn-outline-danger flex-fill" onclick="removeUser(\''+s.mac+'\',this)">Remove</button>'+
+                            '</div>'+
+                        '</div>'+
+                    '</td>';
+                tbody.appendChild(tr);
+            });
+            empty.style.display='none'; tbl.style.display='table';
+        })
+        .catch(function(){ empty.textContent='Failed to load sessions'; });
+}
+
+function kickUser(mac, btn){
+    if (!confirm('Kick '+mac+'?')) return;
+    btn.disabled=true; btn.textContent='…';
+    fetch('/cgi-bin/hotspot.cgi?action=kick',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mac='+encodeURIComponent(mac)})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Kicked '+mac); loadSessions(); }
+        else { toastr.error('Kick failed: '+(d.error||'')); btn.disabled=false; btn.textContent='Kick'; }
+    })
+    .catch(function(){ toastr.error('Network error'); btn.disabled=false; btn.textContent='Kick'; });
+}
+
+/* ── d/h/m helpers ── */
+// Format seconds → "1h 30m", "2d 3h", "45m", etc.
+function fmtDHM(secs) {
+    secs = Math.abs(Math.round(secs));
+    var d = Math.floor(secs / 86400);
+    var h = Math.floor((secs % 86400) / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var parts = [];
+    if (d) parts.push(d + 'd');
+    if (h) parts.push(h + 'h');
+    if (m || !parts.length) parts.push(m + 'm');
+    return parts.join(' ');
+}
+
+/* ── Time modal state ── */
+var _tmAction = null; // 'add' | 'remove'
+var _tmMac    = null;
+var _tmBtn    = null;
+var _tmModal  = null;
+
+function _tmUpdatePreview() {
+    var d    = parseInt(document.getElementById('tm-days').value,    10) || 0;
+    var h    = parseInt(document.getElementById('tm-hours').value,   10) || 0;
+    var mins = parseInt(document.getElementById('tm-minutes').value, 10) || 0;
+    var total = d * 1440 + h * 60 + mins;
+    var pre  = document.getElementById('tm-preview');
+    var btn  = document.getElementById('tm-confirm');
+    if (total < 1) {
+        pre.textContent = 'Enter at least 1 minute';
+        pre.style.color = 'var(--bs-danger, #f87171)';
+        btn.disabled = true;
+    } else {
+        var verb = (_tmAction === 'add') ? 'Add' : 'Deduct';
+        pre.textContent = verb + ' ' + fmtDHM(total * 60);
+        pre.style.color = 'var(--text-secondary)';
+        btn.disabled = false;
+    }
+}
+
+function openTimeModal(action, mac, btn) {
+    _tmAction = action;
+    _tmMac    = mac;
+    _tmBtn    = btn;
+
+    var isAdd = action === 'add';
+    document.getElementById('tm-title').textContent =
+        (isAdd ? 'Add Time' : 'Deduct Time');
+    document.getElementById('tm-mac').textContent = mac;
+    document.getElementById('tm-days').value    = 0;
+    document.getElementById('tm-hours').value   = 0;
+    document.getElementById('tm-minutes').value = 30;
+
+    var confirmBtn = document.getElementById('tm-confirm');
+    confirmBtn.className = 'btn btn-sm ' + (isAdd ? 'btn-primary' : 'btn-warning');
+
+    _tmUpdatePreview();
+
+    if (!_tmModal) _tmModal = new bootstrap.Modal(document.getElementById('timeModal'));
+    _tmModal.show();
+    // Focus the minutes input after the modal animates in
+    document.getElementById('timeModal').addEventListener('shown.bs.modal', function focusMins() {
+        document.getElementById('tm-minutes').select();
+        document.getElementById('timeModal').removeEventListener('shown.bs.modal', focusMins);
+    });
+}
+
+function confirmTimeModal() {
+    var d    = parseInt(document.getElementById('tm-days').value,    10) || 0;
+    var h    = parseInt(document.getElementById('tm-hours').value,   10) || 0;
+    var mins = parseInt(document.getElementById('tm-minutes').value, 10) || 0;
+    var total = d * 1440 + h * 60 + mins;
+    if (total < 1) { toastr.warning('Enter at least 1 minute.'); return; }
+
+    _tmModal.hide();
+
+    var action = _tmAction, mac = _tmMac, btn = _tmBtn;
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '…';
+
+    var endpoint = (action === 'add') ? 'add_time' : 'remove_time';
+    fetch('/cgi-bin/hotspot.cgi?action=' + endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'mac=' + encodeURIComponent(mac) + '&minutes=' + total
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok) {
+            var label = fmtDHM(total * 60);
+            if (action === 'add') {
+                toastr.success('Added ' + label + ' to ' + mac + (d.created ? ' (new session)' : ''));
+            } else {
+                toastr.success('Deducted ' + label + ' from ' + mac);
+            }
+            loadSessions();
+        } else {
+            toastr.error((action === 'add' ? 'Add' : 'Deduct') + ' time failed: ' + (d.error || ''));
+            btn.disabled = false; btn.textContent = orig;
+        }
+    })
+    .catch(function(){ toastr.error('Network error'); btn.disabled = false; btn.textContent = orig; });
+}
+
+function removeUser(mac, btn){
+    if (!confirm('Permanently delete '+mac+' and all their remaining time?\n\nThis cannot be undone.')) return;
+    btn.disabled=true; btn.textContent='…';
+    fetch('/cgi-bin/hotspot.cgi?action=remove_user',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mac='+encodeURIComponent(mac)})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Removed '+mac); loadSessions(); }
+        else { toastr.error('Remove failed: '+(d.error||'')); btn.disabled=false; btn.textContent='Remove'; }
+    })
+    .catch(function(){ toastr.error('Network error'); btn.disabled=false; btn.textContent='Remove'; });
+}
+
+function kickAll(){
+    if (!_sessions.length) return;
+    if (!confirm('Kick all '+_sessions.length+' session(s)?')) return;
+    showOverlay('Kicking all sessions…');
+    var macs = _sessions.map(function(s){ return s.mac; });
+    var chain = Promise.resolve();
+    macs.forEach(function(mac){
+        chain = chain.then(function(){
+            return fetch('/cgi-bin/hotspot.cgi?action=kick',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mac='+encodeURIComponent(mac)});
+        }).then(function(r){ return r.json(); });
+    });
+    chain.then(function(){ hideOverlay(); toastr.success('Kicked '+macs.length+' session(s)'); loadSessions(); })
+         .catch(function(){ hideOverlay(); toastr.error('Some kicks failed'); loadSessions(); });
+}
+
+window.addEventListener('DOMContentLoaded', function(){
+    loadSessions();
+    setInterval(loadSessions, 10000);
+});
+</script>
+</body>
+</html>
+
+
+

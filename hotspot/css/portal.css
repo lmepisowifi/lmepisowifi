@@ -1,0 +1,578 @@
+/* ======================================= FONT ======================================= */
+@font-face {
+  font-family: "Nunito";
+  src: url("/font/Nunito.ttf?v=1.0.0") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+}
+
+/* ======================================= THEME VARIABLES ======================================= */
+:root {
+  /* Dark Mode Variables (Default) */
+  --bg-body:          #0f0f11;
+  --bg-surface:       #18181c;
+  --bg-surface-hover: #222227;
+  --bg-input:         #1d1d22;
+  --text-primary:     #f4f4f5;
+  --text-secondary:   #a1a1aa;
+  --accent-color:     #ffffff;
+  --accent-hover:     #e4e4e7;
+  --accent-text:      #18181b;
+  --border-color:     #2e2e33;
+  --card-shadow:      0 20px 40px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.15);
+  --coin-sym-color:   #f59e0b;
+  --coin-val-color:   #fbbf24;
+
+  /* Button Variables (Dark Mode) */
+  --btn-primary-bg:           #ffffff;
+  --btn-primary-border:       #ffffff;
+  --btn-primary-color:        #18181b;
+  --btn-primary-hover-bg:     #e4e4e7;
+  --btn-primary-hover-border: #e4e4e7;
+
+  --btn-coin-bg:              rgba(245, 158, 11, 0.12);
+  --btn-coin-border:          #f59e0b;
+  --btn-coin-color:           #fbbf24;
+  --btn-coin-hover-bg:        rgba(245, 158, 11, 0.2);
+  --btn-coin-hover-border:    #fbbf24;
+  --btn-coin-hover-color:     #fef08a;
+
+  --btn-rates-bg:             rgba(37, 99, 235, 0.12);
+  --btn-rates-border:         #3b82f6;
+  --btn-rates-color:          #60a5fa;
+  --btn-rates-hover-bg:       rgba(37, 99, 235, 0.22);
+  --btn-rates-hover-border:   #60a5fa;
+  --btn-rates-hover-color:    #93c5fd;
+
+  --btn-danger-bg:            rgba(239, 68, 68, 0.12);
+  --btn-danger-border:        #ef4444;
+  --btn-danger-color:         #fca5a5;
+  --btn-danger-hover-bg:      rgba(239, 68, 68, 0.22);
+  --btn-danger-hover-border:  #fca5a5;
+  --btn-danger-hover-color:   #fee2e2;
+
+  --btn-done-bg:              rgba(16, 185, 129, 0.12);
+  --btn-done-border:          #10b981;
+  --btn-done-color:           #a7f3d0;
+  --btn-done-hover-bg:        rgba(16, 185, 129, 0.22);
+  --btn-done-hover-border:    #a7f3d0;
+  --btn-done-hover-color:     #d1fae5;
+
+  --focus-shadow:             0 0 0 3px rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] {
+  /* Light Mode Variables */
+  --bg-body:          #e2e8f0;
+  --bg-surface:       #ffffff;
+  --bg-surface-hover: #f1f5f9;
+  --bg-input:         #f8fafc;
+  --text-primary:     #0f172a;
+  --text-secondary:   #64748b;
+  --accent-color:     #0f172a;
+  --accent-hover:     #1e293b;
+  --accent-text:      #ffffff;
+  --border-color:     #cbd5e1;
+  --card-shadow:      0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 8px 16px -6px rgba(15, 23, 42, 0.04);
+  --coin-sym-color:   #b45309;
+  --coin-val-color:   #d97706;
+
+  /* Button Variables (Light Mode) */
+  --btn-primary-bg:           #0f172a;
+  --btn-primary-border:       #0f172a;
+  --btn-primary-color:        #ffffff;
+  --btn-primary-hover-bg:     #1e293b;
+  --btn-primary-hover-border: #1e293b;
+
+  --btn-coin-bg:              #f59e0b;
+  --btn-coin-border:          #d97706;
+  --btn-coin-color:           #431407;
+  --btn-coin-hover-bg:        #d97706;
+  --btn-coin-hover-border:    #b45309;
+  --btn-coin-hover-color:     #431407;
+
+  --btn-rates-bg:             #2563eb;
+  --btn-rates-border:         #1d4ed8;
+  --btn-rates-color:          #ffffff;
+  --btn-rates-hover-bg:       #1d4ed8;
+  --btn-rates-hover-border:   #1e40af;
+  --btn-rates-hover-color:    #ffffff;
+
+  --btn-danger-bg:            #ef4444;
+  --btn-danger-border:        #dc2626;
+  --btn-danger-color:         #ffffff;
+  --btn-danger-hover-bg:      #dc2626;
+  --btn-danger-hover-border:  #b91c1c;
+  --btn-danger-hover-color:   #ffffff;
+
+  --btn-done-bg:              #10b981;
+  --btn-done-border:          #059669;
+  --btn-done-color:           #ffffff;
+  --btn-done-hover-bg:        #059669;
+  --btn-done-hover-border:    #047857;
+  --btn-done-hover-color:     #ffffff;
+
+  --focus-shadow:             0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* ======================================= GLOBAL RESET ======================================= */
+*, *::before, *::after {
+  font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent !important;
+}
+
+html, body {
+  background-color: var(--bg-body) !important;
+  color: var(--text-primary) !important;
+  margin: 0; padding: 0;
+  scrollbar-color: var(--border-color) var(--bg-body);
+  scrollbar-gutter: stable;
+  transition: background-color 0.25s, color 0.25s;
+}
+
+::selection {
+  background-color: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+/* ======================================= PORTAL LAYOUT ======================================= */
+.portal-wrap {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+}
+
+.portal-card {
+  width: 100%;
+  max-width: 410px;
+  background: var(--bg-surface) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 12px !important;
+  overflow: hidden;
+  box-shadow: var(--card-shadow);
+  transition: background-color 0.25s, border-color 0.25s, box-shadow 0.25s;
+}
+
+/* ======================================= CARD HEADER ======================================= */
+.portal-header {
+  background: var(--bg-surface-hover);
+  border-bottom: 1px solid var(--border-color);
+  padding: 12px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: background-color 0.25s, border-color 0.25s;
+}
+
+.portal-signal {
+  height: 32px;
+  width: auto;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.portal-brand {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+  line-height: 1.2;
+}
+
+.portal-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  line-height: 1.2;
+}
+
+/* ======================================= BANNER IMAGE ======================================= */
+.portal-banner-img {
+  width: 100%;
+  max-height: 120px;
+  object-fit: cover;
+  display: none;
+  border-top: 1px solid var(--border-color);
+}
+.portal-banner-img.visible {
+  display: block;
+}
+
+/* ======================================= THEME TOGGLE BUTTON ======================================= */
+.theme-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s, color 0.2s;
+  outline: none !important;
+}
+.theme-toggle-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.theme-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+}
+:root[data-theme="dark"] .theme-toggle-btn .sun-icon  { display: block; }
+:root[data-theme="dark"] .theme-toggle-btn .moon-icon { display: none; }
+:root[data-theme="light"] .theme-toggle-btn .sun-icon  { display: none; }
+:root[data-theme="light"] .theme-toggle-btn .moon-icon { display: block; }
+
+.portal-body { padding: 20px; }
+
+/* ======================================= VIEW HEADERS ======================================= */
+.view-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.view-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-bottom: 1.2rem;
+}
+
+/* ======================================= FORM INPUTS ======================================= */
+.form-control {
+  background-color: var(--bg-input) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-primary) !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+  height: 42px !important;
+  padding: 0 12px !important;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.form-control::placeholder {
+  color: var(--text-secondary) !important;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  opacity: 1 !important;
+}
+
+.form-control:focus {
+  border-color: var(--accent-color) !important;
+  box-shadow: var(--focus-shadow) !important;
+  outline: none !important;
+}
+
+.form-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 5px !important;
+}
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  border: 1px solid var(--border-color) !important;
+}
+input:-webkit-autofill:focus {
+  border-color: var(--accent-color) !important;
+}
+
+/* ======================================= BUTTONS ======================================= */
+.btn {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  border-radius: 8px !important;
+  padding: 10px 18px !important;
+  width: 100%;
+  display: block;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  cursor: pointer;
+  text-align: center;
+  border: 1px solid transparent !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.btn:active {
+  transform: scale(0.98);
+  opacity: 0.9;
+}
+
+.btn-primary {
+  background: var(--btn-primary-bg) !important;
+  border: 1px solid var(--btn-primary-border) !important;
+  color: var(--btn-primary-color) !important;
+}
+.btn-primary:hover {
+  background: var(--btn-primary-hover-bg) !important;
+  border-color: var(--btn-primary-hover-border) !important;
+  color: var(--btn-primary-color) !important;
+}
+.btn-primary:disabled {
+  background: var(--bg-surface-hover) !important;
+  border-color: var(--border-color) !important;
+  color: var(--text-secondary) !important;
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+}
+
+.btn-outline-secondary {
+  background: transparent !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-secondary) !important;
+}
+.btn-outline-secondary:hover {
+  background: var(--bg-surface-hover) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--text-secondary) !important;
+}
+.btn-outline-secondary:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+.btn-outline-secondary:disabled:hover {
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.btn-outline-danger {
+  background: rgba(239, 68, 68, 0.05) !important;
+  border: 1px solid var(--btn-danger-border) !important;
+  color: var(--btn-danger-border) !important;
+}
+.btn-outline-danger:hover {
+  background: var(--btn-danger-hover-bg) !important;
+  border-color: var(--btn-danger-hover-border) !important;
+  color: var(--btn-danger-hover-color) !important;
+}
+
+.btn-coin {
+  background: var(--btn-coin-bg) !important;
+  border: 1px solid var(--btn-coin-border) !important;
+  color: var(--btn-coin-color) !important;
+}
+.btn-coin:hover {
+  background: var(--btn-coin-hover-bg) !important;
+  border-color: var(--btn-coin-hover-border) !important;
+  color: var(--btn-coin-hover-color) !important;
+}
+
+.btn-rates {
+  background: var(--btn-rates-bg) !important;
+  border: 1px solid var(--btn-rates-border) !important;
+  color: var(--btn-rates-color) !important;
+  margin-top: 8px;
+}
+.btn-rates:hover {
+  background: var(--btn-rates-hover-bg) !important;
+  border-color: var(--btn-rates-hover-border) !important;
+  color: var(--btn-rates-hover-color) !important;
+}
+
+#btn-resume, #btn-pause {
+  background: var(--btn-danger-bg) !important;
+  border: 1px solid var(--btn-danger-border) !important;
+  color: var(--btn-danger-color) !important;
+}
+#btn-resume:hover, #btn-pause:hover {
+  background: var(--btn-danger-hover-bg) !important;
+  border-color: var(--btn-danger-hover-border) !important;
+  color: var(--btn-danger-hover-color) !important;
+}
+
+.btn-coin-done {
+  background: var(--btn-done-bg) !important;
+  border: 1px solid var(--btn-done-border) !important;
+  color: var(--btn-done-color) !important;
+}
+.btn-coin-done:hover {
+  background: var(--btn-done-hover-bg) !important;
+  border-color: var(--btn-done-hover-border) !important;
+  color: var(--btn-done-hover-color) !important;
+}
+
+/* Smooth collapse for Done + Cancel buttons */
+.btn-coin-done,
+#btn-coin-cancel {
+  max-height: 54px;
+  overflow: hidden;
+  transition: max-height 0.35s ease, opacity 0.3s ease,
+              padding-top 0.35s ease, padding-bottom 0.35s ease,
+              margin-top 0.35s ease,
+              border-top-width 0.35s ease, border-bottom-width 0.35s ease,
+              background-color 0.15s, border-color 0.15s, color 0.15s !important;
+}
+.btn-coin-done:disabled,
+#btn-coin-cancel:disabled {
+  max-height: 0 !important;
+  opacity: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  margin-top: 0 !important;
+  border-top-width: 0 !important;
+  border-bottom-width: 0 !important;
+  pointer-events: none !important;
+}
+
+.input-group .form-control { border-radius: 8px 0 0 8px !important; }
+.input-group .form-control:focus { z-index: 3 !important; }
+.input-group .btn { width: auto !important; border-radius: 0 8px 8px 0 !important; margin: 0 !important; }
+
+/* ======================================= LOADING SPINNER ======================================= */
+.portal-spinner {
+  width: 34px; height: 34px;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent-color);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ======================================= PROGRESS BAR ======================================= */
+.progress-wrap {
+  display: flex; flex-direction: column; align-items: center;
+  margin-bottom: 1.3rem; margin-top: 0.5rem;
+}
+
+.time-text-main {
+  font-size: 2.3rem; font-weight: 700; line-height: 1;
+  white-space: nowrap; color: var(--text-primary); transition: font-size 0.2s;
+}
+
+.time-label-main {
+  font-size: 0.65rem; color: var(--text-secondary); text-transform: uppercase;
+  letter-spacing: 0.1em; margin-top: 6px; margin-bottom: 14px;
+}
+
+.progress-bg { width: 100%; height: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 6px; background: #4ade80; transition: width 1s linear, background 0.3s; }
+
+/* ======================================= SESSION INFO ======================================= */
+.session-info {
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  border-radius: 8px;
+  padding: 4px 12px;
+  margin-bottom: 16px;
+}
+.session-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; font-size: 12px; }
+.session-row + .session-row, .wlan-details + .session-row { border-top: 1px solid var(--border-color); }
+.session-row .sk { color: var(--text-secondary); }
+.session-row .sv { font-family: 'SFMono-Regular', Consolas, monospace; color: var(--text-primary); font-size: 11px; }
+
+/* ======================================= WLAN DROPDOWN ======================================= */
+#s-wlan-row.wlan-active, #l-wlan-row.wlan-active { cursor: pointer; }
+.wlan-caret { font-size: 10px; margin-left: 4px; transition: transform 0.2s; display: inline-block; }
+.wlan-caret.open { transform: rotate(180deg); }
+.wlan-details {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  background: var(--bg-surface) !important;
+  border: 1px solid transparent !important;
+  padding: 0 10px;
+  border-radius: 6px;
+  margin-bottom: 0;
+  transition: max-height 0.3s ease, opacity 0.25s ease,
+              margin-bottom 0.3s ease, border-color 0.3s ease;
+}
+.wlan-details.open {
+  max-height: 320px;
+  opacity: 1;
+  border-color: var(--border-color) !important;
+  margin-bottom: 8px;
+}
+.wlan-details .session-row { border-top: 1px solid var(--border-color) !important; }
+.wlan-details .session-row:first-child { border-top: none !important; }
+
+.add-panel { display: none; padding-top: 14px; margin-top: 10px; border-top: 1px dashed var(--border-color); }
+
+/* ======================================= COIN VIEW ======================================= */
+.coin-display {
+  text-align: center;
+  padding: 20px 10px;
+  background: var(--bg-input);
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+.coin-amount-row { display: flex; align-items: baseline; justify-content: center; gap: 3px; }
+.coin-sym { font-size: 1.55rem; font-weight: 700; color: var(--coin-sym-color); line-height: 1; }
+.coin-val { font-size: 3.4rem; font-weight: 700; line-height: 1; color: var(--coin-val-color); font-family: 'SFMono-Regular', Consolas, monospace; }
+.coin-preview { font-size: 0.85rem; color: var(--text-secondary); margin-top: 5px; min-height: 1.4em; }
+.coin-preview.active { color: #86efac; }
+.coin-win-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 5px; }
+.coin-bar-bg { height: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; margin-bottom: 14px; }
+.coin-bar-fill { height: 100%; border-radius: 6px; background: #d97706; transition: width 1s linear, background 0.3s; }
+.queue-title-text { color: var(--coin-val-color); }
+
+/* ======================================= RATES MODAL ======================================= */
+.rates-modal-overlay {
+  display: flex; visibility: hidden; opacity: 0; pointer-events: none;
+  transition: opacity 0.35s ease, visibility 0.35s ease, backdrop-filter 0.35s ease, -webkit-backdrop-filter 0.35s ease;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px);
+  z-index: 50; align-items: center; justify-content: center; padding: 1.25rem;
+}
+.rates-modal-overlay.open {
+  visibility: visible; opacity: 1; pointer-events: all;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.rates-modal {
+  width: 100%; max-width: 360px; background: var(--bg-surface); border: 1px solid var(--border-color);
+  border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow);
+  max-height: calc(100vh - 2.5rem); display: flex; flex-direction: column;
+  transform: translateY(15px) scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+.rates-modal-overlay.open .rates-modal { transform: translateY(0) scale(1); }
+.rates-modal-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border-color); background: var(--bg-surface-hover); }
+.rates-modal-title { font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.06em; }
+.rates-modal-close { background: none; border: none; color: var(--text-secondary); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; transition: color 0.2s; }
+.rates-modal-close:hover { color: var(--text-primary); }
+.rates-modal-body { padding: 16px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.rates-modal-sub { font-size: 11px; color: var(--text-secondary); margin-bottom: 12px; }
+.rates-list { display: flex; flex-direction: column; gap: 8px; }
+.rates-row { display: flex; align-items: center; justify-content: space-between; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px 14px; transition: border-color 0.2s, background-color 0.2s; }
+.rates-row:hover { border-color: var(--coin-val-color) !important; background: var(--bg-surface-hover); }
+.rates-row .rp { color: var(--coin-val-color) !important; font-weight: 700; font-size: 15px; font-family: 'SFMono-Regular', Consolas, monospace; }
+.rates-row .rt { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+.rates-empty { color: var(--text-secondary); font-size: 12px; text-align: center; padding: 14px 0; }
+
+/* ======================================= INSERT COIN MODAL ======================================= */
+.coin-modal-overlay {
+  display: flex; visibility: hidden; opacity: 0; pointer-events: none;
+  transition: opacity 0.35s ease, visibility 0.35s ease, backdrop-filter 0.35s ease, -webkit-backdrop-filter 0.35s ease;
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px);
+  z-index: 50; align-items: center; justify-content: center; padding: 1.25rem;
+}
+.coin-modal-overlay.open {
+  visibility: visible; opacity: 1; pointer-events: all;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.coin-modal {
+  width: 100%; max-width: 360px; background: var(--bg-surface); border: 1px solid var(--border-color);
+  border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow);
+  max-height: calc(100vh - 2.5rem); display: flex; flex-direction: column;
+  transform: translateY(15px) scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+.coin-modal-overlay.open .coin-modal { transform: translateY(0) scale(1); }
+
+.portal-footer { margin-top: 12px; font-size: 11px; color: var(--text-secondary); opacity: 0.6; text-align: center; }
+
+/* ======================================= VIEW DEFAULTS ======================================= */
+#v-load, #v-login, #v-status, #v-queue { display: none; }

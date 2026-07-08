@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+        .invalid-feedback { display: block; }
+        .form-control.is-invalid { border-color: #dc3545; }
+        code { color: #fff; }
+        .pw-wrap { position: relative; }
+        .pw-eye {
+            position: absolute;
+            top: 50%;
+            right: 10px;
+            transform: translateY(-50%);
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+            user-select: none;
+        }
+        .pw-eye:hover { color: var(--bs-body-color); }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">Admin Account</div>
+                    <div class="card-body">
+
+                        <p class="field-hint mb-3">
+                            Change the administrator login used to access this web interface.
+                            You must enter your current password to confirm any change.
+                        </p>
+
+                        <!-- Username -->
+                        <div class="mb-3">
+                            <label for="suser-name" class="form-label">Username</label>
+                            <input type="text" class="form-control"
+                                   id="suser-name" maxlength="32" autocomplete="username"
+                                   placeholder="e.g. admin">
+                            <div class="field-hint">1&ndash;32 chars: letters, digits, <code>. _ -</code></div>
+                            <div class="invalid-feedback" id="suser-name-err" style="display:none"></div>
+                        </div>
+
+                        <!-- New password -->
+                        <div class="mb-3">
+                            <label for="suser-passwd" class="form-label">New Password</label>
+                            <div class="pw-wrap">
+                                <input type="password" class="form-control"
+                                       id="suser-passwd" maxlength="32" autocomplete="new-password"
+                                       placeholder="Leave blank to keep current password">
+                                <span class="pw-eye" onclick="togglePw('suser-passwd')">Show</span>
+                            </div>
+                            <div class="field-hint">4&ndash;32 chars, no spaces. Leave blank to keep the current password.</div>
+                            <div class="invalid-feedback" id="suser-passwd-err" style="display:none"></div>
+                        </div>
+
+                        <!-- Confirm new password -->
+                        <div class="mb-3">
+                            <label for="suser-passwd2" class="form-label">Confirm New Password</label>
+                            <div class="pw-wrap">
+                                <input type="password" class="form-control"
+                                       id="suser-passwd2" maxlength="32" autocomplete="new-password"
+                                       placeholder="Re-enter new password">
+                                <span class="pw-eye" onclick="togglePw('suser-passwd2')">Show</span>
+                            </div>
+                            <div class="invalid-feedback" id="suser-passwd2-err" style="display:none"></div>
+                        </div>
+
+                        <hr>
+
+                        <!-- Current password (required to authorise) -->
+                        <div class="mb-3">
+                            <label for="cur-passwd" class="form-label">Current Password</label>
+                            <div class="pw-wrap">
+                                <input type="password" class="form-control"
+                                       id="cur-passwd" maxlength="32" autocomplete="current-password"
+                                       placeholder="Enter your current password">
+                                <span class="pw-eye" onclick="togglePw('cur-passwd')">Show</span>
+                            </div>
+                            <div class="field-hint">Required to confirm changes to this account.</div>
+                            <div class="invalid-feedback" id="cur-passwd-err" style="display:none"></div>
+                        </div>
+
+                        <!-- Apply button -->
+                        <div class="d-grid mt-4">
+                            <button class="btn btn-primary" id="apply-btn" onclick="applyAccount()">Save Changes</button>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script>
+    // ---------------------------------------------------------------
+    // Overlay
+    // ---------------------------------------------------------------
+    var overlay        = document.getElementById('overlay');
+    var overlayTxt     = document.getElementById('overlay-text');
+    var overlaySpinner = document.getElementById('overlay-spinner');
+
+    function showOverlay(msg, spinning) {
+        overlayTxt.textContent = msg;
+        overlaySpinner.style.display = (spinning === false) ? 'none' : '';
+        overlay.classList.add('visible');
+    }
+
+    function hideOverlay(cb) {
+        overlay.classList.remove('visible');
+        if (cb) setTimeout(cb, 360);
+    }
+
+    // ---------------------------------------------------------------
+    // Show / hide password
+    // ---------------------------------------------------------------
+    function togglePw(id) {
+        var inp = document.getElementById(id);
+        if (!inp) return;
+        var eye = inp.parentNode.querySelector('.pw-eye');
+        if (inp.type === 'password') {
+            inp.type = 'text';
+            if (eye) eye.textContent = 'Hide';
+        } else {
+            inp.type = 'password';
+            if (eye) eye.textContent = 'Show';
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Form lock / unlock
+    // ---------------------------------------------------------------
+    function setFormLocked(locked) {
+        var ids = ['suser-name', 'suser-passwd', 'suser-passwd2', 'cur-passwd', 'apply-btn'];
+        ids.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            if (locked) {
+                el.setAttribute('disabled', '');
+            } else {
+                el.removeAttribute('disabled');
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Validation
+    // ---------------------------------------------------------------
+    function setFieldError(inputId, errId, msg) {
+        var inp = document.getElementById(inputId);
+        var err = document.getElementById(errId);
+        if (msg) {
+            inp.classList.add('is-invalid');
+            err.textContent = msg;
+            err.style.display = 'block';
+        } else {
+            inp.classList.remove('is-invalid');
+            err.style.display = 'none';
+        }
+    }
+
+    function validateUsername(val) {
+        if (!val) return 'Username is required';
+        if (val.length > 32) return 'Must be 32 characters or fewer';
+        if (!/^[A-Za-z0-9._-]+$/.test(val))
+            return 'Only letters, digits, dot, underscore and hyphen allowed';
+        return null;
+    }
+
+    function validatePassword(val) {
+        if (!val) return null; // blank = keep current
+        if (val.length < 4 || val.length > 32) return 'Must be 4\u201332 characters';
+        if (/\s/.test(val)) return 'Spaces are not allowed';
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // Load current username
+    // ---------------------------------------------------------------
+    function loadAccount() {
+        setFormLocked(true);
+        showOverlay('Loading\u2026');
+        fetch('/cgi-bin/lme.cgi?action=account_status', { cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                document.getElementById('suser-name').value = d.suser_name || '';
+                hideOverlay(function() { setFormLocked(false); });
+            })
+            .catch(function() {
+                hideOverlay(function() { setFormLocked(false); });
+                toastr['warning']('Failed to load account settings.', 'Error');
+            });
+    }
+
+    // ---------------------------------------------------------------
+    // Apply account changes
+    // ---------------------------------------------------------------
+    function applyAccount() {
+        var nameVal  = document.getElementById('suser-name').value.trim();
+        var passVal  = document.getElementById('suser-passwd').value;
+        var pass2Val = document.getElementById('suser-passwd2').value;
+        var curVal   = document.getElementById('cur-passwd').value;
+
+        var nameErr = validateUsername(nameVal);
+        setFieldError('suser-name', 'suser-name-err', nameErr);
+
+        var passErr = validatePassword(passVal);
+        setFieldError('suser-passwd', 'suser-passwd-err', passErr);
+
+        var pass2Err = null;
+        if (passVal && passVal !== pass2Val) {
+            pass2Err = 'Passwords do not match';
+        }
+        setFieldError('suser-passwd2', 'suser-passwd2-err', pass2Err);
+
+        var curErr = curVal ? null : 'Current password is required';
+        setFieldError('cur-passwd', 'cur-passwd-err', curErr);
+
+        if (nameErr || passErr || pass2Err || curErr) return;
+
+        var body = 'suser_name='   + encodeURIComponent(nameVal)
+                 + '&suser_passwd=' + encodeURIComponent(passVal)
+                 + '&cur_passwd='   + encodeURIComponent(curVal);
+
+        showOverlay('Saving\u2026');
+        setFormLocked(true);
+
+        fetch('/cgi-bin/lme.cgi?action=account_settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body
+        })
+        .then(function(r) {
+            return r.text().then(function(t) { return { ok: r.ok, status: r.status, text: t }; });
+        })
+        .then(function(res) {
+            overlaySpinner.style.display = 'none';
+            if (res.ok && res.text.trim() === 'OK') {
+                overlayTxt.textContent = 'Changes Saved.';
+                setTimeout(function() {
+                    hideOverlay(function() {
+                        setFormLocked(false);
+                        // Clear password fields after a successful save
+                        document.getElementById('suser-passwd').value  = '';
+                        document.getElementById('suser-passwd2').value = '';
+                        document.getElementById('cur-passwd').value    = '';
+                        toastr['success']('Account updated. Use your new credentials next time you log in.', 'Saved');
+                    });
+                }, 1200);
+            } else if (res.status === 403) {
+                hideOverlay(function() {
+                    setFormLocked(false);
+                    setFieldError('cur-passwd', 'cur-passwd-err', 'Current password is incorrect');
+                });
+            } else {
+                hideOverlay(function() { setFormLocked(false); });
+                toastr['warning']('Error: ' + (res.text || 'Unknown error'), 'Error');
+            }
+        })
+        .catch(function() {
+            hideOverlay(function() { setFormLocked(false); });
+            toastr['warning']('Request failed.', 'Error');
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Init
+    // ---------------------------------------------------------------
+    loadAccount();
+</script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

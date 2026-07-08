@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .wlan-toggle {
+            width: 50px;
+            height: 28px;
+            border-radius: 14px;
+            background: #555;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.25s;
+            flex-shrink: 0;
+        }
+        .wlan-toggle.on { background: #ffffff; }
+        .wlan-toggle-knob {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #fff;
+            top: 4px;
+            left: 4px;
+            transition: left 0.25s, background 0.25s, box-shadow 0.25s;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .wlan-toggle.on .wlan-toggle-knob {
+            left: 26px;
+            background: #555;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        }
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+        .invalid-feedback { display: block; }
+        .form-control.is-invalid, .form-select.is-invalid { border-color: #dc3545; }
+        code { color: #fff; }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">System Settings</div>
+                    <div class="card-body">
+
+                        <!-- Hardware Serial Number -->
+                        <div class="mb-2">
+                            <label for="hw-serial" class="form-label">Hardware Serial Number</label>
+                            <input type="text" class="form-control text-uppercase"
+                                   id="hw-serial" maxlength="32" autocomplete="off"
+                                   placeholder="e.g. YOTC-M2G40-000001">
+                            <div class="field-hint">Format: uppercase alphanumeric, hyphens allowed (4–32 chars)</div>
+                            <div class="invalid-feedback" id="hw-serial-err" style="display:none"></div>
+                        </div>
+
+                        <!-- System MAC -->
+                        <div class="mb-3">
+                            <label for="sys-mac" class="form-label">System MAC Address</label>
+                            <input type="text" class="form-control text-uppercase"
+                                   id="sys-mac" maxlength="17" autocomplete="off"
+                                   placeholder="e.g. 90:28:F6:34:9B:6D">
+                            <div class="field-hint">Format: <code>XX:XX:XX:XX:XX:XX</code> (colon-separated hex)</div>
+                            <div class="invalid-feedback" id="sys-mac-err" style="display:none"></div>
+                        </div>
+
+                        <!-- Auto PON Mode Detection toggle -->
+                        <div class="mb-2 d-flex align-items-center justify-content-between">
+                            <div>
+                                <div class="form-label mb-0">Auto PON Mode Detection</div>
+                                <div class="field-hint">When enabled, the ONT detects PON mode automatically</div>
+                            </div>
+                            <div id="pon-auto-toggle" class="wlan-toggle"
+                                 onclick="togglePonAuto()" role="switch" title="Auto PON detection">
+                                <div class="wlan-toggle-knob"></div>
+                            </div>
+                        </div>
+
+                        <!-- Manual PON Mode (visible only when auto is OFF) -->
+                        <div class="mb-2" id="pon-mode-group" style="display:none">
+                            <label for="pon-mode" class="form-label">PON Mode</label>
+                            <select class="form-select" id="pon-mode">
+                                <option value="1">GPON</option>
+                                <option value="2">EPON</option>
+                                <option value="3">Ethernet / SFP</option>
+                            </select>
+                        </div>
+
+                        <!-- Apply button -->
+                        <div class="d-grid mt-4">
+                            <button class="btn btn-primary" id="apply-btn" onclick="applySettings()">Apply</button>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script>
+    // ---------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------
+    var ponAutoEnabled = true;
+
+    // ---------------------------------------------------------------
+    // Toggle helpers
+    // ---------------------------------------------------------------
+    function setPonAutoUI(enabled) {
+        ponAutoEnabled = !!enabled;
+        var tog = document.getElementById('pon-auto-toggle');
+        var grp = document.getElementById('pon-mode-group');
+        if (ponAutoEnabled) {
+            tog.classList.add('on');
+            grp.style.display = 'none';
+        } else {
+            tog.classList.remove('on');
+            grp.style.display = '';
+        }
+    }
+
+    function togglePonAuto() { setPonAutoUI(!ponAutoEnabled); }
+
+    // ---------------------------------------------------------------
+    // Overlay
+    // ---------------------------------------------------------------
+    var overlay        = document.getElementById('overlay');
+    var overlayTxt     = document.getElementById('overlay-text');
+    var overlaySpinner = document.getElementById('overlay-spinner');
+
+    function showOverlay(msg, spinning) {
+        overlayTxt.textContent = msg;
+        overlaySpinner.style.display = (spinning === false) ? 'none' : '';
+        overlay.classList.add('visible');
+    }
+
+    function hideOverlay(cb) {
+        overlay.classList.remove('visible');
+        if (cb) setTimeout(cb, 360);
+    }
+
+    // ---------------------------------------------------------------
+    // Form lock / unlock
+    // ---------------------------------------------------------------
+    function setFormLocked(locked) {
+        var ids = ['hw-serial', 'sys-mac', 'pon-mode', 'apply-btn', 'pon-auto-toggle'];
+        ids.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            if (locked) {
+                el.setAttribute('disabled', '');
+                el.style.pointerEvents = 'none';
+            } else {
+                el.removeAttribute('disabled');
+                el.style.pointerEvents = '';
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Validation
+    // ---------------------------------------------------------------
+    function setFieldError(inputId, errId, msg) {
+        var inp = document.getElementById(inputId);
+        var err = document.getElementById(errId);
+        if (msg) {
+            inp.classList.add('is-invalid');
+            err.textContent = msg;
+            err.style.display = 'block';
+        } else {
+            inp.classList.remove('is-invalid');
+            err.style.display = 'none';
+        }
+    }
+
+    function validateMac(mac) {
+        if (!mac) return 'MAC address is required';
+        var clean = mac.replace(/:/g, '');
+        if (!/^[0-9A-Fa-f]{12}$/.test(clean)) return 'Invalid MAC \u2014 must be XX:XX:XX:XX:XX:XX';
+        if (clean === '000000000000') return 'MAC address cannot be all zeros';
+        if (clean === 'ffffffffffff') return 'MAC address cannot be broadcast';
+        return null;
+    }
+
+    function validateHwSerial(val) {
+        if (!val) return 'Hardware serial number is required';
+        if (val.length < 4 || val.length > 32) return 'Must be 4\u201332 characters';
+        if (!/^[A-Z0-9][A-Z0-9\-]{2,30}[A-Z0-9]$/.test(val))
+            return 'Uppercase letters, digits, and hyphens only; cannot start or end with a hyphen';
+        if (/--/.test(val)) return 'Consecutive hyphens not allowed';
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // Live formatting for HW serial input (force uppercase, strip invalid)
+    // ---------------------------------------------------------------
+    (function() {
+        var snInput = document.getElementById('hw-serial');
+        snInput.addEventListener('input', function() {
+            var pos = this.selectionStart;
+            var raw = this.value.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+            if (raw.length > 32) raw = raw.slice(0, 32);
+            this.value = raw;
+            // restore caret (may shift by stripped chars, best-effort)
+            try { this.setSelectionRange(pos, pos); } catch(e) {}
+        });
+    })();
+
+    // ---------------------------------------------------------------
+    // Live formatting for MAC input
+    // ---------------------------------------------------------------
+    (function() {
+        var macInput = document.getElementById('sys-mac');
+        macInput.addEventListener('input', function() {
+            var raw = this.value.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+            if (raw.length > 12) raw = raw.slice(0, 12);
+            var formatted = raw.match(/.{1,2}/g);
+            this.value = formatted ? formatted.join(':') : raw;
+        });
+    })();
+
+    // ---------------------------------------------------------------
+    // Load current values from CGI
+    // ---------------------------------------------------------------
+    function loadStatus() {
+        setFormLocked(true);
+        showOverlay('Loading\u2026');
+        fetch('/cgi-bin/lme.cgi?action=system_status', { cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                document.getElementById('hw-serial').value = d.hw_serial_no || '';
+                document.getElementById('sys-mac').value   = d.mac || '';
+                var sel  = document.getElementById('pon-mode');
+                var mode = String(d.pon_mode || '1');
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === mode) { sel.selectedIndex = i; break; }
+                }
+                setPonAutoUI(d.pon_auto === 1 || d.pon_auto === '1' || d.pon_auto === true);
+                hideOverlay(function() { setFormLocked(false); });
+            })
+            .catch(function() {
+                hideOverlay(function() { setFormLocked(false); });
+                toastr['warning']('Failed to load system settings.', 'Error');
+            });
+    }
+
+    // ---------------------------------------------------------------
+    // Apply settings
+    // ---------------------------------------------------------------
+    function applySettings() {
+        var snVal  = document.getElementById('hw-serial').value.trim().toUpperCase();
+        var snErr  = validateHwSerial(snVal);
+        setFieldError('hw-serial', 'hw-serial-err', snErr);
+
+        var macVal = document.getElementById('sys-mac').value.trim().toUpperCase();
+        var macErr = validateMac(macVal);
+        setFieldError('sys-mac', 'sys-mac-err', macErr);
+
+        if (snErr || macErr) return;
+
+        var macRaw  = macVal.replace(/:/g, '').toLowerCase();
+        var ponAuto = ponAutoEnabled ? '1' : '0';
+        var ponMode = document.getElementById('pon-mode').value;
+
+        var body = 'hw_serial=' + encodeURIComponent(snVal)
+                 + '&mac='      + encodeURIComponent(macRaw)
+                 + '&pon_auto=' + ponAuto
+                 + '&pon_mode=' + ponMode;
+
+        showOverlay('Applying settings\u2026');
+        setFormLocked(true);
+
+        fetch('/cgi-bin/lme.cgi?action=system_settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: body
+        })
+        .then(function(r) {
+            return r.text().then(function(t) { return { ok: r.ok, text: t }; });
+        })
+        .then(function(res) {
+            overlaySpinner.style.display = 'none';
+            if (res.ok && res.text.trim() === 'OK') {
+                overlayTxt.textContent = 'Settings Applied.';
+                setTimeout(function() { hideOverlay(function() { setFormLocked(false); }); }, 1500);
+            } else if (res.ok && res.text.trim() === 'REBOOT') {
+                // PON mode changed — device will reboot
+                var secs = 60;
+                overlaySpinner.style.display = '';
+                overlayTxt.textContent = 'PON mode changed \u2014 rebooting\u2026 (' + secs + 's)';
+                var countdown = setInterval(function() {
+                    secs--;
+                    if (secs > 0) {
+                        overlayTxt.textContent = 'PON mode changed \u2014 rebooting\u2026 (' + secs + 's)';
+                    } else {
+                        clearInterval(countdown);
+                        overlaySpinner.style.display = 'none';
+                        overlayTxt.textContent = 'Reboot complete. Reload to reconnect.';
+                    }
+                }, 1000);
+            } else {
+                hideOverlay(function() { setFormLocked(false); });
+                toastr['warning']('Error: ' + (res.text || 'Unknown error'), 'Error');
+            }
+        })
+        .catch(function() {
+            hideOverlay(function() { setFormLocked(false); });
+            toastr['warning']('Request failed.', 'Error');
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Init
+    // ---------------------------------------------------------------
+    loadStatus();
+</script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

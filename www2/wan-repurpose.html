@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+
+        /* ── Info rows shared by iface detail + status card ── */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 9px 0;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 13px;
+            gap: 12px;
+        }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: var(--text-secondary); flex-shrink: 0; }
+        .info-value { color: var(--text-primary); font-weight: 500; text-align: right; }
+
+        /* ── Type badges ── */
+        .type-badge {
+            display: inline-block;
+            font-size: 10px;
+            padding: 2px 7px;
+            border-radius: 3px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .badge-lan  { background: rgba(13,110,253,.18); color: #6ea8fe; }
+        .badge-wlan { background: rgba(25,135,84,.18);  color: #75b798; }
+
+        /* ── Status indicator dots ── */
+        .sdot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
+            flex-shrink: 0;
+        }
+        .sdot-ok   { background: #28a745; }
+        .sdot-warn { background: #ffc107; }
+        .sdot-err  { background: #dc3545; }
+
+        /* ── Link state text colours ── */
+        .link-up      { color: #28a745; font-weight: 600; }
+        .link-down    { color: #dc3545; }
+        .link-unknown { color: var(--text-secondary); }
+
+        /* ── "Obtaining…" spinner (inline) ── */
+        .spin-sm {
+            display: inline-block;
+            width: 11px; height: 11px;
+            border: 2px solid rgba(255,255,255,.2);
+            border-top-color: #6ea8fe;
+            border-radius: 50%;
+            animation: rspin .75s linear infinite;
+            vertical-align: middle;
+            margin-left: 5px;
+        }
+        @keyframes rspin { to { transform: rotate(360deg); } }
+
+        /* ── Poll-tick badge in card header ── */
+        .poll-dot {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-weight: 400;
+            transition: background .3s;
+        }
+
+        /* ── Empty / no-iface message ── */
+        .no-iface-msg {
+            color: var(--text-secondary);
+            font-size: 13px;
+            padding: 14px 0 6px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-7">
+
+                <!-- ── Interface selector card ──────────────────────────── -->
+                <div class="card mb-3">
+                    <div class="card-header">Repurpose LAN / WiFi as WAN</div>
+                    <div class="card-body">
+
+                        <div class="mb-3">
+                            <label for="iface-sel" class="form-label">Interface</label>
+                            <select class="form-select" id="iface-sel" onchange="onIfaceSel()">
+                                <option value="">— Loading… —</option>
+                            </select>
+                            <div class="field-hint">
+                                Shows enabled LAN ports that are not currently bound to the hotspot bridge,
+                                and WiFi interfaces configured in client mode.
+                                LAN ports still in the bridge won't appear — free them in the LAN settings first.
+                            </div>
+                        </div>
+
+                        <!-- Interface detail rows (populated by JS) -->
+                        <div id="iface-detail" style="display:none" class="mb-1"></div>
+
+                        <div class="d-flex gap-2 mt-4">
+                            <button class="btn btn-primary flex-grow-1"
+                                    id="apply-btn" onclick="doApply()" disabled>
+                                Apply
+                            </button>
+                            <button class="btn btn-outline-secondary flex-grow-1"
+                                    id="revert-btn" onclick="doRevert()" style="display:none">
+                                Revert to Bridge
+                            </button>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- ── Status card (visible only when an iface is active) ─ -->
+                <div class="card" id="status-card" style="display:none">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>WAN Status</span>
+                        <span class="poll-dot bg-secondary" id="poll-dot">●</span>
+                    </div>
+                    <div class="card-body" id="status-body"></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+var ifaceList   = [];   // [{iface, type, label, port?, band?, assoc_ssid?, link_status?, link_speed?, ip?, gateway?}]
+var activeIface = '';   // currently repurposed interface ('' = none)
+var pollTimer   = null;
+
+// ── Overlay ───────────────────────────────────────────────────────────────────
+var _ov  = document.getElementById('overlay');
+var _ovT = document.getElementById('overlay-text');
+var _ovS = document.getElementById('overlay-spinner');
+
+function showOv(msg, spin) {
+    _ovT.textContent = msg;
+    _ovS.style.display = (spin === false) ? 'none' : '';
+    _ov.classList.add('visible');
+}
+function hideOv(cb) {
+    _ov.classList.remove('visible');
+    if (cb) setTimeout(cb, 360);
+}
+
+// ── Escape for HTML text nodes ────────────────────────────────────────────────
+function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                          .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Build an info row HTML string ─────────────────────────────────────────────
+function infoRow(label, valueHtml) {
+    return '<div class="info-row">'
+         + '<span class="info-label">' + esc(label) + '</span>'
+         + '<span class="info-value">'  + valueHtml  + '</span>'
+         + '</div>';
+}
+
+// ── Load interface list from CGI ──────────────────────────────────────────────
+function loadList() {
+    showOv('Loading interfaces\u2026');
+    fetch('/cgi-bin/wan-repurpose.cgi?action=iface_list', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            ifaceList   = d.interfaces  || [];
+            activeIface = d.active_iface || '';
+            buildDropdown();
+            hideOv();
+            if (activeIface) {
+                document.getElementById('status-card').style.display = '';
+                startPoll();
+                pollNow();
+            }
+        })
+        .catch(function() {
+            hideOv();
+            toastr['warning']('Failed to load interface list.', 'Error');
+        });
+}
+
+// ── Populate <select> from ifaceList ─────────────────────────────────────────
+function buildDropdown() {
+    var sel = document.getElementById('iface-sel');
+    sel.innerHTML = '';
+
+    if (ifaceList.length === 0) {
+        sel.innerHTML = '<option value="">— No eligible interfaces —</option>';
+        sel.disabled = true;
+        document.getElementById('apply-btn').disabled = true;
+        return;
+    }
+    sel.disabled = false;
+
+    var ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = '\u2014 Select interface \u2014';
+    sel.appendChild(ph);
+
+    ifaceList.forEach(function(d) {
+        var opt = document.createElement('option');
+        opt.value = d.iface;
+        var lbl = d.label;
+        if (d.type === 'wlan' && d.assoc_ssid) lbl += ' \u00b7 ' + d.assoc_ssid;
+        if (d.iface === activeIface)            lbl += ' [ACTIVE]';
+        opt.textContent = lbl;
+        if (d.iface === activeIface) opt.selected = true;
+        sel.appendChild(opt);
+    });
+
+    onIfaceSel();
+}
+
+// ── Handle dropdown change ────────────────────────────────────────────────────
+function onIfaceSel() {
+    var sel      = document.getElementById('iface-sel');
+    var val      = sel.value;
+    var applyBtn = document.getElementById('apply-btn');
+    var revertBtn= document.getElementById('revert-btn');
+    var detail   = document.getElementById('iface-detail');
+
+    if (!val) {
+        detail.style.display = 'none';
+        applyBtn.disabled = true;
+        // Keep Revert visible if something is still active
+        revertBtn.style.display = activeIface ? '' : 'none';
+        return;
+    }
+
+    // Find matching entry
+    var d = null;
+    for (var i = 0; i < ifaceList.length; i++) {
+        if (ifaceList[i].iface === val) { d = ifaceList[i]; break; }
+    }
+    if (!d) { detail.style.display = 'none'; return; }
+
+    // Build detail rows
+    var html = '';
+    if (d.type === 'lan') {
+        html += infoRow('Type', '<span class="type-badge badge-lan">LAN</span>');
+        html += infoRow('Port', 'LAN ' + d.port);
+        var lnkCls = d.link_status === 'Up'   ? 'link-up'
+                   : d.link_status === 'Down'  ? 'link-down'
+                   : 'link-unknown';
+        html += infoRow('Link', '<span class="' + lnkCls + '">' + esc(d.link_status) + '</span>');
+        if (d.link_status === 'Up' && d.link_speed && d.link_speed !== '-') {
+            html += infoRow('Speed', esc(d.link_speed));
+        }
+    } else if (d.type === 'wlan') {
+        html += infoRow('Type', '<span class="type-badge badge-wlan">WiFi</span>');
+        html += infoRow('Band', esc(d.band));
+        if (d.assoc_ssid) {
+            html += infoRow('Client SSID', '<strong>' + esc(d.assoc_ssid) + '</strong>');
+        }
+    }
+
+    // Show IP/GW if this is the active iface and values are known
+    if (val === activeIface) {
+        if (d.ip)      html += infoRow('IP Address', esc(d.ip));
+        if (d.gateway) html += infoRow('Gateway',    esc(d.gateway));
+    }
+
+    detail.innerHTML = html;
+    detail.style.display = '';
+
+    // Button state
+    applyBtn.disabled = false;
+    applyBtn.textContent = (val === activeIface) ? 'Re-apply' : 'Apply';
+    revertBtn.style.display = activeIface ? '' : 'none';
+}
+
+// ── Apply ─────────────────────────────────────────────────────────────────────
+function doApply() {
+    var val = document.getElementById('iface-sel').value;
+    if (!val) return;
+
+    showOv('Applying\u2026');
+    lockForm(true);
+
+    fetch('/cgi-bin/wan-repurpose.cgi?action=apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'iface=' + encodeURIComponent(val)
+    })
+    .then(function(r) { return r.text().then(function(t) { return {ok:r.ok,t:t}; }); })
+    .then(function(res) {
+        if (res.ok && res.t.trim() === 'OK') {
+            activeIface = val;
+            hideOv(function() {
+                lockForm(false);
+                toastr['success'](
+                    val + ' repurposed — DHCP in progress\u2026',
+                    'Applied'
+                );
+                document.getElementById('status-card').style.display = '';
+                // Update dropdown labels in-place instead of calling loadList().
+                // loadList() would re-open the overlay and fire a fetch that can
+                // hang indefinitely while repurposeaswan.sh is reconfiguring the
+                // interface, leaving the overlay stuck with no timeout to recover.
+                var sel = document.getElementById('iface-sel');
+                for (var i = 0; i < sel.options.length; i++) {
+                    sel.options[i].textContent = sel.options[i].textContent.replace(/ \[ACTIVE\]$/, '');
+                    if (sel.options[i].value === val) sel.options[i].textContent += ' [ACTIVE]';
+                }
+                document.getElementById('apply-btn').textContent = 'Re-apply';
+                document.getElementById('revert-btn').style.display = '';
+                startPoll();
+                pollNow();
+            });
+        } else {
+            hideOv(function() { lockForm(false); });
+            toastr['warning']('Error: ' + (res.t || 'Unknown'), 'Error');
+        }
+    })
+    .catch(function() {
+        hideOv(function() { lockForm(false); });
+        toastr['warning']('Request failed.', 'Error');
+    });
+}
+
+// ── Revert ────────────────────────────────────────────────────────────────────
+function doRevert() {
+    var target = activeIface || document.getElementById('iface-sel').value;
+    if (!target) return;
+
+    showOv('Reverting ' + target + '\u2026');
+    lockForm(true);
+
+    fetch('/cgi-bin/wan-repurpose.cgi?action=revert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'iface=' + encodeURIComponent(target)
+    })
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+        if (t.trim() === 'OK') {
+            activeIface = '';
+            stopPoll();
+            document.getElementById('status-card').style.display = 'none';
+            hideOv(function() {
+                lockForm(false);
+                toastr['success'](target + ' returned to bridge.', 'Reverted');
+                loadList();
+            });
+        } else {
+            hideOv(function() { lockForm(false); });
+            toastr['warning']('Revert failed: ' + t, 'Error');
+        }
+    })
+    .catch(function() {
+        hideOv(function() { lockForm(false); });
+        toastr['warning']('Request failed.', 'Error');
+    });
+}
+
+// ── Status polling ────────────────────────────────────────────────────────────
+function startPoll() { stopPoll(); pollTimer = setInterval(pollNow, 10000); }
+function stopPoll()  { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+function pollNow() {
+    if (!activeIface) return;
+    fetch('/cgi-bin/wan-repurpose.cgi?action=status', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            renderStatus(d);
+            flashDot('bg-success');
+        })
+        .catch(function() { flashDot('bg-danger'); });
+}
+
+function flashDot(cls) {
+    var dot = document.getElementById('poll-dot');
+    dot.className = 'poll-dot ' + cls;
+    setTimeout(function() { dot.className = 'poll-dot bg-secondary'; }, 900);
+}
+
+// ── Render status card ────────────────────────────────────────────────────────
+function renderStatus(d) {
+    var card = document.getElementById('status-card');
+    var body = document.getElementById('status-body');
+
+    // If CGI reports no active iface (watchdog exited cleanly)
+    if (!d.active_iface) {
+        activeIface = '';
+        stopPoll();
+        card.style.display = 'none';
+        loadList();
+        return;
+    }
+
+    activeIface = d.active_iface;
+    card.style.display = '';
+
+    var html = '';
+
+    // Interface
+    html += infoRow('Interface', '<strong>' + esc(d.active_iface) + '</strong>');
+
+    // IP address
+    var ipHtml = d.ip
+        ? esc(d.ip)
+        : '<span class="text-secondary">Obtaining\u2026<span class="spin-sm"></span></span>';
+    html += infoRow('IP Address', ipHtml);
+
+    // Gateway
+    html += infoRow('Gateway',
+        d.gateway ? esc(d.gateway) : '<span class="text-secondary">\u2014</span>');
+
+    // Watchdog daemon
+    html += infoRow('Watchdog',
+        '<span class="sdot ' + (d.watchdog_running ? 'sdot-ok' : 'sdot-err') + '"></span>'
+        + (d.watchdog_running ? 'Running' : 'Stopped'));
+
+    // DHCP client
+    html += infoRow('DHCP Client',
+        '<span class="sdot ' + (d.udhcpc_running ? 'sdot-ok' : 'sdot-err') + '"></span>'
+        + (d.udhcpc_running ? 'Running' : 'Stopped'));
+
+    // Bridge status
+    var brOk = !d.in_br0;
+    html += infoRow('Bridge',
+        '<span class="sdot ' + (brOk ? 'sdot-ok' : 'sdot-warn') + '"></span>'
+        + (brOk ? 'Not in br0 \u2714' : '\u26a0 Bound to br0 \u2014 fixing\u2026'));
+
+    // Interface link
+    html += infoRow('Link',
+        '<span class="sdot ' + (d.iface_up ? 'sdot-ok' : 'sdot-warn') + '"></span>'
+        + (d.iface_up ? 'Up' : 'Down \u2014 recovering\u2026'));
+
+    body.innerHTML = html;
+}
+
+// ── Form lock / unlock ────────────────────────────────────────────────────────
+function lockForm(on) {
+    ['iface-sel','apply-btn','revert-btn'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (on) { el.setAttribute('disabled',''); el.style.pointerEvents = 'none'; }
+        else    { el.removeAttribute('disabled'); el.style.pointerEvents = ''; }
+    });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadList();
+</script>
+
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

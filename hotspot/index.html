@@ -1,0 +1,2244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  
+  <title></title>
+  <link id="fav" rel="icon">
+  <link class="registry" rel="stylesheet" href="/css/bootstrap.min.css?v=1.0.0">
+  <link class="registry" rel="stylesheet" href="/css/toastr.min.css?v=1.0.0">
+
+  <script>
+    (function() {
+      var savedTheme = localStorage.getItem('theme');
+      if (savedTheme === 'light' || savedTheme === 'dark') {
+        document.documentElement.setAttribute('data-theme', savedTheme);
+      } else {
+        var systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var initialTheme = systemPrefersDark ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', initialTheme);
+      }
+    })();
+  </script>
+
+  <style>
+    /* ======================================= FONT ======================================= */
+    @font-face {
+        font-family: "Nunito";
+        src: url("/graphics/Nunito.woff2?v=1.0.0") format("woff2"),
+             url("/graphics/Nunito.woff?v=1.0.0") format("woff");
+        font-weight: 700;
+        font-style: normal;
+        font-display: swap;
+    }
+
+    /* ======================================= THEME VARIABLES ======================================= */
+    :root {
+      /* Dark Mode Variables (Default) */
+      --bg-body:          #0f0f11;
+      --bg-surface:       #18181c;
+      --bg-surface-hover: #222227;
+      --bg-input:         #1d1d22;
+      --text-primary:     #f4f4f5;
+      --text-secondary:   #a1a1aa;
+      --accent-color:     #ffffff;
+      --accent-hover:     #e4e4e7;
+      --accent-text:      #18181b;
+      --border-color:     #2e2e33;
+      --card-shadow:      0 20px 40px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.15);
+      --coin-sym-color:   #f59e0b; /* The '₱' symbol */
+      --coin-val-color:   #ffffff; /* Amount is now White */
+      
+      /* New Progress Bar Variables (White for dark mode) */
+      --coin-bar-high:    #ffffff;
+      --coin-bar-med:     #ca8a04; /* Light gray when time is running out */
+      --coin-bar-low:     #ef4444; /* Red when almost expired */
+
+      /* Button Variables (Dark Mode) */
+      --btn-primary-bg:           #ffffff;
+      --btn-primary-border:       #ffffff;
+      --btn-primary-color:        #18181b;
+      --btn-primary-hover-bg:     #e4e4e7;
+      --btn-primary-hover-border: #e4e4e7;
+
+      --btn-coin-bg:              rgba(245, 158, 11, 0.12);
+      --btn-coin-border:          #f59e0b;
+      --btn-coin-color:           #fbbf24;
+      --btn-coin-hover-bg:        rgba(245, 158, 11, 0.2);
+      --btn-coin-hover-border:    #fbbf24;
+      --btn-coin-hover-color:     #fef08a;
+
+      --btn-rates-bg:             rgba(37, 99, 235, 0.12);
+      --btn-rates-border:         #3b82f6;
+      --btn-rates-color:          #60a5fa;
+      --btn-rates-hover-bg:       rgba(37, 99, 235, 0.22);
+      --btn-rates-hover-border:   #60a5fa;
+      --btn-rates-hover-color:    #93c5fd;
+
+      --btn-danger-bg:            rgba(239, 68, 68, 0.12);
+      --btn-danger-border:        #ef4444;
+      --btn-danger-color:         #fca5a5;
+      --btn-danger-hover-bg:      rgba(239, 68, 68, 0.22);
+      --btn-danger-hover-border:  #fca5a5;
+      --btn-danger-hover-color:   #fee2e2;
+
+      --btn-done-bg:              rgba(16, 185, 129, 0.12);
+      --btn-done-border:          #10b981;
+      --btn-done-color:           #a7f3d0;
+      --btn-done-hover-bg:        rgba(16, 185, 129, 0.22);
+      --btn-done-hover-border:    #a7f3d0;
+      --btn-done-hover-color:     #d1fae5;
+
+      --focus-shadow:             0 0 0 3px rgba(255, 255, 255, 0.08);
+    }
+
+    :root[data-theme="light"] {
+      /* Light Mode Variables */
+      --bg-body:          #e2e8f0;
+      --bg-surface:       #ffffff;
+      --bg-surface-hover: #f1f5f9;
+      --bg-input:         #f8fafc;
+      --text-primary:     #0f172a;
+      --text-secondary:   #64748b;
+      --accent-color:     #0f172a;
+      --accent-hover:     #1e293b;
+      --accent-text:      #ffffff;
+      --border-color:     #cbd5e1;
+      --card-shadow:      0 10px 25px -5px rgba(15, 23, 42, 0.08), 0 8px 16px -6px rgba(15, 23, 42, 0.04);
+      --coin-sym-color:   #b45309;
+      --coin-val-color:   #d97706;
+      --coin-bar-high:    #d97706;
+      --coin-bar-med:     #ca8a04;
+      --coin-bar-low:     #ef4444;
+
+      /* Button Variables (Light Mode) */
+      --btn-primary-bg:           #0f172a;
+      --btn-primary-border:       #0f172a;
+      --btn-primary-color:        #ffffff;
+      --btn-primary-hover-bg:     #1e293b;
+      --btn-primary-hover-border: #1e293b;
+
+      --btn-coin-bg:              #f59e0b;
+      --btn-coin-border:          #d97706;
+      --btn-coin-color:           #ffffff;
+      --btn-coin-hover-bg:        #d97706;
+      --btn-coin-hover-border:    #b45309;
+      --btn-coin-hover-color:     #ffffff;
+
+      --btn-rates-bg:             #2563eb;
+      --btn-rates-border:         #1d4ed8;
+      --btn-rates-color:          #ffffff;
+      --btn-rates-hover-bg:       #1d4ed8;
+      --btn-rates-hover-border:   #1e40af;
+      --btn-rates-hover-color:    #ffffff;
+
+      --btn-danger-bg:            #ef4444;
+      --btn-danger-border:        #dc2626;
+      --btn-danger-color:         #ffffff;
+      --btn-danger-hover-bg:      #dc2626;
+      --btn-danger-hover-border:  #b91c1c;
+      --btn-danger-hover-color:   #ffffff;
+
+      --btn-done-bg:              #10b981;
+      --btn-done-border:          #059669;
+      --btn-done-color:           #ffffff;
+      --btn-done-hover-bg:        #059669;
+      --btn-done-hover-border:    #047857;
+      --btn-done-hover-color:     #ffffff;
+
+      --focus-shadow:             0 0 0 3px rgba(37, 99, 235, 0.15);
+    }
+
+    /* ======================================= GLOBAL RESET ======================================= */
+    *, *::before, *::after {
+      font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent !important;
+    }
+
+    html, body {
+      background-color: var(--bg-body) !important;
+      color: var(--text-primary) !important;
+      margin: 0; padding: 0;
+      scrollbar-color: var(--border-color) var(--bg-body);
+      scrollbar-gutter: stable;
+      transition: background-color 0.25s, color 0.25s;
+    }
+
+    ::selection {
+      background-color: var(--bg-surface-hover);
+      color: var(--text-primary);
+    }
+
+    /* ======================================= PORTAL LAYOUT ======================================= */
+    .portal-wrap {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+    }
+
+    .portal-card {
+      width: 100%;
+      max-width: 410px;
+      background: var(--bg-surface) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 12px !important;
+      overflow: hidden;
+      box-shadow: var(--card-shadow);
+      transition: background-color 0.25s, border-color 0.25s, box-shadow 0.25s;
+    }
+
+    /* ======================================= CARD HEADER ======================================= */
+    .portal-header {
+      background: var(--bg-surface-hover);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: background-color 0.25s, border-color 0.25s;
+    }
+
+    .portal-signal {
+      height: 32px; 
+      width: auto;
+      border-radius: 6px; 
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+
+    .portal-brand {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-secondary);
+      line-height: 1.2;
+    }
+
+    .portal-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin: 0;
+      line-height: 1.2;
+    }
+
+    /* ======================================= THEME TOGGLE BUTTON ======================================= */
+    .theme-toggle-btn, .speaker-toggle-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background-color 0.2s, color 0.2s;
+      outline: none !important;
+    }
+    .theme-toggle-btn:hover, .speaker-toggle-btn:hover {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+    }
+    .theme-toggle-btn svg, .speaker-toggle-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+    :root[data-theme="dark"] .theme-toggle-btn .sun-icon { display: block; }
+    :root[data-theme="dark"] .theme-toggle-btn .moon-icon { display: none; }
+    :root[data-theme="light"] .theme-toggle-btn .sun-icon { display: none; }
+    :root[data-theme="light"] .theme-toggle-btn .moon-icon { display: block; }
+    .speaker-toggle-btn .spk-on  { display: block; }
+    .speaker-toggle-btn .spk-off { display: none; }
+    .speaker-toggle-btn.muted .spk-on  { display: none; }
+    .speaker-toggle-btn.muted .spk-off { display: block; }
+    .speaker-toggle-btn.muted { color: var(--text-secondary); opacity: 0.5; }
+
+    /* Shrink the body padding slightly to fit the carousel nicely */
+    .portal-body { padding: 16px; }
+
+    /* ======================================= PROMO CAROUSEL ======================================= */
+    .promo-wrap {
+      position: relative;
+      width: 100%;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 12px;
+      display: none; /* Hidden by default until JS confirms images */
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    .promo-track {
+      display: flex;
+      transition: transform 0.4s ease-in-out;
+      width: 100%;
+    }
+    .promo-slide {
+      min-width: 100%;
+      height: 130px;
+      object-fit: cover;
+      cursor: pointer;
+    }
+    .promo-indicators {
+      position: absolute;
+      bottom: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 6px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+      z-index: 10;
+    }
+    .promo-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.4);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.5);
+      cursor: pointer;
+      transition: background 0.3s, transform 0.3s;
+    }
+    .promo-dot.active {
+      background: #ffffff;
+      transform: scale(1.3);
+    }
+    
+    /* Carousel Arrows */
+    .promo-arrow {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(0, 0, 0, 0.35);
+      color: #ffffff;
+      border: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      z-index: 10;
+      transition: background 0.2s;
+      outline: none;
+      display: none; /* Hidden by default, unhidden by JS if > 1 image */
+    }
+    .promo-arrow:hover {
+      background: rgba(0, 0, 0, 0.65);
+    }
+    .promo-arrow:active {
+      transform: translateY(-50%) scale(0.92);
+    }
+    .promo-arrow svg {
+      width: 16px;
+      height: 16px;
+    }
+    .promo-arrow-left { left: 8px; }
+    .promo-arrow-right { right: 8px; }
+
+    /* ======================================= VIEW HEADERS ======================================= */
+    .view-title {
+      font-size: 1.15rem; /* Adjusted smaller */
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 2px;
+    }
+
+    .view-subtitle {
+      color: var(--text-secondary);
+      font-size: 0.75rem; /* Adjusted smaller */
+      margin-bottom: 0.8rem; /* Adjusted smaller */
+    }
+
+    /* ======================================= FORM INPUTS ======================================= */
+    .form-control {
+      background-color: var(--bg-input) !important;
+      border: 1px solid var(--border-color) !important;
+      color: var(--text-primary) !important;
+      border-radius: 8px !important;
+      font-size: 12px !important; /* Adjusted smaller */
+      height: 38px !important; /* Adjusted smaller */
+      padding: 0 12px !important;
+      transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .form-control::placeholder {
+      color: var(--text-secondary) !important;
+      text-transform: none !important;
+      letter-spacing: 0 !important;
+      opacity: 1 !important;
+    }
+
+    .form-control:focus {
+      border-color: var(--accent-color) !important;
+      box-shadow: var(--focus-shadow) !important;
+      outline: none !important;
+    }
+
+    .form-label {
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 5px !important;
+    }
+
+    input:-webkit-autofill,
+    input:-webkit-autofill:hover,
+    input:-webkit-autofill:focus {
+      -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+      -webkit-text-fill-color: var(--text-primary) !important;
+      border: 1px solid var(--border-color) !important;
+    }
+    input:-webkit-autofill:focus {
+      border-color: var(--accent-color) !important;
+    }
+
+    /* ======================================= BUTTONS ======================================= */
+    .btn {
+      font-size: 12px !important; /* Adjusted smaller */
+      font-weight: 700 !important;
+      border-radius: 8px !important;
+      padding: 8px 16px !important; /* Adjusted smaller */
+      width: 100%;
+      display: block;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      cursor: pointer;
+      text-align: center;
+      border: 1px solid transparent !important;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+
+    .btn:active {
+      transform: scale(0.98);
+      opacity: 0.9;
+    }
+
+    .btn-primary {
+      background: var(--btn-primary-bg) !important;
+      border: 1px solid var(--btn-primary-border) !important;
+      color: var(--btn-primary-color) !important;
+    }
+    .btn-primary:hover {
+      background: var(--btn-primary-hover-bg) !important;
+      border-color: var(--btn-primary-hover-border) !important;
+      color: var(--btn-primary-color) !important;
+    }
+    .btn-primary:disabled {
+      background: var(--bg-surface-hover) !important;
+      border-color: var(--border-color) !important;
+      color: var(--text-secondary) !important;
+      opacity: 0.5 !important;
+      cursor: not-allowed !important;
+    }
+
+    .btn-outline-secondary {
+      background: transparent !important;
+      border: 1px solid var(--border-color) !important;
+      color: var(--text-secondary) !important;
+    }
+    .btn-outline-secondary:hover {
+      background: var(--bg-surface-hover) !important;
+      color: var(--text-primary) !important;
+      border-color: var(--text-secondary) !important;
+    }
+    .btn-outline-secondary:disabled {
+      opacity: 0.4 !important;
+      cursor: not-allowed !important;
+    }
+    .btn-outline-secondary:disabled:hover {
+      background: transparent !important;
+      color: var(--text-secondary) !important;
+    }
+
+    .btn-outline-danger {
+      background: rgba(239, 68, 68, 0.05) !important;
+      border: 1px solid var(--btn-danger-border) !important;
+      color: var(--btn-danger-border) !important;
+    }
+    .btn-outline-danger:hover {
+      background: var(--btn-danger-hover-bg) !important;
+      border-color: var(--btn-danger-hover-border) !important;
+      color: var(--btn-danger-hover-color) !important;
+    }
+
+    .btn-coin {
+      background: var(--btn-coin-bg) !important;
+      border: 1px solid var(--btn-coin-border) !important;
+      color: var(--btn-coin-color) !important;
+    }
+    .btn-coin:hover {
+      background: var(--btn-coin-hover-bg) !important;
+      border-color: var(--btn-coin-hover-border) !important;
+      color: var(--btn-coin-hover-color) !important;
+    }
+    .btn-coin.suspended {
+      opacity: 0.45;
+      cursor: not-allowed;
+      filter: grayscale(0.55);
+    }
+    .btn-coin.suspended:hover {
+      background: var(--btn-coin-bg) !important;
+      border-color: var(--btn-coin-border) !important;
+      color: var(--btn-coin-color) !important;
+    }
+
+    /* Blue styled WiFi Rates Button */
+    .btn-rates {
+      background: var(--btn-rates-bg) !important;
+      border: 1px solid var(--btn-rates-border) !important;
+      color: var(--btn-rates-color) !important;
+    }
+    .btn-rates:hover {
+      background: var(--btn-rates-hover-bg) !important;
+      border-color: var(--btn-rates-hover-border) !important;
+      color: var(--btn-rates-hover-color) !important;
+    }
+
+    /* Red styled Pause & Resume Buttons */
+    #btn-resume, #btn-pause {
+      background: var(--btn-danger-bg) !important;
+      border: 1px solid var(--btn-danger-border) !important;
+      color: var(--btn-danger-color) !important;
+    }
+    #btn-resume:hover, #btn-pause:hover {
+      background: var(--btn-danger-hover-bg) !important;
+      border-color: var(--btn-danger-hover-border) !important;
+      color: var(--btn-danger-hover-color) !important;
+    }
+
+    .btn-coin-done {
+      background: var(--btn-done-bg) !important;
+      border: 1px solid var(--btn-done-border) !important;
+      color: var(--btn-done-color) !important;
+    }
+    .btn-coin-done:hover {
+      background: var(--btn-done-hover-bg) !important;
+      border-color: var(--btn-done-hover-border) !important;
+      color: var(--btn-done-hover-color) !important;
+    }
+
+    /* Smooth collapse for Done + Cancel buttons */
+    .btn-coin-done,
+    #btn-coin-cancel {
+      max-height: 54px;
+      overflow: hidden;
+      transition: max-height 0.35s ease, opacity 0.3s ease,
+                  padding-top 0.35s ease, padding-bottom 0.35s ease,
+                  margin-top 0.35s ease,
+                  border-top-width 0.35s ease, border-bottom-width 0.35s ease,
+                  background-color 0.15s, border-color 0.15s, color 0.15s !important;
+    }
+    .btn-coin-done:disabled,
+    #btn-coin-cancel:disabled {
+      max-height: 0 !important;
+      opacity: 0 !important;
+      padding-top: 0 !important;
+      padding-bottom: 0 !important;
+      margin-top: 0 !important;
+      border-top-width: 0 !important;
+      border-bottom-width: 0 !important;
+      pointer-events: none !important;
+    }
+
+    .input-group .form-control { border-radius: 8px 0 0 8px !important; }
+    .input-group .form-control:focus { z-index: 3 !important; }
+    .input-group .btn { width: auto !important; border-radius: 0 8px 8px 0 !important; margin: 0 !important; }
+
+    /* ======================================= LOADING SPINNER ======================================= */
+    .portal-spinner {
+      width: 34px; height: 34px;
+      border: 3px solid var(--border-color);
+      border-top-color: var(--accent-color);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ======================================= PROGRESS BAR ======================================= */
+    .progress-wrap {
+      display: flex; flex-direction: column; align-items: center;
+      margin-bottom: 1rem; margin-top: 0.25rem; /* Adjusted smaller */
+    }
+
+    .time-text-main {
+      font-size: 2rem; font-weight: 700; line-height: 1; /* Adjusted smaller */
+      white-space: nowrap; color: var(--text-primary); transition: font-size 0.2s;
+    }
+
+    .time-label-main {
+      font-size: 0.6rem; color: var(--text-secondary); text-transform: uppercase;
+      letter-spacing: 0.1em; margin-top: 6px; margin-bottom: 10px; /* Adjusted smaller */
+    }
+
+    .progress-bg { width: 100%; height: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 6px; background: #4ade80; transition: width 1s linear, background 0.3s; }
+
+    /* ======================================= SESSION INFO ======================================= */
+    .session-info { 
+      border: 1px solid var(--border-color); 
+      background: var(--bg-input);
+      border-radius: 8px; 
+      padding: 4px 10px; /* Adjusted smaller */
+      margin-bottom: 12px; /* Adjusted smaller */
+    }
+    .session-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 11px; } /* Adjusted padding/font-size */
+    .session-row + .session-row, .wlan-details + .session-row { border-top: 1px solid var(--border-color); }
+    .session-row .sk { color: var(--text-secondary); }
+    .session-row .sv { font-family: 'SFMono-Regular', Consolas, monospace; color: var(--text-primary); font-size: 11px; }
+
+    /* ======================================= WLAN DROPDOWN ======================================= */
+    #s-wlan-row.wlan-active, #l-wlan-row.wlan-active { cursor: pointer; }
+    .wlan-caret { font-size: 10px; margin-left: 4px; transition: transform 0.2s; display: inline-block; }
+    .wlan-caret.open { transform: rotate(180deg); }
+    .wlan-details {
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      background: var(--bg-surface) !important;
+      border: 1px solid transparent !important;
+      padding: 0 10px;
+      border-radius: 6px;
+      margin-bottom: 0;
+      transition: max-height 0.3s ease, opacity 0.25s ease,
+                  margin-bottom 0.3s ease, border-color 0.3s ease;
+    }
+    .wlan-details.open {
+      max-height: 320px;
+      opacity: 1;
+      border-color: var(--border-color) !important;
+      margin-bottom: 8px;
+    }
+    .wlan-details .session-row { border-top: 1px solid var(--border-color) !important; }
+    .wlan-details .session-row:first-child { border-top: none !important; }
+
+    .add-panel { display: none; padding-top: 14px; margin-top: 10px; border-top: 1px dashed var(--border-color); }
+
+    /* ======================================= COIN VIEW ======================================= */
+    .coin-display { 
+      text-align: center; 
+      padding: 12px 10px; /* Adjusted smaller */
+      background: var(--bg-input);
+      border: 1px dashed var(--border-color);
+      border-radius: 10px;
+      margin-bottom: 12px; /* Adjusted smaller */
+    }
+    .coin-amount-row { display: flex; align-items: baseline; justify-content: center; gap: 3px; }
+    .coin-sym { font-size: 1.55rem; font-weight: 700; color: var(--coin-sym-color); line-height: 1; }
+    .coin-val { font-size: 2.8rem; font-weight: 700; line-height: 1; color: var(--coin-val-color); font-family: 'SFMono-Regular', Consolas, monospace; } /* Adjusted smaller */
+    .coin-preview { font-size: 0.85rem; color: var(--text-secondary); margin-top: 5px; min-height: 1.4em; }
+    .coin-preview.active { color: #86efac; }
+    .coin-win-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 5px; }
+    .coin-bar-bg { height: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; margin-bottom: 14px; }
+    .coin-bar-fill { height: 100%; border-radius: 6px; background: var(--coin-bar-high); transition: width 1s linear, background 0.3s; }
+    .queue-title-text { color: var(--coin-val-color); }
+
+    /* ======================================= RATES MODAL ======================================= */
+    .rates-modal-overlay {
+      display: flex; visibility: hidden; opacity: 0; pointer-events: none;
+      transition: opacity 0.35s ease, visibility 0.35s ease, backdrop-filter 0.35s ease, -webkit-backdrop-filter 0.35s ease;
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); 
+      backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px);
+      z-index: 50; align-items: center; justify-content: center; padding: 1.25rem;
+    }
+    .rates-modal-overlay.open {
+      visibility: visible; opacity: 1; pointer-events: all;
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    }
+    .rates-modal {
+      width: 100%; max-width: 360px; background: var(--bg-surface); border: 1px solid var(--border-color);
+      border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow);
+      max-height: calc(100vh - 2.5rem); display: flex; flex-direction: column;
+      transform: translateY(15px) scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .rates-modal-overlay.open .rates-modal { transform: translateY(0) scale(1); }
+    .rates-modal-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border-color); background: var(--bg-surface-hover); }
+    .rates-modal-title { font-size: 13px; font-weight: 700; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.06em; }
+    .rates-modal-close { background: none; border: none; color: var(--text-secondary); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; transition: color 0.2s; }
+    .rates-modal-close:hover { color: var(--text-primary); }
+    .rates-modal-body { padding: 16px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .rates-modal-sub { font-size: 11px; color: var(--text-secondary); margin-bottom: 12px; }
+    .rates-list { display: flex; flex-direction: column; gap: 8px; }
+    .rates-row { display: flex; align-items: center; justify-content: space-between; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 12px 14px; transition: border-color 0.2s, background-color 0.2s; }
+    .rates-row:hover { border-color: var(--coin-val-color) !important; background: var(--bg-surface-hover); }
+    .rates-row .rp { color: var(--coin-val-color) !important; font-weight: 700; font-size: 15px; font-family: 'SFMono-Regular', Consolas, monospace; }
+    .rates-row .rt { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+    .rates-empty { color: var(--text-secondary); font-size: 12px; text-align: center; padding: 14px 0; }
+
+    /* ======================================= INSERT COIN MODAL ======================================= */
+    .coin-modal-overlay {
+      display: flex; visibility: hidden; opacity: 0; pointer-events: none;
+      transition: opacity 0.35s ease, visibility 0.35s ease, backdrop-filter 0.35s ease, -webkit-backdrop-filter 0.35s ease;
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); 
+      backdrop-filter: blur(0px); -webkit-backdrop-filter: blur(0px);
+      z-index: 50; align-items: center; justify-content: center; padding: 1.25rem;
+    }
+    .coin-modal-overlay.open {
+      visibility: visible; opacity: 1; pointer-events: all;
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    }
+    .coin-modal {
+      width: 100%; max-width: 360px; background: var(--bg-surface); border: 1px solid var(--border-color);
+      border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow);
+      max-height: calc(100vh - 2.5rem); display: flex; flex-direction: column;
+      transform: translateY(15px) scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .coin-modal-overlay.open .coin-modal { transform: translateY(0) scale(1); }
+
+    .portal-footer { margin-top: 12px; font-size: 11px; color: var(--text-secondary); opacity: 0.6; text-align: center; }
+    #v-load, #v-login, #v-status, #v-queue { display: none; }
+    /* ======================================= IMAGE MODAL ======================================= */
+    .img-modal-overlay {
+      display: flex; visibility: hidden; opacity: 0; pointer-events: none;
+      transition: opacity 0.35s ease, visibility 0.35s ease, backdrop-filter 0.35s ease;
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); 
+      backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      z-index: 100; align-items: center; justify-content: center; padding: 1.25rem;
+    }
+    .img-modal-overlay.open {
+      visibility: visible; opacity: 1; pointer-events: all;
+    }
+    .img-modal-content {
+      position: relative; max-width: 100%; max-height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      transform: scale(0.95); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .img-modal-overlay.open .img-modal-content { transform: scale(1); }
+    .img-modal-content img {
+      max-width: 100%; max-height: 90vh; border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5); object-fit: contain;
+    }
+    .img-modal-close {
+      position: absolute; top: -12px; right: -12px;
+      background: var(--bg-surface); border: 1px solid var(--border-color);
+      color: var(--text-primary); border-radius: 50%; width: 32px; height: 32px;
+      font-size: 20px; line-height: 1; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.3); z-index: 101;
+    }
+    .img-modal-close:hover { color: var(--accent-color); }
+    /* ======================================= INLINE BUTTON SPINNER ======================================= */
+.btn-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.75s linear infinite;
+  margin-left: 1px;
+  vertical-align: middle;
+}
+@keyframes btn-spin { 
+  to { transform: rotate(360deg); } 
+}
+
+  </style>
+</head>
+<body>
+
+<div class="portal-wrap">
+  <div class="portal-card">
+
+    <div class="portal-header" style="justify-content: space-between;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <img class="portal-signal" src="/img/favicon.ico?v=1.0.0" alt="icon">
+        <div>
+          <div class="portal-brand">beta</div>
+          <div class="portal-title">lmepisowifi</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 4px;">
+        <button id="speaker-toggle" class="speaker-toggle-btn" aria-label="Toggle Audio">
+          <!-- Speaker On -->
+          <svg class="spk-on" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+          </svg>
+          <!-- Speaker Off (muted) -->
+          <svg class="spk-off" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <line x1="23" y1="9" x2="17" y2="15"></line>
+            <line x1="17" y1="9" x2="23" y2="15"></line>
+          </svg>
+        </button>
+        <button id="theme-toggle" class="theme-toggle-btn" aria-label="Toggle Theme">
+          <svg class="sun-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="moon-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="portal-body">
+
+      <!-- Automatically Populating Promo Carousel -->
+      <div id="promo-carousel" class="promo-wrap">
+        <div id="promo-track" class="promo-track"></div>
+        <div id="promo-indicators" class="promo-indicators"></div>
+        
+        <!-- Navigation Arrows -->
+        <button id="promo-prev" class="promo-arrow promo-arrow-left" aria-label="Previous">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </button>
+        <button id="promo-next" class="promo-arrow promo-arrow-right" aria-label="Next">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </button>
+      </div>
+
+      <div id="v-load">
+        <div class="d-flex flex-column align-items-center justify-content-center py-4 gap-3">
+          <div class="portal-spinner"></div>
+          <p class="mb-0" style="font-size: 12px; color: var(--text-secondary);">Checking session&hellip;</p>
+        </div>
+      </div>
+
+      <div id="v-login">
+        <h1 class="view-title" id="login-title">Disconnected</h1>
+        <p class="view-subtitle" id="login-sub">Insert Coins or Enter a voucher code to get online.</p>
+
+        <div class="progress-wrap" id="resume-progress-wrap" style="display:none;">
+          <div class="time-text-main" id="resume-time">--:--</div>
+          <div class="time-label-main">available to resume</div>
+          <div class="progress-bg">
+            <div class="progress-fill" id="resume-prog-fill" style="width: 100%; background:#4ade80;"></div>
+          </div>
+        </div>
+
+        <div class="session-info">
+          <div class="session-row">
+            <span class="sk">Device MAC</span>
+            <span class="sv" id="l-mac">--</span>
+          </div>
+          <div class="session-row">
+            <span class="sk">Device IP</span>
+            <span class="sv" id="l-ip">--</span>
+          </div>
+          <div class="session-row" id="l-wlan-row" onclick="toggleWlan('l')">
+            <span class="sk">Connection <span id="l-wlan-caret" class="wlan-caret" style="display:none;">&#9660;</span></span>
+            <span class="sv" id="l-wlan">--</span>
+          </div>
+          <div class="wlan-details" id="l-wlan-details">
+            <div class="session-row">
+              <span class="sk">Signal (dBm, est.)</span>
+              <span class="sv" id="l-rssi">--</span>
+            </div>
+            <div class="session-row">
+              <span class="sk">SNR</span>
+              <span class="sv" id="l-snr">--</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Flexbox container perfectly spaces visible buttons by 8px without interfering margins -->
+        <div class="d-flex flex-column gap-2">
+          <button class="btn btn-coin" id="btn-coin-login" onclick="doCoinStart(false)" style="display:none;">Insert Coin</button>
+          <button class="btn btn-primary" id="btn-resume" onclick="doResume()" style="display:none;">Resume Time</button>
+          <button class="btn btn-rates" id="btn-rates-login" onclick="openRatesModal()" style="display:none;">WiFi Rates</button>
+        </div>
+
+        <div class="add-panel" id="login-panel" style="display:block;">
+          <label class="form-label" for="login-code">Voucher Code</label>
+          <div class="input-group mb-0">
+            <input id="login-code" class="form-control" type="text"
+                   placeholder="Enter voucher here..."
+                   autocomplete="off" autocapitalize="characters" spellcheck="false">
+            <button class="btn btn-primary" onclick="doLogin()">Submit</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="v-status">
+        <h1 class="view-title">Connected</h1>
+        <p class="view-subtitle">Internet access is active on this device.</p>
+
+        <div class="progress-wrap">
+          <div class="time-text-main" id="time-txt">--:--</div>
+          <div class="time-label-main">remaining time</div>
+          <div class="progress-bg">
+            <div class="progress-fill" id="prog-fill" style="width: 100%;"></div>
+          </div>
+        </div>
+
+        <div class="session-info">
+          <div class="session-row">
+            <span class="sk">Device MAC</span>
+            <span class="sv" id="s-mac">--</span>
+          </div>
+          <div class="session-row">
+            <span class="sk">Device IP</span>
+            <span class="sv" id="s-ip">--</span>
+          </div>
+          <div class="session-row" id="s-wlan-row" onclick="toggleWlan('s')">
+            <span class="sk">Connection <span id="s-wlan-caret" class="wlan-caret" style="display:none;">&#9660;</span></span>
+            <span class="sv" id="s-wlan">--</span>
+          </div>
+          <div class="wlan-details" id="s-wlan-details">
+            <div class="session-row">
+              <span class="sk">Signal (dBm, est.)</span>
+              <span class="sv" id="s-rssi">--</span>
+            </div>
+            <div class="session-row">
+              <span class="sk">SNR</span>
+              <span class="sv" id="s-snr">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="d-flex flex-column gap-2">
+          <button class="btn btn-coin" id="btn-coin-status" onclick="doCoinStart(true)" style="display:none;">Insert Coin</button>
+          <button class="btn btn-danger" id="btn-pause" onclick="doLogout()">Pause Time</button>
+          <button class="btn btn-rates" id="btn-rates-status" onclick="openRatesModal()" style="display:none;">WiFi Rates</button>
+        </div>
+
+        <div class="add-panel" id="add-panel" style="display:block;">
+          <label class="form-label" for="add-code">Voucher Code</label>
+          <div class="input-group mb-0">
+            <input id="add-code" class="form-control" type="text"
+                   placeholder="Enter voucher here..."
+                   autocomplete="off" autocapitalize="characters" spellcheck="false">
+            <button class="btn btn-primary" onclick="doAddTime()">Submit</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="v-queue">
+        <h1 class="view-title">Waiting in Line</h1>
+        <p class="view-subtitle">Someone else is currently using the coin slot.</p>
+
+        <div class="d-flex flex-column align-items-center justify-content-center py-4 gap-3">
+          <div class="portal-spinner"></div>
+          <h2 class="queue-title-text" style="font-weight: 700; margin: 0; font-size: 1.8rem;">
+            Position: <span id="queue-pos">--</span>
+          </h2>
+          <p class="mb-0 text-center" style="font-size: 11px; color: var(--text-secondary); max-width: 250px;">
+            Please stay on this page.<br>Your turn will start automatically when the slot is free.
+          </p>
+        </div>
+
+        <button class="btn btn-outline-danger mt-3" onclick="doQueueCancel()">Leave Queue</button>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="portal-footer" id="portal-footer-text">
+    Your device is identified by MAC address. Vouchers are single-use.
+  </div>
+</div>
+
+<div class="rates-modal-overlay" id="rates-modal-overlay" onclick="if (event.target === this) closeRatesModal();">
+  <div class="rates-modal">
+    <div class="rates-modal-header">
+      <span class="rates-modal-title">· WiFi Rates</span>
+      <button class="rates-modal-close" onclick="closeRatesModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="rates-modal-body">
+      <p class="rates-modal-sub">Amount | Time </p>
+      <div class="rates-list" id="rates-list"></div>
+    </div>
+  </div>
+</div>
+
+<div class="coin-modal-overlay" id="coin-modal-overlay" onclick="if (event.target === this) closeCoinModal();">
+  <div class="coin-modal">
+    <div class="rates-modal-header">
+      <span class="rates-modal-title">· Insert Coin</span>
+      <button class="rates-modal-close" onclick="closeCoinModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="rates-modal-body">
+      <p class="rates-modal-sub">Drop coins into the slot now.</p>
+
+      <div class="coin-display">
+        <div class="coin-amount-row">
+          <span class="coin-sym">&#8369;</span>
+          <span class="coin-val" id="coin-amount">0</span>
+        </div>
+        <div class="coin-preview" id="coin-preview">insert coins to begin</div>
+      </div>
+
+      <div class="coin-win-head">
+        <span>Coin window</span>
+        <span id="coin-win-txt">&ndash;</span>
+      </div>
+      <div class="coin-bar-bg">
+        <div class="coin-bar-fill" id="coin-bar-fill" style="width:100%"></div>
+      </div>
+
+      <button class="btn btn-coin-done" id="btn-coin-done" onclick="doCoinDone()" disabled>Done</button>
+      <button class="btn btn-outline-secondary mt-2" id="btn-coin-cancel" onclick="doCoinCancel()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="img-modal-overlay" id="img-modal-overlay" onclick="if (event.target === this || event.target.className === 'img-modal-content') closeImgModal();">
+  <div class="img-modal-content">
+    <button class="img-modal-close" onclick="closeImgModal()" aria-label="Close">&times;</button>
+    <img id="img-modal-src" src="" alt="Full size preview">
+  </div>
+</div>
+
+<audio id="bg-music" loop preload="auto" style="display:none;"></audio>
+<audio id="coin-bg-music" loop preload="auto" style="display:none;"></audio>
+<audio id="coin-sound" preload="auto" style="display:none;"></audio>
+
+<script src="/js/jquery.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+/* ────────────────────────────────────────────────────────────────
+   Tab Title / Favicon Sync (follows the header, not hardcoded)
+   Header markup is the single source of truth: whatever text/logo
+   is in .portal-title / .portal-signal is mirrored into the browser
+   tab. Runs immediately (DOM above this script tag already exists),
+   and again later when portal_config.sh applies branding overrides.
+──────────────────────────────────────────────────────────────── */
+function _syncTabFromHeader() {
+  var titleEl = document.querySelector('.portal-title');
+  var logoEl  = document.querySelector('.portal-signal');
+  var favEl   = document.getElementById('fav');
+  if (titleEl && titleEl.textContent) document.title = titleEl.textContent;
+  if (logoEl && logoEl.src && favEl) favEl.href = logoEl.src;
+}
+_syncTabFromHeader();
+
+/* ────────────────────────────────────────────────────────────────
+   Theme Toggling Handler
+──────────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', function() {
+  var themeToggleBtn = document.getElementById('theme-toggle');
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener('click', function() {
+      var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+      var newTheme = (currentTheme === 'dark') ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+    });
+  }
+});
+
+/* ────────────────────────────────────────────────────────────────
+   Audio Engine (Web Audio API - Flawless Gapless Looping)
+──────────────────────────────────────────────────────────────── */
+var _audioMuted = localStorage.getItem('audioMuted') === '1';
+var _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+var _masterGain = _audioCtx.createGain();
+_masterGain.connect(_audioCtx.destination);
+_masterGain.gain.value = _audioMuted ? 0 : 1; // 0 = Muted, 1 = Full Volume
+
+// Dedicated gain stage for the portal background music only, so it can
+// fade in from silence (avoids startling users with volume maxed out).
+// Insert-coin music and the coin sound stay on _masterGain, unaffected.
+var PORTAL_BG_FADE_IN_SECONDS = 5;
+var _portalBgGain = _audioCtx.createGain();
+_portalBgGain.connect(_masterGain);
+
+// Some browsers (esp. captive-portal webviews) already grant playback
+// permission from the page-open action itself. Try immediately; if blocked,
+// the click/touch/key unlock listeners below act as the fallback.
+_audioCtx.resume().catch(function(){});
+
+// Audio Buffers (Memory)
+var _portalBgBuffer = null;
+var _insertBgBuffer = null;
+var _coinSoundBuffer = null;
+
+// Active Playback Sources
+var _portalBgSource = null;
+var _insertBgSource = null;
+
+var _lastCoinAmount = 0;
+
+function _applyMute(muted) {
+  try {
+    _audioMuted = muted;
+    localStorage.setItem('audioMuted', muted ? '1' : '0');
+    var btn = document.getElementById('speaker-toggle');
+    if (btn) {
+      btn.classList.toggle('muted', muted);
+      btn.setAttribute('aria-label', muted ? 'Unmute Audio' : 'Mute Audio');
+    }
+
+    // Instantly mute or unmute all sounds
+    _masterGain.gain.value = muted ? 0 : 1;
+
+    // Browsers block audio until a user clicks. If unmuted, try to wake it up.
+    if (!muted && _audioCtx.state === 'suspended') {
+      _audioCtx.resume();
+    }
+  } catch(e) { console.error(e); }
+}
+
+function _loadAudio(url, type) {
+  if (!url) return;
+  fetch(url)
+    .then(function(res) { return res.arrayBuffer(); })
+    .then(function(data) { return _audioCtx.decodeAudioData(data); })
+    .then(function(buffer) {
+      if (type === 'portal') {
+        _portalBgBuffer = buffer;
+        _tryPlayBg();
+      } else if (type === 'insert') {
+        _insertBgBuffer = buffer;
+      } else if (type === 'coin') {
+        _coinSoundBuffer = buffer;
+      }
+    })
+    .catch(function(e) { console.error("Audio load error:", e); });
+}
+
+function _tryPlayBg() {
+  try {
+    if (!_portalBgBuffer) return; // Buffer not loaded yet; _loadAudio() will call this again once it is
+    var overlay = document.getElementById('coin-modal-overlay');
+    var isCoinWindowOpen = overlay && overlay.classList.contains('open');
+    if (isCoinWindowOpen && _insertBgBuffer) return; // Wait if coin window is active
+
+    if (_audioCtx.state === 'suspended') return; // Still locked; _unlockAudioCtx() will retry once unlocked
+    _playPortalBgMusic();
+  } catch(e) { console.error(e); }
+}
+
+/* Unlock the AudioContext on the user's first *successful* interaction, no
+   matter whether that interaction happens before or after the music file
+   has finished downloading/decoding. Crucially, this does NOT give up
+   after the first qualifying event: a scroll-ending touchend (or other
+   gesture the browser doesn't count as valid audio-activation) can fire
+   this listener without actually unlocking the context, so we keep
+   listening until resume() truly succeeds (state becomes 'running').
+   touchstart is included since it's the most reliable unlock signal on
+   mobile, and firing before any scroll begins. */
+function _unlockAudioCtx() {
+  if (_audioCtx.state !== 'suspended') return;
+  _audioCtx.resume().then(function() {
+    if (_audioCtx.state === 'running') {
+      document.removeEventListener('click', _unlockAudioCtx);
+      document.removeEventListener('touchstart', _unlockAudioCtx);
+      document.removeEventListener('touchend', _unlockAudioCtx);
+      document.removeEventListener('keydown', _unlockAudioCtx);
+      document.removeEventListener('visibilitychange', _unlockAudioCtx);
+    }
+    _tryPlayBg();
+  }).catch(function(){});
+}
+document.addEventListener('click', _unlockAudioCtx, { passive: true });
+document.addEventListener('touchstart', _unlockAudioCtx, { passive: true });
+document.addEventListener('touchend', _unlockAudioCtx, { passive: true });
+document.addEventListener('keydown', _unlockAudioCtx, { passive: true });
+// Returning to this tab (e.g. after switching away) is another chance to retry.
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') _unlockAudioCtx();
+});
+
+function _playPortalBgMusic() {
+  if (!_portalBgBuffer || _portalBgSource) return;
+  try {
+    _portalBgSource = _audioCtx.createBufferSource();
+    _portalBgSource.buffer = _portalBgBuffer;
+    _portalBgSource.loop = true; // Perfect gapless playback
+    _portalBgSource.connect(_portalBgGain);
+
+    // Fade in from silence instead of jumping straight to full volume
+    var now = _audioCtx.currentTime;
+    _portalBgGain.gain.cancelScheduledValues(now);
+    _portalBgGain.gain.setValueAtTime(0, now);
+    _portalBgGain.gain.linearRampToValueAtTime(1, now + PORTAL_BG_FADE_IN_SECONDS);
+
+    _portalBgSource.start(0);
+  } catch(e) {}
+}
+
+function _stopPortalBgMusic() {
+  if (_portalBgSource) {
+    try { _portalBgSource.stop(); } catch(e){}
+    _portalBgSource.disconnect();
+    _portalBgSource = null;
+  }
+}
+
+function playCoinSound() {
+  if (!_coinSoundBuffer) return;
+  try {
+    // Generate a fresh source for overlap capability (fast coin drops)
+    var source = _audioCtx.createBufferSource();
+    source.buffer = _coinSoundBuffer;
+    source.connect(_masterGain);
+    source.start(0);
+  } catch(e) {}
+}
+
+function _playCoinBgMusic() {
+  if (!_insertBgBuffer) return;
+  try {
+    _stopPortalBgMusic(); // Silence portal music
+
+    if (_insertBgSource) {
+      try { _insertBgSource.stop(); } catch(e){}
+      _insertBgSource.disconnect();
+    }
+
+    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+
+    _insertBgSource = _audioCtx.createBufferSource();
+    _insertBgSource.buffer = _insertBgBuffer;
+    _insertBgSource.loop = true; // Perfect gapless playback
+    _insertBgSource.connect(_masterGain);
+    _insertBgSource.start(0);
+  } catch(e) { console.error(e); }
+}
+
+function _pauseCoinBgMusic() {
+  if (!_insertBgBuffer) return;
+  try {
+    // Kill the insert coin music
+    if (_insertBgSource) {
+      try { _insertBgSource.stop(); } catch(e){}
+      _insertBgSource.disconnect();
+      _insertBgSource = null;
+    }
+    // Fire up the portal music again
+    _playPortalBgMusic(); 
+  } catch(e) { console.error(e); }
+}
+
+// Puts the Done/Cancel buttons back to their idle state. Needed on every
+// path that ends a coin session (timeout, expiry, cancel, complete) —
+// otherwise whichever label/disabled state was mid-flight (e.g. "Cancelling…",
+// or cancelBtn disabled because coins were already inserted) stays stuck
+// until the next fetch response happens to overwrite it.
+function _resetCoinButtons() {
+  var doneBtn = document.getElementById('btn-coin-done');
+  if (doneBtn) { doneBtn.disabled = true; doneBtn.innerHTML = 'Done'; }
+  var cancelBtn = document.getElementById('btn-coin-cancel');
+  if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  _applyMute(_audioMuted); 
+  var speakerBtn = document.getElementById('speaker-toggle');
+  if (speakerBtn) {
+    speakerBtn.addEventListener('click', function() {
+      _applyMute(!_audioMuted);
+    });
+  }
+});
+/* ────────────────────────────────────────────────────────────────
+   Dynamic Image Carousel Logic
+──────────────────────────────────────────────────────────────── */
+var _carouselSlide = 0;
+var _carouselTimer = null;
+
+
+/* ────────────────────────────────────────────────────────────────
+   State
+──────────────────────────────────────────────────────────────── */
+var _timerID          = null;
+var _serverRemaining  = 0;
+var _serverUsed       = 0;
+var _sessionTotal     = 0;
+var _timerStartTime   = 0;
+
+var _coinPollID       = null;
+var _coinWinID        = null;
+var _coinExpireTimeout = null;   // forced-close safety net when local timer hits 0
+var _coinInitialLeft  = 0;
+var _coinStartTime    = 0;
+var _coinSID          = null;
+var _coinTimeout      = 30;
+var _coinWinLeft      = 0;
+var _coinFromStatus   = false;
+var _isFinalizing     = false;
+var _queuePollID      = null;
+var _coinPendingWait  = false;   
+var _cachedRates      = '';      
+var _coinSuspended    = false;
+var _coinCooldownRemaining = 0;
+
+/* ────────────────────────────────────────────────────────────────
+   Utilities
+──────────────────────────────────────────────────────────────── */
+function show(id) {
+  ['v-load','v-login','v-status','v-queue'].forEach(function(v) {
+    document.getElementById(v).style.display = (v === id) ? 'block' : 'none';
+  });
+}
+
+function pad(n) { return (n < 10) ? '0' + n : '' + n; }
+
+function fmtCountdown(secs) {
+  if (secs <= 0) return '0s';
+  var d = Math.floor(secs / 86400);
+  var h = Math.floor((secs % 86400) / 3600);
+  var m = Math.floor((secs % 3600) / 60);
+  var s = secs % 60;
+
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}
+
+
+function fmtMinutesLong(mins) {
+  mins = parseInt(mins, 10) || 0;
+  if (mins === 0) return '0m';
+  var d = Math.floor(mins / 1440);
+  var h = Math.floor((mins % 1440) / 60);
+  var m = mins % 60;
+  var res = [];
+  if (d > 0) res.push(d + 'd');
+  if (h > 0) res.push(h + 'h');
+  if (m > 0) res.push(m + 'm');
+  return res.join(' ');
+}
+
+function fmtExp(mins) {
+  var d = Math.floor(mins / 1440);
+  var h = Math.floor((mins % 1440) / 60);
+  var m = mins % 60;
+  if (d > 0) return d + ' d ' + h + ' hr ' + pad(m) + ' min';
+  if (h > 0) return h + ' hr ' + pad(m) + ' min';
+  return m + ' min';
+}
+
+function toggleWlan(prefix) {
+  if (!prefix) prefix = 's';
+  var row = document.getElementById(prefix + '-wlan-row');
+  if (!row.classList.contains('wlan-active')) return;
+  var caret = document.getElementById(prefix + '-wlan-caret');
+  var details = document.getElementById(prefix + '-wlan-details');
+  details.classList.toggle('open');
+  caret.classList.toggle('open');
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Progress calculation
+──────────────────────────────────────────────────────────────── */
+function updateDisplay(rem, total) {
+  var txtEl = document.getElementById('time-txt');
+  var txtStr = fmtCountdown(rem);
+  txtEl.textContent = txtStr;
+  
+  if (txtStr.length > 8) txtEl.style.fontSize = '1.6rem';
+  else                   txtEl.style.fontSize = ''; 
+  
+  var fill = document.getElementById('prog-fill');
+  var ratio = (total > 0) ? Math.max(0, rem / total) : 1;
+  fill.style.width = (ratio * 100) + '%';
+  
+  if (ratio > 0.4)       fill.style.background = '#4ade80';
+  else if (ratio > 0.15) fill.style.background = '#fbbf24';
+  else                   fill.style.background = '#f87171';
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Countdown timer — Uses server backend explicitly
+──────────────────────────────────────────────────────────────── */
+function startTimer(remaining, total, used) {
+  if (_timerID) clearInterval(_timerID);
+
+  _sessionTotal    = total || remaining;
+  _serverRemaining = remaining;
+  _serverUsed      = used || 0;
+  _timerStartTime  = Date.now();
+  
+  updateDisplay(_serverRemaining, _sessionTotal);
+  _timerID = setInterval(tickTimer, 1000);
+}
+
+function tickTimer() {
+  if (!_timerStartTime) return;
+
+  var elapsed = Math.round((Date.now() - _timerStartTime) / 1000);
+  
+  var currentRemaining = _serverRemaining - elapsed;
+  var currentUsed = _serverUsed + elapsed;
+  
+  if (currentRemaining <= 0) {
+    currentRemaining = 0;
+    clearInterval(_timerID);
+    _timerID = null;
+    updateDisplay(0, _sessionTotal);
+    document.getElementById('time-txt').textContent = 'Expired';
+    setTimeout(function() { checkStatus(); }, 3000);
+  } else {
+    updateDisplay(currentRemaining, _sessionTotal);
+  }
+}
+
+document.addEventListener("visibilitychange", function() {
+  if (document.hidden) {
+    // Check if the Insert Coin modal is currently active
+    var overlay = document.getElementById('coin-modal-overlay');
+    var isCoinWindowOpen = overlay && overlay.classList.contains('open');
+    
+    // Pause portal audio by suspending the hardware audio context, 
+    // EXCLUDING when the insert coin window is open (e.g. user switching to GCash)
+    if (!isCoinWindowOpen && _audioCtx.state === 'running') {
+      _audioCtx.suspend();
+    }
+  } else {
+    // Resume the exact playback position when returning to the portal
+    if (!_audioMuted && _audioCtx.state === 'suspended') {
+      var p = _audioCtx.resume();
+      if (p && p.catch) p.catch(function(){}); // Catch autoplay policy errors if no interaction happened yet
+    }
+    
+    // Resume syncing UI timers
+    if (_timerID)   tickTimer();
+    if (_coinWinID) tickCoinTimer();
+    setTimeout(checkStatus, 500);
+  }
+});
+
+window.addEventListener("pageshow", function(event) {
+  if (event.persisted) {
+    setTimeout(checkStatus, 500);
+    checkCoinEnabled();
+  }
+});
+
+/* ────────────────────────────────────────────────────────────────
+   API calls — status / login / logout / add
+──────────────────────────────────────────────────────────────── */
+function renderDeviceInfo(d, prefix) {
+  document.getElementById(prefix + '-mac').textContent = d.mac || '--';
+  document.getElementById(prefix + '-ip').textContent  = d.ip  || '--';
+
+  var wlanRow     = document.getElementById(prefix + '-wlan-row');
+  var wlanCaret   = document.getElementById(prefix + '-wlan-caret');
+  var wlanDetails = document.getElementById(prefix + '-wlan-details');
+
+  if (d.connection === 'WLAN') {
+    var bandTxt = d.band ? ' (' + d.band + ')' : '';
+    document.getElementById(prefix + '-wlan').textContent = (d.wlan_iface || 'WLAN') + bandTxt;
+
+    if (typeof d.rssi === 'number') {
+      var rssiDbm = d.rssi > 0 ? Math.max(d.rssi - 100, -100) : d.rssi;
+      document.getElementById(prefix + '-rssi').textContent = rssiDbm + ' dBm';
+    } else {
+      document.getElementById(prefix + '-rssi').textContent = '--';
+    }
+
+    document.getElementById(prefix + '-snr').textContent  = (typeof d.snr  === 'number') ? d.snr  : '--';
+    
+    wlanRow.classList.add('wlan-active');
+    wlanCaret.style.display = 'inline-block';
+  } else {
+    document.getElementById(prefix + '-wlan').textContent = d.connection === 'LAN' ? 'LAN' : '--';
+    wlanRow.classList.remove('wlan-active');
+    wlanCaret.style.display = 'none';
+    wlanDetails.classList.remove('open');
+    wlanCaret.classList.remove('open');
+  }
+}
+
+function checkStatus() {
+  var isOnline = (document.getElementById('v-status').style.display === 'block');
+  if (!_coinSID && !_queuePollID && !_coinPendingWait && !isOnline) show('v-load');
+
+  var url = '/cgi-bin/status.sh?_=' + Math.random();
+
+  fetch(url, { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.logged_in) {
+        renderDeviceInfo(d, 's');
+        if (!_coinSID && !_queuePollID && !_coinPendingWait) show('v-status');
+        startTimer(d.remaining, d.total, d.used);
+      } else {
+        renderDeviceInfo(d, 'l');
+        
+        var loginTitle = document.getElementById('login-title');
+        var loginSub   = document.getElementById('login-sub');
+
+        if (d.has_paused && d.remaining > 0) {
+          loginTitle.textContent = 'Time Paused';
+          loginSub.textContent   = 'You can click the Resume Time Button to continue surfing.';
+          
+          document.getElementById('resume-progress-wrap').style.display = 'flex';
+          
+          var resumeStr = fmtCountdown(d.remaining);
+          var resumeEl = document.getElementById('resume-time');
+          resumeEl.textContent = resumeStr;
+          
+          // Match the font resizing logic used in updateDisplay()
+          if (resumeStr.length > 8) resumeEl.style.fontSize = '1.6rem';
+          else                      resumeEl.style.fontSize = '';
+          
+          var ratio = (d.total > 0) ? Math.max(0, d.remaining / d.total) : 1;
+          var rFill = document.getElementById('resume-prog-fill');
+          rFill.style.width = (ratio * 100) + '%';
+          if (ratio > 0.4)       rFill.style.background = '#4ade80';
+          else if (ratio > 0.15) rFill.style.background = '#fbbf24';
+          else                   rFill.style.background = '#f87171';
+          
+          document.getElementById('btn-resume').style.display = 'block';
+        } else {
+          loginTitle.textContent = 'Disconnected';
+          loginSub.textContent   = 'Insert Coins or Enter a voucher code to get online.';
+          
+          document.getElementById('resume-progress-wrap').style.display = 'none';
+          document.getElementById('btn-resume').style.display = 'none';
+        }
+        if (!_coinSID && !_queuePollID && !_coinPendingWait) show('v-login');
+      }
+    })
+    .catch(function() { 
+      setTimeout(checkStatus, 1500); 
+    });
+}
+
+function doResume() {
+  fetch('/cgi-bin/login.sh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'resume=1'
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      show('v-status');
+      checkStatus();
+    } else {
+      var msgs = {
+        no_mac: "Can't detect your device MAC.",
+        no_paused_session: "No paused session found. It may have expired."
+      };
+      toastr.error(msgs[d.error] || 'Failed to resume session.');
+    }
+  })
+  .catch(function() { toastr.error('Connection error.'); });
+}
+
+function doLogin() {
+  var code = document.getElementById('login-code').value.trim().toUpperCase();
+  if (!code) { toastr.error('Please enter a voucher code.'); return; }
+
+  fetch('/cgi-bin/login.sh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'voucher=' + encodeURIComponent(code)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      document.getElementById('login-code').value = '';
+      show('v-status');
+      checkStatus();
+    } else {
+      var msgs = {
+        no_mac:    "Can't detect your device MAC yet — wait a few seconds and try again.",
+        no_voucher:'Please enter a voucher code.',
+        invalid:   'Invalid or already-used voucher code.',
+        expired:   'This voucher has expired and can no longer be redeemed.',
+        cooldown:'Too many attempts. Please wait a moment.'
+      };
+      toastr.error(msgs[d.error] || 'Something went wrong — please try again.');
+    }
+  })
+  .catch(function() {
+    toastr.error('Connection error. Please try again.');
+  });
+}
+
+function doAddTime() {
+  var code = document.getElementById('add-code').value.trim().toUpperCase();
+  if (!code) { toastr.error('Please enter a voucher code.'); return; }
+
+  fetch('/cgi-bin/login.sh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'voucher=' + encodeURIComponent(code)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.ok) {
+      document.getElementById('add-code').value = '';
+      checkStatus();
+
+      toastr.success(
+        d.stacked
+          ? '\u2714\ufe0f Time stacked! ' + fmtCountdown(d.remaining) + ' remaining total.'
+          : '\u2714\ufe0f Connected! '    + fmtCountdown(d.remaining) + ' remaining.'
+      );
+    } else {
+      var msgs = {
+        no_mac:  "Can't detect your device MAC.",
+        invalid: 'Invalid or already-used voucher code.',
+        expired: 'This voucher has expired.',
+        cooldown:'Too many attempts. Please wait a moment.'
+      };
+      toastr.error(msgs[d.error] || 'Error — please try again.');
+    }
+  })
+  .catch(function() {
+    toastr.error('Connection error.');
+  });
+}
+
+function doLogout() {
+  if (_timerID) { clearInterval(_timerID); _timerID = null; }
+
+  fetch('/cgi-bin/logout.sh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: ''
+  })
+  .then(function(r) { return r.text(); })
+  .then(function() { checkStatus(); })
+  .catch(function() { checkStatus(); });
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Enter key support
+──────────────────────────────────────────────────────────────── */
+document.addEventListener('keydown', function(e) {
+  var coinOverlay = document.getElementById('coin-modal-overlay');
+  var coinOpen = coinOverlay && coinOverlay.classList.contains('open');
+
+  if (e.key === 'Escape') {
+    var imgOverlay = document.getElementById('img-modal-overlay');
+    if (imgOverlay && imgOverlay.classList.contains('open')) { closeImgModal(); return; }
+
+    if (coinOpen) { closeCoinModal(); return; }
+    var ratesOverlay = document.getElementById('rates-modal-overlay');
+    if (ratesOverlay && ratesOverlay.classList.contains('open')) closeRatesModal();
+    return;
+  }
+
+  if (e.key !== 'Enter') return;
+  if (coinOpen) return;
+
+  var loginView     = document.getElementById('v-login');
+  var statusView    = document.getElementById('v-status');
+  var resumeVisible = document.getElementById('btn-resume').style.display === 'block';
+
+  if (loginView.style.display === 'block') {
+    if (resumeVisible && !document.getElementById('login-code').value.trim()) {
+      doResume();
+    } else {
+      doLogin();
+    }
+  } else if (statusView.style.display === 'block') { doAddTime(); }
+});
+
+/* ────────────────────────────────────────────────────────────────
+   Coin — enabled check & automatic resume
+──────────────────────────────────────────────────────────────── */
+function checkCoinEnabled(pendingRetries) {
+  fetch('/cgi-bin/coin.sh?action=config', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var on = d.enabled === true;
+      ['btn-coin-login', 'btn-coin-status', 'btn-rates-login', 'btn-rates-status'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = on ? 'block' : 'none';
+      });
+      if (on && d.rates) {
+        _cachedRates = d.rates;
+      }
+
+      // --- Suspension state ---
+      _coinSuspended = !!(on && d.suspended);
+      _coinCooldownRemaining = (_coinSuspended && d.cooldown_remaining > 0) ? d.cooldown_remaining : 0;
+      ['btn-coin-login', 'btn-coin-status'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (_coinSuspended) {
+          el.classList.add('suspended');
+          var mins = Math.ceil(_coinCooldownRemaining / 60);
+          el.title = 'Suspended — wait ' + mins + ' min' + (mins !== 1 ? 's' : '');
+        } else {
+          el.classList.remove('suspended');
+          el.title = '';
+        }
+      });
+      // Auto-recheck when cooldown expires so button re-enables itself
+      if (_coinSuspended && _coinCooldownRemaining > 0) {
+        setTimeout(function() { checkCoinEnabled(); }, (_coinCooldownRemaining + 2) * 1000);
+      }
+
+      if (on && d.resume) {
+        _coinPendingWait = false;
+        doCoinStart(false, false);
+        return;
+      }
+
+      if (on && d.pending) {
+        _coinPendingWait = true;
+        var retries = (typeof pendingRetries === 'number') ? pendingRetries : 0;
+        if (retries < 8) {
+          setTimeout(function() { checkCoinEnabled(retries + 1); }, 1000);
+        } else {
+          _coinPendingWait = false;
+          checkStatus();
+        }
+        return;
+      }
+
+      if (_coinPendingWait) {
+        _coinPendingWait = false;
+        checkStatus();
+      }
+    })
+    .catch(function() {
+      ['btn-coin-login', 'btn-coin-status', 'btn-rates-login', 'btn-rates-status'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      });
+    });
+}
+
+function doQueueCancel() {
+  if (_queuePollID) { clearInterval(_queuePollID); _queuePollID = null; }
+  fetch('/cgi-bin/coin.sh?action=cancel', { cache: 'no-store' })
+    .then(function() { checkStatus(); })
+    .catch(function() { checkStatus(); });
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Coin — rates modal
+──────────────────────────────────────────────────────────────── */
+function renderRatesList(ratesStr) {
+  var list = document.getElementById('rates-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  var pairs = (ratesStr || '').trim().split(/\s+/).filter(Boolean);
+  if (!pairs.length) {
+    list.innerHTML = '<div class="rates-empty">No rates configured.</div>';
+    return;
+  }
+
+  pairs.forEach(function(pair) {
+    var kv = pair.split(':');
+    if (kv.length < 2) return;
+    var row = document.createElement('div');
+    row.className = 'rates-row';
+    var pesoEl = document.createElement('span');
+    pesoEl.className = 'rp';
+    pesoEl.textContent = '\u20b1' + kv[0];
+    var timeEl = document.createElement('span');
+    timeEl.className = 'rt';
+    timeEl.textContent = fmtMinutesLong(kv[1]);
+    row.appendChild(pesoEl);
+    row.appendChild(timeEl);
+    list.appendChild(row);
+  });
+}
+
+function openRatesModal() {
+  if (_cachedRates) {
+    renderRatesList(_cachedRates);
+    document.getElementById('rates-modal-overlay').classList.add('open');
+    return;
+  }
+  renderRatesList('');
+  document.getElementById('rates-modal-overlay').classList.add('open');
+  fetch('/cgi-bin/coin.sh?action=config', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      _cachedRates = d.rates || '';
+      renderRatesList(_cachedRates);
+    })
+    .catch(function() { });
+}
+
+function closeRatesModal() {
+  var overlay = document.getElementById('rates-modal-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Coin — insert coin modal
+──────────────────────────────────────────────────────────────── */
+function openCoinModal() {
+  var overlay = document.getElementById('coin-modal-overlay');
+  if (overlay) overlay.classList.add('open');
+}
+
+function closeCoinModalUI() {
+  var overlay = document.getElementById('coin-modal-overlay');
+  if (overlay) overlay.classList.remove('open');  
+}
+
+function closeCoinModal() {
+  var cancelBtn = document.getElementById('btn-coin-cancel');
+  if (cancelBtn && cancelBtn.disabled) return;
+  doCoinCancel();
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Coin — session flow
+──────────────────────────────────────────────────────────────── */
+function doCoinStart(fromStatus, isPolling) {
+  // If suspended, don't proceed — show error instead
+  if (!isPolling && _coinSuspended) {
+    var mins = Math.ceil(_coinCooldownRemaining / 60);
+    toastr.warning('\u26d4 You are temporarily suspended from the coinslot. Please wait '
+      + mins + ' more minute' + (mins !== 1 ? 's' : '') + '.');
+    return;
+  }
+  if (!isPolling) _coinFromStatus = !!fromStatus;
+  _isFinalizing   = false;
+
+  var btnId   = _coinFromStatus ? 'btn-coin-status' : 'btn-coin-login';
+  var btn     = document.getElementById(btnId);
+  var origTxt = btn ? btn.getAttribute('data-orig-text') || btn.textContent : '';
+
+  if (!isPolling && btn) { 
+    // Save original text to an attribute if it doesn't exist yet to prevent stacking spinners
+    if (!btn.getAttribute('data-orig-text')) {
+      btn.setAttribute('data-orig-text', origTxt);
+    }
+    
+    btn.disabled = true; 
+    // Show a loading spinner to the right of the button text
+    btn.innerHTML = origTxt + ' <span class="btn-spinner"></span>';
+
+    // Disable the pause/resume time buttons if they are visible
+    var resumeBtn = document.getElementById('btn-resume');
+    var pauseBtn = document.getElementById('btn-pause');
+    if (resumeBtn) resumeBtn.disabled = true;
+    if (pauseBtn) pauseBtn.disabled = true;
+  }
+
+  fetch('/cgi-bin/coin.sh?action=start', { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!isPolling && btn) { 
+        btn.disabled = false; 
+        btn.textContent = origTxt; 
+        
+        // Re-enable the pause/resume time buttons
+        var resumeBtn = document.getElementById('btn-resume');
+        var pauseBtn = document.getElementById('btn-pause');
+        if (resumeBtn) resumeBtn.disabled = false;
+        if (pauseBtn) pauseBtn.disabled = false;
+      }
+
+      if (d.error) {
+        if (_queuePollID) { clearInterval(_queuePollID); _queuePollID = null; }
+        var msg = d.error;
+        if (msg === 'Coin slot in use, try again shortly')
+          msg = 'The Coinslot is currently in use, you can wait for the person to finish.';
+        else if (msg === 'Coinslot Unavailable')
+          msg = 'The Coinslot is currently unavailable, try again later or notify the vendo owner.';
+        else
+          msg = '\ud83e\ude99 ' + msg;
+        toastr.error(msg);
+        return;
+      }
+
+      if (d.queued) {
+        show('v-queue');
+        document.getElementById('queue-pos').textContent = d.position;
+        if (!_queuePollID) {
+          _queuePollID = setInterval(function() {
+            doCoinStart(_coinFromStatus, true);
+          }, 3000);
+        }
+        return;
+      }
+
+      if (_queuePollID) { clearInterval(_queuePollID); _queuePollID = null; }
+      _coinPendingWait = false;
+
+      var resumedAmount  = (typeof d.amount === 'number')  ? d.amount  : 0;
+      var resumedMinutes = (typeof d.minutes === 'number') ? d.minutes : 0;
+
+      document.getElementById('coin-amount').textContent = resumedAmount;
+      var prev = document.getElementById('coin-preview');
+      if (resumedMinutes > 0) {
+        prev.textContent = fmtMinutesLong(resumedMinutes) + ' Internet Access.';
+        prev.className = 'coin-preview active';
+      } else {
+        prev.textContent = 'insert coins to begin';
+        prev.className = 'coin-preview';
+      }
+      
+      var doneBtn = document.getElementById('btn-coin-done');
+      if (doneBtn) { 
+        doneBtn.disabled = !(resumedMinutes > 0); 
+        doneBtn.innerHTML = 'Done';
+      }
+      
+      var cancelBtn = document.getElementById('btn-coin-cancel');
+      if (cancelBtn) {
+        cancelBtn.textContent = 'Cancel'; 
+        if (resumedAmount > 0) {
+          cancelBtn.disabled = true;
+        } else {
+          cancelBtn.disabled = false;
+        }
+      }
+
+      _coinSID     = d.sid;
+      _coinTimeout = d.timeout || 30;
+      _coinWinLeft = (typeof d.remaining === 'number') ? d.remaining : _coinTimeout;
+      _lastCoinAmount = resumedAmount; 
+
+      show(_coinFromStatus ? 'v-status' : 'v-login');
+      openCoinModal();
+      startCoinCountdown(_coinWinLeft, _coinTimeout);
+      startCoinPoll();
+      _playCoinBgMusic();
+    })
+    .catch(function() {
+      if (!isPolling && btn) { 
+        btn.disabled = false; 
+        btn.textContent = origTxt; 
+        
+        // Re-enable the pause/resume time buttons on network failures
+        var resumeBtn = document.getElementById('btn-resume');
+        var pauseBtn = document.getElementById('btn-pause');
+        if (resumeBtn) resumeBtn.disabled = false;
+        if (pauseBtn) pauseBtn.disabled = false;
+      }
+      if (!isPolling) toastr.error('Failed to contact Coinslot, try again.');
+    });
+}
+
+
+function startCoinCountdown(initialSecs, totalSecs) {
+  if (_coinWinID) clearInterval(_coinWinID);
+  if (_coinExpireTimeout) { clearTimeout(_coinExpireTimeout); _coinExpireTimeout = null; }
+  
+  _coinInitialLeft = initialSecs;
+  _coinStartTime = Date.now();
+  _coinWinLeft = initialSecs;
+  _coinTimeout = (typeof totalSecs === 'number' && totalSecs > 0) ? totalSecs : initialSecs;
+  
+  updateCoinProgress(_coinWinLeft);
+  _coinWinID = setInterval(tickCoinTimer, 1000);
+}
+
+function tickCoinTimer() {
+  if (!_coinStartTime) return;
+  var used = Math.round((Date.now() - _coinStartTime) / 1000);
+  _coinWinLeft = _coinInitialLeft - used;
+  if (_coinWinLeft < 0) _coinWinLeft = 0;
+  
+  updateCoinProgress(_coinWinLeft);
+  
+  if (_coinWinLeft <= 0) {
+    clearInterval(_coinWinID);
+    _coinWinID = null;
+    // If the server hasn't sent expired/complete within 4s, force-close the modal.
+    // This covers the gap where the NodeMCU session has ended but the last poll
+    // response still said "active". 4s gives ~3 extra poll cycles in case a coin
+    // was inserted in the very last second and resets the server timer.
+    if (!_coinExpireTimeout && _coinSID) {
+      _coinExpireTimeout = setTimeout(function() {
+        _coinExpireTimeout = null;
+        if (!_coinSID) return; // Server poll already handled it
+        stopCoinPoll();
+        _pauseCoinBgMusic();
+        _resetCoinButtons();
+        _isFinalizing = false;
+        var amt = parseInt((document.getElementById('coin-amount') || {}).textContent, 10) || 0;
+        if (amt > 0) {
+          toastr.error('Coinslot session expired.');
+        } else {
+          toastr.warning('Time expired. No coins were inserted.');
+        }
+        setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
+      }, 4000);
+    }
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────
+   Coin Polling and Status Helpers
+──────────────────────────────────────────────────────────────── */
+function updateCoinProgress(secs) {
+  if (secs < 0) secs = 0;
+  document.getElementById('coin-win-txt').textContent = secs + 's remaining';
+  var pct = _coinTimeout > 0 ? (secs / _coinTimeout) * 100 : 0; 
+  if (pct > 100) pct = 100;
+  
+  var bar = document.getElementById('coin-bar-fill'); 
+  bar.style.width = pct + '%';
+  
+  // Now uses CSS variables so it correctly shifts between White (Dark Mode) and Orange (Light Mode)
+  if (pct > 40) bar.style.background = 'var(--coin-bar-high)'; 
+  else if (pct > 15) bar.style.background = 'var(--coin-bar-med)'; 
+  else bar.style.background = 'var(--coin-bar-low)';
+}
+
+function startCoinPoll() {
+  if (_coinPollID) clearInterval(_coinPollID);
+  _coinPollID = setInterval(function() {
+    if (!_coinSID) { clearInterval(_coinPollID); return; }
+    fetch('/cgi-bin/coin.sh?action=poll&sid=' + _coinSID, { cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!_coinSID) return; // Prevent delayed server responses from touching UI if cancelled
+
+        if (d.error) {
+          stopCoinPoll();
+          toastr.error(d.error);
+          return;
+        }
+
+        if (d.status === 'active') {
+          if (!_isFinalizing) {
+            // Play coin sound whenever the amount goes up (new coin detected)
+            if (typeof d.amount === 'number' && d.amount > _lastCoinAmount) {
+              playCoinSound();
+            }
+            _lastCoinAmount = typeof d.amount === 'number' ? d.amount : _lastCoinAmount;
+
+            document.getElementById('coin-amount').textContent = d.amount;
+            var prev = document.getElementById('coin-preview');
+            var doneBtn = document.getElementById('btn-coin-done');
+            var cancelBtn = document.getElementById('btn-coin-cancel');
+            
+            if (d.minutes > 0) {
+              prev.textContent = fmtMinutesLong(d.minutes) + ' Internet Access.';
+              prev.className = 'coin-preview active';
+              if (doneBtn) doneBtn.disabled = false;
+            } else {
+              prev.textContent = 'insert coins to begin';
+              prev.className = 'coin-preview';
+              if (doneBtn) doneBtn.disabled = true;
+            }
+            if (cancelBtn) {
+              if (d.amount > 0) {
+                cancelBtn.disabled = true;
+              } else {
+                cancelBtn.disabled = false;
+              }
+            }
+
+            if (typeof d.remaining === 'number' && Math.abs(d.remaining - _coinWinLeft) > 2) {
+              _coinInitialLeft = d.remaining;
+              _coinStartTime = Date.now();
+              _coinWinLeft = d.remaining;
+              updateCoinProgress(_coinWinLeft);
+              // A coin may have been inserted just as the local timer hit 0;
+              // the server reset its timer — cancel the forced-close timeout and
+              // restart the local countdown so the bar keeps ticking down.
+              if (d.remaining > 0) {
+                if (_coinExpireTimeout) { clearTimeout(_coinExpireTimeout); _coinExpireTimeout = null; }
+                if (!_coinWinID) { _coinWinID = setInterval(tickCoinTimer, 1000); }
+              }
+            }
+          }
+
+        } else if (d.status === 'complete') {
+          stopCoinPoll();
+          _isFinalizing = false;
+          document.getElementById('coin-amount').textContent = d.amount;
+          var prev2 = document.getElementById('coin-preview');
+          if (d.minutes > 0) {
+            prev2.textContent = '' + fmtMinutesLong(d.minutes) + ' added.';
+            prev2.className = 'coin-preview active';
+            _pauseCoinBgMusic();
+            setTimeout(function() {
+              _coinSID = null; 
+              closeCoinModalUI();
+              checkStatus();
+            }, 1500);
+          } else {
+            _pauseCoinBgMusic();
+            _resetCoinButtons();
+            toastr.error("No was time granted, there wasn't not enough coins inserted.");
+            setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
+          }
+
+        } else if (d.status === 'expired') {
+          stopCoinPoll();
+          _isFinalizing = false;
+          _pauseCoinBgMusic();
+          _resetCoinButtons();
+          var amt = parseInt(document.getElementById('coin-amount').textContent, 10) || 0;
+          if (amt > 0) {
+            toastr.error('Coinslot session expired.');
+            setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
+          } else {
+            toastr.error('No coins were inserted.');
+            setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
+          }
+        }
+      })
+      .catch(function() { });
+  }, 1000);
+}
+
+function stopCoinPoll() {
+  if (_coinPollID) { clearInterval(_coinPollID); _coinPollID = null; }
+  if (_coinWinID)  { clearInterval(_coinWinID);  _coinWinID  = null; }
+  if (_coinExpireTimeout) { clearTimeout(_coinExpireTimeout); _coinExpireTimeout = null; }
+}
+
+function doCoinCancel() {
+  var sid = _coinSID;
+  _isFinalizing = true; // explicitly mark as finalizing to halt any in-flight polls
+  stopCoinPoll();
+  _coinSID = null;
+
+  var cancelBtn = document.getElementById('btn-coin-cancel');
+  if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling.'; }
+  _pauseCoinBgMusic(); 
+  function finish() {
+    setTimeout(function() {
+      closeCoinModalUI();
+      checkStatus();
+    }, 800);
+  }
+
+  if (sid) {
+    fetch('/cgi-bin/coin.sh?action=cancel&sid=' + sid, { cache: 'no-store' })
+      .then(function() { finish(); })
+      .catch(function() { finish(); });
+  } else {
+    finish();
+  }
+}
+
+function doCoinDone() {
+  var sid = _coinSID;
+  if (!sid) return;
+
+  _isFinalizing = true;
+  if (_coinWinID) { clearInterval(_coinWinID); _coinWinID = null; }
+
+  var doneBtn = document.getElementById('btn-coin-done');
+  if (doneBtn) { doneBtn.disabled = true; doneBtn.textContent = 'Finishing up.'; }
+  var cancelBtn = document.getElementById('btn-coin-cancel');
+  if (cancelBtn) cancelBtn.disabled = true;
+  _pauseCoinBgMusic(); 
+
+  var prev = document.getElementById('coin-preview');
+  if (prev) { prev.textContent = 'Adding time.'; prev.className = 'coin-preview active'; }
+
+  fetch('/cgi-bin/coin.sh?action=cancel&sid=' + sid, { cache: 'no-store' })
+    .catch(function() { });
+}
+/* ────────────────────────────────────────────────────────────────
+   Image Preview Modal
+──────────────────────────────────────────────────────────────── */
+function openImgModal(src) {
+  var overlay = document.getElementById('img-modal-overlay');
+  var img = document.getElementById('img-modal-src');
+  if (overlay && img) {
+    img.src = src;
+    overlay.classList.add('open');
+  }
+}
+
+function closeImgModal() {
+  var overlay = document.getElementById('img-modal-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+/* ────────────────────────────────────────────────────────────────
+   Boot
+──────────────────────────────────────────────────────────────── */
+checkStatus();
+checkCoinEnabled();
+(function(){
+  fetch('/cgi-bin/portal_config.sh', {cache: 'no-store'})
+  .then(function(r){ return r.json(); })
+  .then(function(c){
+    // 1. Update text and title
+    if(c.title){ document.querySelector('.portal-title').textContent=c.title; }
+    if(c.brand)  document.querySelector('.portal-brand').textContent=c.brand;
+    if(c.footer !== undefined){
+      var ft = document.getElementById('portal-footer-text');
+      if(ft) ft.textContent = c.footer;
+    }
+    
+    // 2. Update logos
+    if(c.logo){
+      var ps = document.querySelector('.portal-signal');
+      if(ps) ps.src = c.logo;
+    }
+
+    // Tab title / favicon always mirror the header (see _syncTabFromHeader above)
+    _syncTabFromHeader();
+    
+    // 3. Carousel Logic
+    var promos = c.promos || [];
+    if(promos.length > 0){
+      var wrap  = document.getElementById('promo-carousel');
+      var track = document.getElementById('promo-track');
+      var nav   = document.getElementById('promo-indicators');
+      var pPrev = document.getElementById('promo-prev');
+      var pNext = document.getElementById('promo-next');
+      
+      promos.forEach(function(src, i){
+        var img = document.createElement('img');
+        img.className = 'promo-slide';
+        img.src = src;
+        img.alt = '';
+        img.onclick = function() { openImgModal(src); };
+        track.appendChild(img);
+        
+        if(promos.length > 1){
+          var dot = document.createElement('div');
+          dot.className = 'promo-dot' + (i === 0 ? ' active' : '');
+          (function(idx){ dot.addEventListener('click', function(){ goTo(idx); }); })(i);
+          nav.appendChild(dot);
+        }
+      });
+      
+      wrap.style.display = 'block';
+      
+      if(promos.length > 1){
+        var cur = 0;
+        var timer;
+        
+        function goTo(n){
+          cur = n;
+          track.style.transform = 'translateX(-' + (n * 100) + '%)';
+          nav.querySelectorAll('.promo-dot').forEach(function(d, i){
+            d.classList.toggle('active', i === n);
+          });
+          // Reset timer when manually interacting
+          clearInterval(timer);
+          timer = setInterval(function(){ goTo((cur + 1) % promos.length); }, 4500);
+        }
+        
+        // Wire up HTML arrows
+        if(pPrev) { pPrev.style.display = 'flex'; pPrev.onclick = function() { goTo((cur - 1 + promos.length) % promos.length); }; }
+        if(pNext) { pNext.style.display = 'flex'; pNext.onclick = function() { goTo((cur + 1) % promos.length); }; }
+        
+        // Start auto-play
+        timer = setInterval(function(){ goTo((cur + 1) % promos.length); }, 4500);
+      }
+    }
+
+// 4. Web Audio Buffer Loaders
+    if(c.bg_music)        _loadAudio(c.bg_music, 'portal');
+    if(c.insert_bg_music) _loadAudio(c.insert_bg_music, 'insert');
+    if(c.coin_sound)      _loadAudio(c.coin_sound, 'coin');
+
+  }).catch(function(){});
+})();
+</script>
+</body>
+</html>

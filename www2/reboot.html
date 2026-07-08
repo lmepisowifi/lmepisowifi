@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+        .section-divider {
+            border-top: 1px solid var(--border-color);
+            margin: 20px 0 18px;
+        }
+        .schedule-mode-tabs {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 14px;
+        }
+        .schedule-mode-btn {
+            flex: 1;
+            padding: 7px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-input);
+            color: var(--text-secondary);
+            font-size: 13px;
+            cursor: pointer;
+            text-align: center;
+            transition: border-color 0.18s, color 0.18s, background 0.18s;
+        }
+        .schedule-mode-btn.active {
+            border-color: var(--accent-color);
+            color: var(--text-primary);
+            background: rgba(255,255,255,0.06);
+        }
+        .schedule-mode-btn:hover:not(.active) {
+            border-color: #666;
+            color: var(--text-primary);
+        }
+        .sched-panel { display: none; }
+        .sched-panel.visible { display: block; }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-badge.active-sched {
+            background: rgba(76,175,80,.18);
+            color: #81c784;
+            border: 1px solid rgba(76,175,80,.3);
+        }
+        .status-badge.inactive-sched {
+            background: rgba(255,255,255,.06);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+        .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: currentColor;
+            flex-shrink: 0;
+        }
+        .countdown-bar-wrap {
+            height: 5px;
+            border-radius: 3px;
+            background: rgba(255,255,255,.08);
+            margin-top: 6px;
+            overflow: hidden;
+        }
+        .countdown-bar {
+            height: 100%;
+            border-radius: 3px;
+            background: #fff;
+            transition: width 1s linear;
+        }
+        .current-sched-info {
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 10px 13px;
+            font-size: 13px;
+            line-height: 1.6;
+            margin-bottom: 14px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .info-lbl { color: var(--text-secondary); }
+        .info-val { color: var(--text-primary); font-weight: 600; }
+
+        /* reboot countdown card */
+        #reboot-countdown-card {
+            display: none;
+            text-align: center;
+            padding: 18px 0 10px;
+        }
+        .big-countdown {
+            font-size: 48px;
+            font-weight: 700;
+            line-height: 1;
+            color: var(--text-primary);
+        }
+        .big-countdown-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+        }
+        code { color: #fff; }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+
+                <!-- ─── Reboot Now card ─── -->
+                <div class="card mb-4">
+                    <div class="card-header">Manual Reboot</div>
+                    <div class="card-body">
+
+                        <!-- live uptime display -->
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <span style="font-size:13px;color:var(--text-secondary)">Current uptime</span>
+                                <span id="live-uptime" style="font-size:13px;color:var(--text-primary)">—</span>
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span style="font-size:13px;color:var(--text-secondary)">Device time</span>
+                                <span id="live-time" style="font-size:13px;color:var(--text-primary)">—</span>
+                            </div>
+                        </div>
+
+                        <!-- big countdown shown while waiting for reboot -->
+                        <div id="reboot-countdown-card">
+                            <div class="big-countdown" id="reboot-big-num">60</div>
+                            <div class="big-countdown-sub">Rebooting&hellip; page will reload when the device comes back up.</div>
+                            <div class="countdown-bar-wrap mt-3">
+                                <div class="countdown-bar" id="reboot-bar" style="width:100%"></div>
+                            </div>
+                        </div>
+
+                        <div class="d-grid mt-1" id="reboot-btn-wrap">
+                            <button class="btn btn-danger" id="reboot-btn" onclick="confirmReboot()">
+                                Reboot Now
+                            </button>
+                        </div>
+                        <div class="field-hint text-center mt-2">
+                            The device will reboot immediately. You will be disconnected for ~60 seconds.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ─── Auto-reboot schedule card ─── -->
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Auto-reboot Schedule</span>
+                        <span id="sched-badge" class="status-badge inactive-sched">
+                            <span class="dot"></span><span id="sched-badge-txt">Disabled</span>
+                        </span>
+                    </div>
+                    <div class="card-body">
+
+                        <!-- active schedule summary (shown when a schedule is saved) -->
+                        <div id="active-sched-summary" style="display:none">
+                            <div class="current-sched-info" id="sched-summary-box"></div>
+                        </div>
+
+                        <!-- mode tabs -->
+                        <div class="schedule-mode-tabs">
+                            <div class="schedule-mode-btn active" id="tab-none"
+                                 onclick="setSchedTab('none')">No schedule</div>
+                            <div class="schedule-mode-btn" id="tab-uptime"
+                                 onclick="setSchedTab('uptime')">Uptime trigger</div>
+                            <div class="schedule-mode-btn" id="tab-time"
+                                 onclick="setSchedTab('time')">Time of day</div>
+                        </div>
+
+                        <!-- ── Panel: none ── -->
+                        <div class="sched-panel visible" id="panel-none">
+                            <p style="font-size:13px;color:var(--text-secondary);margin:0">
+                                Automatic reboot is off. Select a schedule type above to set one up.
+                            </p>
+                        </div>
+
+                        <!-- ── Panel: uptime ── -->
+                        <div class="sched-panel" id="panel-uptime">
+                            <div class="mb-3">
+                                <label class="form-label" for="uptime-days">Reboot after uptime reaches</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="uptime-days"
+                                           min="0" max="365" value="7" style="max-width:100px">
+                                    <span class="input-group-text">days</span>
+                                    <input type="number" class="form-control" id="uptime-hours"
+                                           min="0" max="23" value="0" style="max-width:80px">
+                                    <span class="input-group-text">h</span>
+                                    <input type="number" class="form-control" id="uptime-mins"
+                                           min="0" max="59" value="0" style="max-width:80px">
+                                    <span class="input-group-text">m</span>
+                                </div>
+                                <div class="field-hint">
+                                    Device will reboot once uptime exceeds this threshold.
+                                    Checked every minute via cron.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- ── Panel: time of day ── -->
+                        <div class="sched-panel" id="panel-time">
+                            <div class="mb-3">
+                                <label class="form-label" for="tod-time">Reboot daily at</label>
+                                <input type="time" class="form-control" id="tod-time"
+                                       value="04:00" style="max-width:150px">
+                                <div class="field-hint">
+                                    A cron job will reboot the device at this time every day.
+                                    Uses the device's local clock.
+                                </div>
+                            </div>
+
+                            <div class="mb-1">
+                                <label class="form-label">Repeat on days</label>
+                                <div id="day-checkboxes" class="d-flex flex-wrap gap-2">
+                                </div>
+                                <div class="field-hint">Leave all unchecked to reboot every day.</div>
+                            </div>
+                        </div>
+
+                        <!-- Save / Clear buttons -->
+                        <div class="section-divider"></div>
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-primary flex-grow-1" id="sched-save-btn"
+                                    onclick="saveSchedule()">Save Schedule</button>
+                            <button class="btn btn-outline-secondary" id="sched-clear-btn"
+                                    onclick="clearSchedule()" title="Disable auto-reboot">Clear</button>
+                        </div>
+
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script>
+// ===================================================================
+// Constants
+// ===================================================================
+var REBOOT_WAIT_SECS = 90;   // seconds to poll after reboot trigger
+var POLL_INTERVAL    = 2000; // ms between "is it back?" pings
+
+// ===================================================================
+// Overlay helpers (same pattern as other pages)
+// ===================================================================
+var overlay        = document.getElementById('overlay');
+var overlayTxt     = document.getElementById('overlay-text');
+var overlaySpinner = document.getElementById('overlay-spinner');
+
+function showOverlay(msg, spinning) {
+    overlayTxt.textContent = msg;
+    overlaySpinner.style.display = (spinning === false) ? 'none' : '';
+    overlay.classList.add('visible');
+}
+function hideOverlay(cb) {
+    overlay.classList.remove('visible');
+    if (cb) setTimeout(cb, 360);
+}
+
+// ===================================================================
+// Form lock / unlock
+// ===================================================================
+function setFormLocked(locked) {
+    ['reboot-btn','sched-save-btn','sched-clear-btn',
+     'uptime-days','uptime-hours','uptime-mins','tod-time',
+     'tab-none','tab-uptime','tab-time'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (locked) { el.setAttribute('disabled',''); el.style.pointerEvents='none'; }
+        else        { el.removeAttribute('disabled');  el.style.pointerEvents=''; }
+    });
+}
+
+// ===================================================================
+// Tab handling
+// ===================================================================
+var currentTab = 'none';
+
+function setSchedTab(tab) {
+    currentTab = tab;
+    ['none','uptime','time'].forEach(function(t) {
+        document.getElementById('tab-'+t).classList.toggle('active', t === tab);
+        var panel = document.getElementById('panel-'+t);
+        panel.classList.toggle('visible', t === tab);
+        panel.style.display = (t === tab) ? '' : 'none';
+    });
+    // Fix initial visible state for panels that haven't been switched yet
+    document.getElementById('panel-none').style.display   = (tab==='none')   ? '' : 'none';
+    document.getElementById('panel-uptime').style.display = (tab==='uptime') ? '' : 'none';
+    document.getElementById('panel-time').style.display   = (tab==='time')   ? '' : 'none';
+}
+
+// ===================================================================
+// Day-of-week checkboxes
+// ===================================================================
+var DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+(function buildDayBoxes() {
+    var wrap = document.getElementById('day-checkboxes');
+    DAYS.forEach(function(d, i) {
+        var lbl = document.createElement('label');
+        lbl.className = 'form-check form-check-inline';
+        lbl.style.cssText = 'border:1px solid var(--border-color);border-radius:5px;padding:4px 10px;margin:0;cursor:pointer;';
+        var chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.className = 'form-check-input me-1';
+        chk.id = 'day-'+i;
+        chk.value = i;
+        var span = document.createElement('span');
+        span.className = 'form-check-label';
+        span.style.fontSize = '13px';
+        span.textContent = d;
+        lbl.appendChild(chk);
+        lbl.appendChild(span);
+        wrap.appendChild(lbl);
+    });
+})();
+
+function getSelectedDays() {
+    var sel = [];
+    for (var i = 0; i < 7; i++) {
+        if (document.getElementById('day-'+i).checked) sel.push(i);
+    }
+    return sel;
+}
+function setSelectedDays(days) {
+    for (var i = 0; i < 7; i++) {
+        document.getElementById('day-'+i).checked = days.indexOf(i) >= 0;
+    }
+}
+
+// ===================================================================
+// Live uptime / time display
+// ===================================================================
+var liveUptimeRaw = 0; // seconds, estimated locally between fetches
+
+function updateLiveDisplays(date_str, uptime_str) {
+    document.getElementById('live-time').textContent   = date_str || '—';
+    document.getElementById('live-uptime').textContent = uptime_str || '—';
+}
+
+// Poll dynamic stats every 10 s
+function fetchDynamic() {
+    fetch('/cgi-bin/lme.cgi?action=dynamic', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            updateLiveDisplays(d.date, d.uptime);
+            liveUptimeRaw = uptimeStringToSecs(d.uptime);
+        })
+        .catch(function() {});
+}
+setInterval(fetchDynamic, 10000);
+fetchDynamic();
+
+// Very rough uptime-string → seconds parser (for local countdown only)
+function uptimeStringToSecs(s) {
+    if (!s) return 0;
+    var total = 0;
+    var d = s.match(/(\d+)\s*day/);  if (d) total += parseInt(d[1]) * 86400;
+    var h = s.match(/(\d+)\s*h/);   if (h) total += parseInt(h[1]) * 3600;
+    var m = s.match(/(\d+)\s*m/);   if (m) total += parseInt(m[1]) * 60;
+    return total;
+}
+
+// ===================================================================
+// Manual reboot
+// ===================================================================
+function confirmReboot() {
+    if (!confirm('Reboot the device now?\n\nYou will lose connectivity for ~60 seconds.')) return;
+    doReboot();
+}
+
+function doReboot() {
+    showOverlay('Sending reboot command\u2026');
+    setFormLocked(true);
+
+    fetch('/cgi-bin/lme.cgi?action=reboot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'confirm=1'
+    })
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+        if (t.trim() === 'OK') {
+            hideOverlay(function() { startRebootCountdown(); });
+        } else {
+            hideOverlay(function() { setFormLocked(false); });
+            toastr['error']('Reboot failed: ' + t, 'Error');
+        }
+    })
+    .catch(function() {
+        // Network dropped immediately — that's expected once reboot fires
+        hideOverlay(function() { startRebootCountdown(); });
+    });
+}
+
+function startRebootCountdown() {
+    document.getElementById('reboot-btn-wrap').style.display = 'none';
+    document.getElementById('reboot-countdown-card').style.display = '';
+
+    var secs = REBOOT_WAIT_SECS;
+    var bigNum = document.getElementById('reboot-big-num');
+    var bar    = document.getElementById('reboot-bar');
+
+    bigNum.textContent = secs;
+    bar.style.width = '100%';
+
+    var tick = setInterval(function() {
+        secs--;
+        bigNum.textContent = Math.max(0, secs);
+        bar.style.width = Math.max(0, (secs / REBOOT_WAIT_SECS * 100)) + '%';
+        if (secs <= 0) {
+            clearInterval(tick);
+            pollUntilBack();
+        }
+    }, 1000);
+}
+
+function pollUntilBack() {
+    bigNum = document.getElementById('reboot-big-num');
+    bigNum.textContent = '↺';
+    document.querySelector('.big-countdown-sub').textContent = 'Waiting for device to come back\u2026';
+
+    var attempts = 0;
+    var maxAttempts = 60;
+
+    var poll = setInterval(function() {
+        attempts++;
+        fetch('/cgi-bin/check_auth.cgi', { cache: 'no-store' })
+            .then(function(r) { return r.text(); })
+            .then(function(t) {
+                if (t.trim() === 'authenticated' || t.trim() === 'ok') {
+                    clearInterval(poll);
+                    window.location.reload();
+                }
+            })
+            .catch(function() {/* still down */});
+        if (attempts >= maxAttempts) {
+            clearInterval(poll);
+            document.querySelector('.big-countdown-sub').textContent =
+                'Device may still be booting. Try refreshing manually.';
+        }
+    }, POLL_INTERVAL);
+}
+
+// ===================================================================
+// Schedule: load from CGI
+// ===================================================================
+function loadSchedule() {
+    setFormLocked(true);
+    fetch('/cgi-bin/lme.cgi?action=reboot_sched_get', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            applyScheduleToUI(d);
+            setFormLocked(false);
+        })
+        .catch(function() {
+            setFormLocked(false);
+            // non-fatal — schedule feature may not be wired yet
+        });
+}
+
+function applyScheduleToUI(d) {
+    // d = { mode: 'none'|'uptime'|'time', uptime_secs: N, tod_time: 'HH:MM', days: [0,1,...] }
+    var mode = d.mode || 'none';
+    setSchedTab(mode);
+
+    if (mode === 'uptime') {
+        var s = parseInt(d.uptime_secs) || 0;
+        var days  = Math.floor(s / 86400);
+        var hours = Math.floor((s % 86400) / 3600);
+        var mins  = Math.floor((s % 3600) / 60);
+        document.getElementById('uptime-days').value  = days;
+        document.getElementById('uptime-hours').value = hours;
+        document.getElementById('uptime-mins').value  = mins;
+    } else if (mode === 'time') {
+        document.getElementById('tod-time').value = d.tod_time || '04:00';
+        setSelectedDays(d.days || []);
+    }
+
+    updateSchedBadge(mode, d);
+}
+
+function updateSchedBadge(mode, d) {
+    var badge    = document.getElementById('sched-badge');
+    var badgeTxt = document.getElementById('sched-badge-txt');
+    var summary  = document.getElementById('active-sched-summary');
+    var summaryBox = document.getElementById('sched-summary-box');
+
+    if (mode === 'none' || !mode) {
+        badge.className = 'status-badge inactive-sched';
+        badgeTxt.textContent = 'Disabled';
+        summary.style.display = 'none';
+        return;
+    }
+
+    badge.className = 'status-badge active-sched';
+
+    if (mode === 'uptime') {
+        var s = parseInt((d && d.uptime_secs) ? d.uptime_secs : 0);
+        var days  = Math.floor(s / 86400);
+        var hours = Math.floor((s % 86400) / 3600);
+        var mins  = Math.floor((s % 3600) / 60);
+        var parts = [];
+        if (days)  parts.push(days  + 'd');
+        if (hours) parts.push(hours + 'h');
+        if (mins)  parts.push(mins  + 'm');
+        var desc = parts.length ? parts.join(' ') : '0m';
+        badgeTxt.textContent = 'After ' + desc + ' uptime';
+        summaryBox.innerHTML =
+            '<div class="info-row"><span class="info-lbl">Type</span><span class="info-val">Uptime threshold</span></div>' +
+            '<div class="info-row"><span class="info-lbl">Threshold</span><span class="info-val">' + desc + '</span></div>' +
+            '<div class="info-row"><span class="info-lbl">Cron entry</span><span class="info-val"><code>* * * * * /lmepisowifi/www2/sh/reboot_sched.sh</code></span></div>';
+    } else if (mode === 'time') {
+        var t = (d && d.tod_time) ? d.tod_time : '04:00';
+        var days_arr = (d && d.days) ? d.days : [];
+        var day_desc = days_arr.length
+            ? days_arr.map(function(x) { return DAYS[x]; }).join(', ')
+            : 'Every day';
+        var cron_day = days_arr.length
+            ? days_arr.join(',')
+            : '*';
+        var hm = t.split(':');
+        var cron_min  = parseInt(hm[1] || 0);
+        var cron_hour = parseInt(hm[0] || 4);
+        badgeTxt.textContent = 'Daily ' + t;
+        summaryBox.innerHTML =
+            '<div class="info-row"><span class="info-lbl">Type</span><span class="info-val">Time of day</span></div>' +
+            '<div class="info-row"><span class="info-lbl">Time</span><span class="info-val">' + t + '</span></div>' +
+            '<div class="info-row"><span class="info-lbl">Days</span><span class="info-val">' + day_desc + '</span></div>' +
+            '<div class="info-row"><span class="info-lbl">Cron entry</span><span class="info-val"><code>' +
+            cron_min + ' ' + cron_hour + ' * * ' + cron_day + ' reboot</code></span></div>';
+    }
+
+    summary.style.display = '';
+}
+
+// ===================================================================
+// Schedule: save
+// ===================================================================
+function saveSchedule() {
+    var mode = currentTab;
+    var body = 'mode=' + encodeURIComponent(mode);
+
+    if (mode === 'uptime') {
+        var days  = parseInt(document.getElementById('uptime-days').value)  || 0;
+        var hours = parseInt(document.getElementById('uptime-hours').value) || 0;
+        var mins  = parseInt(document.getElementById('uptime-mins').value)  || 0;
+        var total_secs = (days * 86400) + (hours * 3600) + (mins * 60);
+        if (total_secs < 60) {
+            toastr['warning']('Uptime threshold must be at least 1 minute.', 'Validation');
+            return;
+        }
+        body += '&uptime_secs=' + total_secs;
+    } else if (mode === 'time') {
+        var t = document.getElementById('tod-time').value;
+        if (!t) { toastr['warning']('Please select a time.', 'Validation'); return; }
+        body += '&tod_time=' + encodeURIComponent(t);
+        var sel_days = getSelectedDays();
+        body += '&days=' + encodeURIComponent(sel_days.join(','));
+    }
+
+    showOverlay('Saving schedule\u2026');
+    setFormLocked(true);
+
+    fetch('/cgi-bin/lme.cgi?action=reboot_sched_set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+    })
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+        hideOverlay(function() { setFormLocked(false); });
+        if (t.trim() === 'OK') {
+            toastr['success']('Schedule saved.', 'Saved');
+            // rebuild badge from current UI state
+            var d2 = { mode: mode };
+            if (mode === 'uptime') {
+                d2.uptime_secs = parseInt(document.getElementById('uptime-days').value)*86400
+                               + parseInt(document.getElementById('uptime-hours').value)*3600
+                               + parseInt(document.getElementById('uptime-mins').value)*60;
+            } else if (mode === 'time') {
+                d2.tod_time = document.getElementById('tod-time').value;
+                d2.days     = getSelectedDays();
+            }
+            updateSchedBadge(mode, d2);
+        } else {
+            toastr['error']('Failed to save: ' + t, 'Error');
+        }
+    })
+    .catch(function(e) {
+        hideOverlay(function() { setFormLocked(false); });
+        toastr['error']('Request failed.', 'Error');
+    });
+}
+
+// ===================================================================
+// Schedule: clear
+// ===================================================================
+function clearSchedule() {
+    if (!confirm('Disable the auto-reboot schedule?')) return;
+
+    showOverlay('Clearing schedule\u2026');
+    setFormLocked(true);
+
+    fetch('/cgi-bin/lme.cgi?action=reboot_sched_set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'mode=none'
+    })
+    .then(function(r) { return r.text(); })
+    .then(function(t) {
+        hideOverlay(function() { setFormLocked(false); });
+        if (t.trim() === 'OK') {
+            setSchedTab('none');
+            updateSchedBadge('none', {});
+            toastr['success']('Auto-reboot disabled.', 'Cleared');
+        } else {
+            toastr['error']('Failed: ' + t, 'Error');
+        }
+    })
+    .catch(function() {
+        hideOverlay(function() { setFormLocked(false); });
+        toastr['error']('Request failed.', 'Error');
+    });
+}
+
+// ===================================================================
+// Init
+// ===================================================================
+// Kick the panel visibility into a clean state on load
+setSchedTab('none');
+loadSchedule();
+</script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

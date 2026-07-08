@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
+        .empty-state { color:var(--text-secondary); font-size:13px; text-align:center; padding:28px 0; }
+        .wl-list { list-style:none; padding:0; margin:0; }
+        .wl-item {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:9px 14px; border-bottom:1px solid rgba(255,255,255,.04);
+            font-size:13px; font-family:monospace;
+        }
+        .wl-item:last-child { border-bottom:none; }
+        .wl-item:hover { background:var(--bg-surface-hover); }
+        code { color:#ccc; font-size:12px; }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:640px;">
+
+    <!-- ── Add MAC ─────────────────────────────────────────────── -->
+    <div class="card mb-3">
+        <div class="card-header">Add to Whitelist</div>
+        <div class="card-body">
+            <div class="d-flex gap-2 align-items-end flex-wrap">
+                <div class="flex-grow-1">
+                    <label class="form-label">MAC Address <span class="field-hint d-inline">(colons optional)</span></label>
+                    <input type="text" class="form-control" id="wl-mac-input"
+                           placeholder="e.g. aa:bb:cc:dd:ee:ff or aabbccddeeff"
+                           maxlength="17" autocomplete="off">
+                </div>
+                <button class="btn btn-primary" onclick="addWhitelist()">Add</button>
+            </div>
+            <div class="field-hint mt-2">
+                Whitelisted MACs bypass the captive portal entirely and are immediately allowed through
+                the firewall — no voucher or coin needed.
+                Changes take effect <strong>instantly</strong> (iptables rule added/removed live).
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Whitelist ───────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Whitelisted MACs</span>
+            <div class="d-flex gap-2 align-items-center">
+                <span id="wl-count" style="font-size:12px;color:var(--text-secondary);"></span>
+                <button class="btn btn-sm btn-outline-secondary" onclick="loadWhitelist()">Refresh</button>
+            </div>
+        </div>
+        <div id="wl-list-wrap">
+            <div class="empty-state" id="wl-empty">Loading…</div>
+            <ul class="wl-list" id="wl-list" style="display:none;"></ul>
+        </div>
+    </div>
+
+</div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
+
+function loadWhitelist(){
+    var empty = document.getElementById('wl-empty');
+    var list  = document.getElementById('wl-list');
+    var cnt   = document.getElementById('wl-count');
+    empty.textContent='Loading…'; empty.style.display='block'; list.style.display='none';
+    fetch('/cgi-bin/hotspot.cgi?action=whitelist_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (!d.ok||!d.list.length){
+                empty.textContent='No whitelisted MACs'; empty.style.display='block'; list.style.display='none'; cnt.textContent=''; return;
+            }
+            cnt.textContent = d.list.length + ' entr'+(d.list.length===1?'y':'ies');
+            list.innerHTML='';
+            d.list.forEach(function(mac){
+                var li=document.createElement('li');
+                li.className='wl-item';
+                li.innerHTML=
+                    '<span>'+escHtml(mac)+'</span>'+
+                    '<button class="btn btn-sm btn-outline-danger" onclick="delWhitelist(\''+escAttr(mac)+'\',this)">Remove</button>';
+                list.appendChild(li);
+            });
+            empty.style.display='none'; list.style.display='block';
+        })
+        .catch(function(){ empty.textContent='Failed to load whitelist'; });
+}
+
+function addWhitelist(){
+    var raw = document.getElementById('wl-mac-input').value.trim();
+    var mac = raw.replace(/:/g,'').toLowerCase();
+    if (!/^[0-9a-f]{12}$/.test(mac)){ toastr.warning('Invalid MAC address'); return; }
+    fetch('/cgi-bin/hotspot.cgi?action=whitelist_add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mac='+encodeURIComponent(mac)})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Added to whitelist'); document.getElementById('wl-mac-input').value=''; loadWhitelist(); }
+        else { toastr.error('Add failed: '+(d.error||'')); }
+    })
+    .catch(function(){ toastr.error('Network error'); });
+}
+
+function delWhitelist(mac, btn){
+    btn.disabled=true; btn.textContent='…';
+    fetch('/cgi-bin/hotspot.cgi?action=whitelist_del',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'mac='+encodeURIComponent(mac)})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Removed '+mac); loadWhitelist(); }
+        else { toastr.error('Remove failed'); btn.disabled=false; btn.textContent='Remove'; }
+    })
+    .catch(function(){ toastr.error('Network error'); btn.disabled=false; btn.textContent='Remove'; });
+}
+
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s){ return String(s).replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
+
+window.addEventListener('DOMContentLoaded', loadWhitelist);
+</script>
+</body>
+</html>

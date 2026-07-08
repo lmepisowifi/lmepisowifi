@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+
+    <style>
+        .lan-toggle {
+            width: 50px;
+            height: 28px;
+            border-radius: 14px;
+            background: #555;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.25s;
+            flex-shrink: 0;
+        }
+        .lan-toggle.on { background: #ffffff; }
+        .lan-toggle.disabled-ui { opacity: 0.45; pointer-events: none; }
+        .lan-toggle-knob {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #fff;
+            top: 4px;
+            left: 4px;
+            transition: left 0.25s, background 0.25s, box-shadow 0.25s;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .lan-toggle.on .lan-toggle-knob {
+            left: 26px;
+            background: #555;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center g-4">
+
+            <!-- LAN IP Configuration card -->
+            <div class="col-md-10">
+                <div class="card">
+                    <div class="card-header">LAN IP Configuration</div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="lan-ip" class="form-label">IP Address</label>
+                                <input type="text" class="form-control" id="lan-ip"
+                                       maxlength="15" autocomplete="off"
+                                       placeholder="e.g. 192.168.69.1">
+                                <div class="invalid-feedback" id="lan-ip-err" style="display:none"></div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="lan-subnet" class="form-label">Subnet Mask</label>
+                                <input type="text" class="form-control" id="lan-subnet"
+                                       maxlength="15" autocomplete="off"
+                                       placeholder="e.g. 255.255.255.0">
+                                <div class="invalid-feedback" id="lan-subnet-err" style="display:none"></div>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-primary w-100 mt-3"
+                                id="lan-ip-save-btn" onclick="saveLanIp()">Save</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LAN 1 card -->
+            <div class="col-md-5">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>eth0.2.0 <span class="text-secondary" style="font-size:0.85em">(lan1)</span></span>
+                        <div id="toggle-1" class="lan-toggle" onclick="localToggle(1)"
+                             role="switch" aria-checked="false" title="Enable / Disable port">
+                            <div class="lan-toggle-knob"></div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="speed-1" class="form-label">Link Speed Negotiation</label>
+                            <select class="form-select" id="speed-1" name="speed-1"></select>
+                        </div>
+                        <button type="button" class="btn btn-primary w-100"
+                                id="save-btn-1" onclick="savePort(1)">Save</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LAN 2 card -->
+            <div class="col-md-5">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>eth0.3.0 <span class="text-secondary" style="font-size:0.85em">(lan2)</span></span>
+                        <div id="toggle-2" class="lan-toggle" onclick="localToggle(2)"
+                             role="switch" aria-checked="false" title="Enable / Disable port">
+                            <div class="lan-toggle-knob"></div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="speed-2" class="form-label">Link Speed Negotiation</label>
+                            <select class="form-select" id="speed-2" name="speed-2"></select>
+                        </div>
+                        <button type="button" class="btn btn-primary w-100"
+                                id="save-btn-2" onclick="savePort(2)">Save</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        const overlay    = document.getElementById('overlay');
+        const overlayTxt = document.getElementById('overlay-text');
+        const spinner    = document.getElementById('overlay-spinner');
+
+        let countdownTimer = null;
+        let secondsLeft    = 90;
+
+        // Track the values loaded from CGI so we can detect changes.
+        let loadedLanIp     = '';
+        let loadedLanSubnet = '';
+
+        // --------------------------------------------------------
+        // Speed options
+        // --------------------------------------------------------
+        const SPEED_OPTIONS = [
+            { label: 'Auto Negotiate',        value: 'auto'      },
+            { label: '1000 Mbps Full Duplex', value: '1000f'     },
+            { label: '100 Mbps Full Duplex',  value: '100f'      },
+            { label: '100 Mbps Half Duplex',  value: '100h'      },
+            { label: '100 Mbps Full + Half',  value: '100f 100h' },
+            { label: '10 Mbps Full Duplex',   value: '10f'       },
+            { label: '10 Mbps Half Duplex',   value: '10h'       },
+            { label: '10 Mbps Full + Half',   value: '10f 10h'   },
+        ];
+
+        function normalizeSpeed(s) {
+            if (!s || s.toLowerCase() === 'auto') return 'auto';
+            return s.toLowerCase().split(',').map(x => x.trim()).filter(Boolean).join(' ');
+        }
+
+        function buildSpeedSelect(portNum, currentSpeed) {
+            const sel  = document.getElementById('speed-' + portNum);
+            sel.innerHTML = '';
+            const norm = normalizeSpeed(currentSpeed);
+            let matched = false;
+            SPEED_OPTIONS.forEach(opt => {
+                const el = document.createElement('option');
+                el.value = opt.value;
+                el.textContent = opt.label;
+                if (opt.value === norm) { el.selected = true; matched = true; }
+                sel.appendChild(el);
+            });
+            if (!matched && currentSpeed) {
+                const el = document.createElement('option');
+                el.value = norm;
+                el.textContent = 'Custom (' + currentSpeed + ')';
+                el.selected = true;
+                sel.insertBefore(el, sel.firstChild);
+            }
+        }
+
+        // --------------------------------------------------------
+        // Toggle helpers
+        // --------------------------------------------------------
+        function setToggle(portNum, enabled) {
+            const tog = document.getElementById('toggle-' + portNum);
+            if (enabled) {
+                tog.classList.add('on');
+                tog.setAttribute('aria-checked', 'true');
+            } else {
+                tog.classList.remove('on');
+                tog.setAttribute('aria-checked', 'false');
+            }
+        }
+
+        function lockPort(portNum) {
+            document.getElementById('speed-'    + portNum).disabled = true;
+            document.getElementById('save-btn-' + portNum).disabled = true;
+            document.getElementById('toggle-'   + portNum).classList.add('disabled-ui');
+        }
+
+        function unlockPort(portNum) {
+            document.getElementById('speed-'    + portNum).disabled = false;
+            document.getElementById('save-btn-' + portNum).disabled = false;
+            document.getElementById('toggle-'   + portNum).classList.remove('disabled-ui');
+        }
+
+        function lockAll()   { lockPort(1); lockPort(2); }
+        function unlockAll() { unlockPort(1); unlockPort(2); }
+
+        // --------------------------------------------------------
+        // Overlay helpers
+        // --------------------------------------------------------
+        function showOverlay(text) {
+            overlayTxt.textContent = text;
+            spinner.style.display = 'block';
+            overlay.classList.add('visible');
+        }
+
+        function hideOverlay() {
+            overlay.classList.remove('visible');
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            setTimeout(unlockAll, 350);
+        }
+
+        function startCountdown() {
+            secondsLeft = 90;
+            showOverlay('Applying Changes. ' + secondsLeft + 's');
+            countdownTimer = setInterval(() => {
+                secondsLeft--;
+                if (secondsLeft > 0) {
+                    overlayTxt.textContent = 'Applying Changes. ' + secondsLeft + 's';
+                } else {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                    overlayTxt.textContent = 'Reverting Changes.';
+                }
+            }, 1000);
+        }
+
+        // --------------------------------------------------------
+        // Port polling / status
+        // --------------------------------------------------------
+        function pollLanStatus(retries) {
+            retries = (retries === undefined) ? 15 : retries;
+            fetch('/cgi-bin/lme.cgi?action=lan_status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) throw new Error(data.error);
+                    applyStatus(data);
+                    if (data.pending) {
+                        fetch('/cgi-bin/lme.cgi?action=lan_confirm').catch(() => {});
+                    }
+                    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                    spinner.style.display = 'none';
+                    overlayTxt.textContent = 'Changes Applied.';
+                    setTimeout(hideOverlay, 1000);
+                })
+                .catch(() => {
+                    if (retries > 0) {
+                        setTimeout(() => pollLanStatus(retries - 1), 2000);
+                    } else {
+                        hideOverlay();
+                        toastr['warning']('Network error.', 'Error');
+                    }
+                });
+        }
+
+        function applyStatus(data) {
+            setToggle(1, data.port1_pwr === 'enabled');
+            setToggle(2, data.port2_pwr === 'enabled');
+            buildSpeedSelect(1, data.port1_speed);
+            buildSpeedSelect(2, data.port2_speed);
+        }
+
+        function localToggle(portNum) {
+            const tog = document.getElementById('toggle-' + portNum);
+            const isOn = tog.classList.toggle('on');
+            tog.setAttribute('aria-checked', isOn ? 'true' : 'false');
+        }
+
+        function savePort(portNum) {
+            const tog   = document.getElementById('toggle-'   + portNum);
+            const sel   = document.getElementById('speed-'    + portNum);
+            const power = tog.classList.contains('on') ? 'enable' : 'disable';
+            const speed = sel.value;
+
+            lockAll();
+            startCountdown();
+
+            const body = 'port=' + portNum
+                       + '&power=' + encodeURIComponent(power)
+                       + '&speed=' + encodeURIComponent(speed);
+
+            fetch('/cgi-bin/lme.cgi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body
+            })
+            .then(r => {
+                if (!r.ok) return r.text().then(t => { throw new Error(t); });
+                setTimeout(() => pollLanStatus(), 1500);
+            })
+            .catch(err => {
+                if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                hideOverlay();
+                toastr['warning']('Error: ' + (err.message || 'unknown'), 'Error');
+            });
+        }
+
+        // --------------------------------------------------------
+        // LAN IP card — validation
+        // --------------------------------------------------------
+        function setIpFieldError(inputId, errId, msg) {
+            const inp = document.getElementById(inputId);
+            const err = document.getElementById(errId);
+            if (msg) {
+                inp.classList.add('is-invalid');
+                err.textContent = msg;
+                err.style.display = 'block';
+            } else {
+                inp.classList.remove('is-invalid');
+                err.style.display = 'none';
+            }
+        }
+
+        function validateIpField(val) {
+            if (!val) return 'Required';
+            const parts = val.split('.');
+            if (parts.length !== 4) return 'Must be in dotted-decimal format (e.g. 192.168.1.1)';
+            for (const p of parts) {
+                if (!/^\d+$/.test(p) || +p < 0 || +p > 255)
+                    return 'Each octet must be 0 – 255';
+            }
+            return null;
+        }
+
+        // --------------------------------------------------------
+        // LAN IP card — lock / unlock (independent of port card)
+        // --------------------------------------------------------
+        function lockIpCard() {
+            document.getElementById('lan-ip').disabled          = true;
+            document.getElementById('lan-subnet').disabled      = true;
+            document.getElementById('lan-ip-save-btn').disabled = true;
+        }
+
+        function unlockIpCard() {
+            document.getElementById('lan-ip').disabled          = false;
+            document.getElementById('lan-subnet').disabled      = false;
+            document.getElementById('lan-ip-save-btn').disabled = false;
+        }
+
+        // --------------------------------------------------------
+        // LAN IP card — save
+        // --------------------------------------------------------
+        function saveLanIp() {
+            const ipVal     = document.getElementById('lan-ip').value.trim();
+            const subnetVal = document.getElementById('lan-subnet').value.trim();
+
+            const ipErr     = validateIpField(ipVal);
+            const subnetErr = validateIpField(subnetVal);
+            setIpFieldError('lan-ip',     'lan-ip-err',     ipErr);
+            setIpFieldError('lan-subnet', 'lan-subnet-err', subnetErr);
+            if (ipErr || subnetErr) return;
+
+            const ipChanged = (ipVal !== loadedLanIp || subnetVal !== loadedLanSubnet);
+
+            lockIpCard();
+            lockAll();
+            showOverlay('Applying Changes.');
+
+            fetch('/cgi-bin/lme.cgi?action=lan_ip_save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'ip=' + encodeURIComponent(ipVal)
+                    + '&subnet=' + encodeURIComponent(subnetVal)
+            })
+            .then(r => {
+                if (!r.ok) return r.text().then(t => { throw new Error(t); });
+                return r.json();
+            })
+            .then(data => {
+                loadedLanIp     = ipVal;
+                loadedLanSubnet = subnetVal;
+
+                spinner.style.display = 'none';
+
+                if (ipChanged) {
+                    // Device IP changed — the browser must navigate to the new address.
+                    overlayTxt.innerHTML =
+                        'IP address changed to <strong>' + ipVal + '</strong>.<br>'
+                        + 'Navigate to <a href="http://' + ipVal + '/lan.html" '
+                        + 'style="color:#fff">http://' + ipVal + '/lan.html</a>';
+                    // Offer auto-redirect after 4 seconds
+                    setTimeout(() => {
+                        window.location.href = 'http://' + ipVal + '/lan.html';
+                    }, 4000);
+                } else {
+                    overlayTxt.textContent = 'Changes Applied.';
+                    setTimeout(() => {
+                        overlay.classList.remove('visible');
+                        setTimeout(() => { unlockAll(); unlockIpCard(); }, 350);
+                    }, 1000);
+                }
+            })
+            .catch(err => {
+                overlay.classList.remove('visible');
+                setTimeout(() => { unlockAll(); unlockIpCard(); }, 350);
+                toastr['warning']('Error: ' + (err.message || 'unknown'), 'Error');
+            });
+        }
+
+        // --------------------------------------------------------
+        // Page init
+        // --------------------------------------------------------
+        window.addEventListener('DOMContentLoaded', () => {
+            lockAll();
+            lockIpCard();
+            showOverlay('Loading\u2026');
+
+            // Fetch port status and LAN IP in parallel
+            const portFetch = fetch('/cgi-bin/lme.cgi?action=lan_status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) throw new Error(data.error);
+                    applyStatus(data);
+                    if (data.pending) {
+                        fetch('/cgi-bin/lme.cgi?action=lan_confirm').catch(() => {});
+                    }
+                });
+
+            const ipFetch = fetch('/cgi-bin/lme.cgi?action=lan_ip_status')
+                .then(r => r.json())
+                .then(data => {
+                    loadedLanIp     = data.ip     || '';
+                    loadedLanSubnet = data.subnet  || '';
+                    document.getElementById('lan-ip').value     = loadedLanIp;
+                    document.getElementById('lan-subnet').value  = loadedLanSubnet;
+                });
+
+            Promise.all([portFetch, ipFetch])
+                .then(() => {
+                    hideOverlay();
+                    unlockIpCard();
+                })
+                .catch(err => {
+                    overlay.classList.remove('visible');
+                    unlockIpCard();
+                    toastr['warning']('Error: ' + (err.message || 'failed to load'), 'Error');
+                });
+        });
+    </script>
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>

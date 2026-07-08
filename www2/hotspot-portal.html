@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .upload-zone {
+            border: 2px dashed var(--border-color); border-radius: 8px; padding: 18px;
+            text-align: center; cursor: pointer;
+            transition: border-color .2s, background .2s; position: relative;
+        }
+        .upload-zone:hover, .upload-zone.drag { border-color: #888; background: var(--bg-surface-hover); }
+        .upload-zone input[type=file] { position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%; }
+        .field-hint { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
+        /* Carousel slot rows */
+        .promo-slot {
+            display:flex; align-items:center; gap:12px; padding:10px 0;
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .promo-slot:last-child { border-bottom: none; }
+        .promo-thumb {
+            width:64px; height:44px; object-fit:cover; border-radius:5px;
+            border:1px solid var(--border-color); background:var(--bg-input);
+            flex-shrink:0; display:block;
+        }
+        .promo-thumb-empty {
+            width:64px; height:44px; border-radius:5px;
+            border:1px dashed var(--border-color); background:var(--bg-input);
+            display:flex; align-items:center; justify-content:center;
+            flex-shrink:0; color:var(--text-secondary); font-size:18px;
+        }
+        .promo-info { flex:1 1 140px; min-width:120px; overflow:hidden; }
+        .promo-label { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .promo-status-active { font-size:11px; color:#4ade80; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .promo-status-empty  { font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .promo-actions { display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; }
+        /* Portal preview */
+        .portal-prev-wrap { background:#0f0f11; border-radius:12px; padding:20px; display:flex; justify-content:center; }
+        .portal-prev-card { width:100%; max-width:360px; background:#18181c; border:1px solid #2e2e33; border-radius:12px; overflow:hidden; }
+        .portal-prev-header { background:#222227; border-bottom:1px solid #2e2e33; padding:12px 18px; display:flex; align-items:center; gap:10px; }
+        .portal-prev-logo { height:32px; width:auto; border-radius:6px; }
+        .portal-prev-brand { font-size:10px; text-transform:uppercase; letter-spacing:.12em; color:#a1a1aa; line-height:1.2; }
+        .portal-prev-title { font-size:13px; font-weight:700; color:#f4f4f5; line-height:1.2; }
+        .portal-prev-carousel { border-top:1px solid #2e2e33; overflow:hidden; position:relative; display:none; }
+        .portal-prev-carousel img { width:100%; display:block; max-height:90px; object-fit:cover; }
+        .portal-prev-body { padding:14px; }
+        .portal-prev-field { height:28px; background:#1d1d22; border:1px solid #2e2e33; border-radius:6px; margin-bottom:7px; }
+        .portal-prev-btn { height:32px; background:#fff; border-radius:6px; width:100%; margin-bottom:7px; }
+        .portal-prev-btn.outline { background:transparent; border:1px solid #2e2e33; }
+        /* Hidden real file inputs for each slot */
+        .slot-file-input { display:none; }
+        /* Pending upload indicator */
+        .promo-pending {
+            font-size:11px; color:#fbbf24; margin-top:2px; display:none;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        }
+        /* Audio slots */
+        .audio-slot {
+            display:flex; align-items:center; gap:12px; padding:12px 0;
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .audio-slot:last-child { border-bottom: none; }
+        .audio-icon {
+            width:44px; height:44px; border-radius:8px; flex-shrink:0;
+            background:var(--bg-input); border:1px solid var(--border-color);
+            display:flex; align-items:center; justify-content:center;
+            color:var(--text-secondary);
+        }
+        .audio-icon.has-file { border-color:#3b82f6; color:#60a5fa; }
+        /* min-width keeps the info column from collapsing toward 0 and wrapping
+           the filename one character per line when the action buttons grow */
+        .audio-info { flex:1 1 160px; min-width:140px; overflow:hidden; }
+        .audio-label { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .audio-status-active { font-size:11px; color:#4ade80; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .audio-status-empty  { font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .audio-pending {
+            font-size:11px; color:#fbbf24; margin-top:2px; display:none;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        }
+        .audio-actions { display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; }
+        .audio-file-input { display:none; }
+        /* On narrow screens drop the action buttons onto their own full-width
+           row so the Confirm/Upload button never runs off the edge */
+        @media (max-width: 480px) {
+            .audio-actions, .promo-actions { width:100%; }
+            .audio-actions .btn, .promo-actions .btn { flex:1 1 auto; }
+        }
+    </style>
+</head>
+<body>
+<div id="overlay"><div id="overlay-blur"></div><div id="overlay-msg"><div id="overlay-spinner"></div><span id="overlay-text"></span></div></div>
+<script src="/js/nav.js?v=1.0.0"></script>
+
+<div class="container mt-4" style="max-width:980px;">
+<div class="row g-3">
+
+<!-- LEFT column -->
+<div class="col-lg-7">
+
+    <!-- Storage indicator -->
+    <div id="disk-bar" class="mb-3 px-1" style="display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:11px;margin-bottom:5px;gap:8px;">
+            <span id="disk-bar-label" style="color:var(--text-secondary);white-space:nowrap;">UBI Storage</span>
+            <span id="disk-bar-text" style="color:var(--text-secondary);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        </div>
+        <div style="height:4px;background:var(--bg-input);border-radius:2px;overflow:hidden;">
+            <div id="disk-bar-fill" style="height:100%;width:0%;background:#3b82f6;transition:width .5s,background .3s;border-radius:2px;"></div>
+        </div>
+    </div>
+
+    <!-- Branding text -->
+    <div class="card mb-3">
+        <div class="card-header">Branding</div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-sm-7">
+                    <label class="form-label">Portal Title</label>
+                    <input type="text" class="form-control" id="r-title" maxlength="64"
+                           placeholder="lmepisowifi" oninput="syncPreview()">
+                    <div class="field-hint">Main heading in the card header</div>
+                </div>
+                <div class="col-sm-5">
+                    <label class="form-label">Brand Label</label>
+                    <input type="text" class="form-control" id="r-brand" maxlength="32"
+                           placeholder="beta" oninput="syncPreview()">
+                    <div class="field-hint">Tiny label above the title</div>
+                </div>
+                <div class="col-12">
+                    <label class="form-label">Footer Text</label>
+                    <textarea class="form-control" id="r-footer" maxlength="200" rows="2"
+                              placeholder="Your device is identified by MAC address. Vouchers are single-use."
+                              style="resize:vertical;font-size:13px;"></textarea>
+                    <div class="field-hint">Shown below the login form · max 200 chars · leave blank to hide</div>
+                </div>
+            </div>
+            <hr class="my-3" style="border-color:var(--border-color);">
+            <div class="d-flex gap-2">
+                <button class="btn btn-primary" onclick="saveBranding()">Save Branding</button>
+                <button class="btn btn-outline-secondary" onclick="loadConfig()">Discard</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Logo / Icon -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Logo / Icon</span>
+            <small class="text-muted" style="font-size:11px;">Card header &amp; browser tab favicon</small>
+        </div>
+        <div class="card-body">
+            <div class="d-flex align-items-start gap-3 flex-wrap">
+                <div>
+                    <div class="form-label mb-2">Current</div>
+                    <img id="cur-logo-img" src="" alt=""
+                         style="height:46px;width:auto;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-input);padding:4px;">
+                    <div class="field-hint mt-1" id="cur-logo-path" style="font-size:10px;"></div>
+                </div>
+                <div class="flex-grow-1">
+                    <label class="form-label">Upload New Logo</label>
+                    <div class="upload-zone" id="logo-zone">
+                        <input type="file" id="logo-file" accept="image/png,image/jpeg,image/x-icon,image/gif,image/webp"
+                               onchange="previewLogo()">
+                        <div id="logo-zone-text">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="currentColor"
+                                 stroke-width="2" viewBox="0 0 24 24" style="color:var(--text-secondary);margin-bottom:5px;">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            <div style="font-size:12px;">Click or drag</div>
+                            <div class="field-hint">PNG / ICO / JPG · max 256 KB · recommended 32×32 or 64×64</div>
+                        </div>
+                        <img id="logo-preview" src="" alt="" style="max-height:60px;max-width:100%;display:none;margin-top:8px;border-radius:4px;">
+                    </div>
+                    <div class="d-flex gap-2 mt-2">
+                        <button class="btn btn-primary btn-sm" id="logo-upload-btn" onclick="uploadLogo()" disabled>Upload Logo</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="resetLogo()">Reset to Default</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Carousel Slides -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Carousel Slides</span>
+            <small class="text-muted" style="font-size:11px;">Shown between header &amp; login form · auto-rotates</small>
+        </div>
+        <div class="card-body py-2">
+            <div id="promo-list">
+                <!-- slots rendered by JS -->
+            </div>
+            <div class="field-hint mt-2">
+                Slides appear in order (1→5). Only uploaded slots are shown. The portal auto-detects which files exist — no save needed after upload.
+            </div>
+        </div>
+    </div>
+
+    <!-- Portal Audio -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>Portal Audio</span>
+            <small class="text-muted" style="font-size:11px;">MP3 · OGG · WAV &nbsp;·&nbsp; max 4 MB</small>
+        </div>
+        <div class="card-body py-2">
+            <div id="audio-list">
+                <!-- Rendered by JS -->
+            </div>
+            <div class="field-hint mt-2">
+                Background music loops automatically when the portal loads.
+                Coin sound plays each time a coin is detected by the slot.
+                Both are silenced instantly with the speaker icon on the portal.
+            </div>
+        </div>
+    </div>
+
+</div><!-- /left col -->
+
+<!-- RIGHT column — live preview -->
+<div class="col-lg-5">
+    <div class="card" style="position:sticky;top:76px;">
+        <div class="card-header">Live Preview</div>
+        <div class="card-body p-2">
+            <div class="portal-prev-wrap">
+                <div class="portal-prev-card">
+                    <div class="portal-prev-header">
+                        <img id="prev-logo" class="portal-prev-logo" src="/img/logo.png?v=1.0.0" alt="">
+                        <div>
+                            <div id="prev-brand" class="portal-prev-brand">beta</div>
+                            <div id="prev-title" class="portal-prev-title">lmepisowifi</div>
+                        </div>
+                    </div>
+                    <div id="prev-carousel" class="portal-prev-carousel">
+                        <img id="prev-carousel-img" src="" alt="">
+                    </div>
+                    <div class="portal-prev-body">
+                        <div class="portal-prev-field"></div>
+                        <div class="portal-prev-field"></div>
+                        <div class="portal-prev-btn"></div>
+                        <div class="portal-prev-btn outline"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="field-hint mt-2 text-center">Updates live as you type or upload slides.</div>
+        </div>
+    </div>
+</div>
+
+</div><!-- /row -->
+</div><!-- /container -->
+
+<!-- Hidden file inputs for each promo slot -->
+<input type="file" class="slot-file-input" id="file-promo1" accept="image/png,image/jpeg,image/gif,image/webp" onchange="onPromoFileChosen('promo1')">
+<input type="file" class="slot-file-input" id="file-promo2" accept="image/png,image/jpeg,image/gif,image/webp" onchange="onPromoFileChosen('promo2')">
+<input type="file" class="slot-file-input" id="file-promo3" accept="image/png,image/jpeg,image/gif,image/webp" onchange="onPromoFileChosen('promo3')">
+<input type="file" class="slot-file-input" id="file-promo4" accept="image/png,image/jpeg,image/gif,image/webp" onchange="onPromoFileChosen('promo4')">
+<input type="file" class="slot-file-input" id="file-promo5" accept="image/png,image/jpeg,image/gif,image/webp" onchange="onPromoFileChosen('promo5')">
+
+<!-- Hidden audio file inputs -->
+<input type="file" class="audio-file-input" id="file-bg_music"   accept="audio/mpeg,audio/ogg,audio/wav,.mp3,.ogg,.wav" onchange="onAudioFileChosen('bg_music')">
+<input type="file" class="audio-file-input" id="file-coin_sound" accept="audio/mpeg,audio/ogg,audio/wav,.mp3,.ogg,.wav" onchange="onAudioFileChosen('coin_sound')">
+<input type="file" class="audio-file-input" id="file-insert_bg_music" accept="audio/mpeg,audio/ogg,audio/wav,.mp3,.ogg,.wav" onchange="onAudioFileChosen('insert_bg_music')">
+
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-top-right', timeOut:3000, progressBar:true };
+
+var _promos = {};          // slotId → {src, filename} or null
+var _pendingLogo = null;
+var _diskInfo = null;      // latest portal_disk_space response
+
+/* ── Disk space ── */
+function formatBytes(b) {
+    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+    if (b >= 1024)    return (b / 1024).toFixed(0) + ' KB';
+    return b + ' B';
+}
+
+function fetchDiskSpace() {
+    fetch('/cgi-bin/hotspot.cgi?action=portal_disk_space', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { if (d.ok) { _diskInfo = d; updateDiskBar(); } })
+        .catch(function() { /* non-fatal; backend guard is the hard stop */ });
+}
+
+function updateDiskBar() {
+    if (!_diskInfo) return;
+    var d = _diskInfo;
+    var bar = document.getElementById('disk-bar');
+    if (!bar) return;
+    var pct = d.size_bytes > 0 ? Math.min(100, Math.round(d.used_bytes / d.size_bytes * 100)) : 0;
+    var availMB  = (d.avail_bytes  / 1048576).toFixed(1);
+    var usableMB = (d.usable_bytes / 1048576).toFixed(1);
+    var fillColor, textColor, msg;
+    if (d.usable_bytes <= 0) {
+        fillColor = '#ef4444'; textColor = '#ef4444';
+        msg = '⚠ Uploads blocked — less than 10 MB remaining';
+    } else if (d.usable_bytes < 5 * 1048576) {
+        fillColor = '#f59e0b'; textColor = '#fbbf24';
+        msg = usableMB + ' MB usable · ' + availMB + ' MB free (10 MB reserved)';
+    } else {
+        fillColor = '#3b82f6'; textColor = 'var(--text-secondary)';
+        msg = usableMB + ' MB usable · ' + availMB + ' MB free (10 MB reserved)';
+    }
+    bar.style.display = '';
+    document.getElementById('disk-bar-fill').style.width  = pct + '%';
+    document.getElementById('disk-bar-fill').style.background = fillColor;
+    document.getElementById('disk-bar-label').style.color = textColor;
+    document.getElementById('disk-bar-text').textContent  = msg;
+    document.getElementById('disk-bar-text').style.color  = textColor;
+}
+
+/* Returns an error string when the file is too large for available space, null if OK */
+function checkDiskSpace(fileSize) {
+    if (!_diskInfo) return null; // unknown — let backend guard decide
+    if (_diskInfo.usable_bytes <= 0)
+        return 'Uploads blocked — less than 10 MB remaining on device.';
+    if (fileSize > _diskInfo.usable_bytes)
+        return 'Not enough space — file (' + formatBytes(fileSize) + ') would exceed usable storage (' + formatBytes(_diskInfo.usable_bytes) + ').';
+    return null;
+}
+
+/* ── helpers ── */
+function imgProxy(filename) { return '/cgi-bin/portal_img.cgi?file='+encodeURIComponent(filename); }
+function filenameFromPath(p) { return p ? p.split('/').pop() : ''; }
+function capitalize(s) { return s.charAt(0).toUpperCase()+s.slice(1); }
+var extMap = {'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png',
+              'image/x-icon':'ico','image/vnd.microsoft.icon':'ico',
+              'image/gif':'gif','image/webp':'webp'};
+
+/* ── Build promo slot rows ── */
+function buildPromoSlots(promoPaths) {
+    // Build a map slotId → existing path
+    var slotMap = {};
+    (promoPaths||[]).forEach(function(p) {
+        var fn = filenameFromPath(p);          // e.g. promo2.jpg
+        var m = fn.match(/^promo(\d)/);
+        if (m) slotMap['promo'+m[1]] = p;
+    });
+
+    var container = document.getElementById('promo-list');
+    container.innerHTML = '';
+    var preview1 = null;
+
+    for (var n = 1; n <= 5; n++) {
+        var slotId = 'promo'+n;
+        var existing = slotMap[slotId] || null;
+        _promos[slotId] = existing;
+
+        var row = document.createElement('div');
+        row.className = 'promo-slot';
+        row.id = 'slot-row-'+slotId;
+
+        if (existing) {
+            var fn2 = filenameFromPath(existing);
+            var thumbSrc = imgProxy(fn2);
+            if (!preview1) preview1 = thumbSrc;
+            row.innerHTML =
+                '<img class="promo-thumb" id="slot-thumb-'+slotId+'" src="'+thumbSrc+'" alt="Slide '+n+'">'
+                + '<div class="promo-info">'
+                +   '<div class="promo-label">Slide '+n+'</div>'
+                +   '<div class="promo-status-active" id="slot-status-'+slotId+'">● Active</div>'
+                +   '<div class="promo-pending" id="slot-pending-'+slotId+'"></div>'
+                + '</div>'
+                + '<div class="promo-actions">'
+                +   '<button class="btn btn-outline-secondary btn-sm" onclick="triggerPromoFile(\''+slotId+'\')">Replace</button>'
+                +   '<button class="btn btn-outline-danger btn-sm" id="slot-clear-btn-'+slotId+'" onclick="clearPromo(\''+slotId+'\')">Remove</button>'
+                +   '<button class="btn btn-primary btn-sm" id="slot-upload-btn-'+slotId+'" onclick="uploadPromo(\''+slotId+'\')" style="display:none;">Upload</button>'
+                + '</div>';
+        } else {
+            row.innerHTML =
+                '<div class="promo-thumb-empty" id="slot-thumb-'+slotId+'">+</div>'
+                + '<div class="promo-info">'
+                +   '<div class="promo-label">Slide '+n+'</div>'
+                +   '<div class="promo-status-empty" id="slot-status-'+slotId+'">○ Empty</div>'
+                +   '<div class="promo-pending" id="slot-pending-'+slotId+'"></div>'
+                + '</div>'
+                + '<div class="promo-actions">'
+                +   '<button class="btn btn-outline-secondary btn-sm" onclick="triggerPromoFile(\''+slotId+'\')">Upload</button>'
+                +   '<button class="btn btn-primary btn-sm" id="slot-upload-btn-'+slotId+'" onclick="uploadPromo(\''+slotId+'\')" style="display:none;">Confirm</button>'
+                + '</div>';
+        }
+        container.appendChild(row);
+    }
+
+    // Update preview carousel
+    if (preview1) {
+        document.getElementById('prev-carousel-img').src = preview1;
+        document.getElementById('prev-carousel').style.display = 'block';
+    } else {
+        document.getElementById('prev-carousel').style.display = 'none';
+    }
+}
+
+/* ── Load config ── */
+function loadConfig() {
+    fetch('/cgi-bin/hotspot.cgi?action=portal_get', { cache:'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (!d.ok) return;
+            document.getElementById('r-title').value = d.title || '';
+            document.getElementById('r-brand').value = d.brand || '';
+            document.getElementById('r-footer').value = d.footer !== undefined ? d.footer : '';
+
+            var logoPath = d.logo || '/img/favicon.ico';
+            document.getElementById('cur-logo-path').textContent = logoPath;
+            var logoFile = filenameFromPath(logoPath);
+            document.getElementById('cur-logo-img').src = imgProxy(logoFile === 'favicon.ico' ? 'favicon.ico' : logoFile);
+            document.getElementById('prev-logo').src   = imgProxy(logoFile === 'favicon.ico' ? 'favicon.ico' : logoFile);
+
+            buildPromoSlots(d.promos || []);
+            buildAudioSlots(d.bg_music || '', d.coin_sound || '', d.insert_bg_music || '');
+            syncPreview();
+            fetchDiskSpace();
+        })
+        .catch(function() { toastr.error('Failed to load portal config.'); });
+}
+
+/* ── Preview sync ── */
+function syncPreview() {
+    document.getElementById('prev-title').textContent = document.getElementById('r-title').value.trim() || 'lmepisowifi';
+    document.getElementById('prev-brand').textContent = document.getElementById('r-brand').value.trim() || 'beta';
+}
+
+/* ── Save branding ── */
+function saveBranding() {
+    var title  = document.getElementById('r-title').value.trim();
+    var brand  = document.getElementById('r-brand').value.trim();
+    var footer = document.getElementById('r-footer').value;   // allow empty
+    if (!title) { toastr.warning('Title cannot be empty.'); return; }
+    fetch('/cgi-bin/hotspot.cgi?action=portal_set', {
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'title='+encodeURIComponent(title)+'&brand='+encodeURIComponent(brand)+'&footer='+encodeURIComponent(footer)
+    }).then(function(r){return r.json();}).then(function(d){
+        if (d.ok) toastr.success('Branding saved.'); else toastr.error('Save failed.');
+    }).catch(function(){toastr.error('Network error.');});
+}
+
+/* ── Logo ── */
+function previewLogo() {
+    var input = document.getElementById('logo-file');
+    if (!input.files||!input.files[0]) return;
+    var file = input.files[0];
+    if (file.size > 262144) { toastr.warning('File too large — max 256 KB.'); input.value=''; return; }
+    var _logoSpaceErr = checkDiskSpace(file.size);
+    if (_logoSpaceErr) { toastr.error(_logoSpaceErr); input.value=''; return; }
+    _pendingLogo = file;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var src = e.target.result;
+        document.getElementById('logo-preview').src = src;
+        document.getElementById('logo-preview').style.display = 'block';
+        document.getElementById('logo-zone-text').style.display = 'none';
+        document.getElementById('logo-upload-btn').disabled = false;
+        document.getElementById('prev-logo').src = src;
+    };
+    reader.readAsDataURL(file);
+}
+
+function uploadLogo() {
+    if (!_pendingLogo) return;
+    var btn = document.getElementById('logo-upload-btn');
+    btn.disabled = true; btn.textContent = 'Uploading…';
+    var ext = extMap[_pendingLogo.type] || 'png';
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var b64 = e.target.result.split(',')[1];
+        fetch('/cgi-bin/hotspot.cgi?action=portal_upload', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:'img_slot=logo&img_ext='+ext+'&img_data='+encodeURIComponent(b64)
+        }).then(function(r){return r.json();}).then(function(d){
+            btn.textContent = 'Upload Logo';
+            if (d.ok) {
+                toastr.success('Logo uploaded — '+d.path);
+                _pendingLogo = null;
+                document.getElementById('logo-file').value = '';
+                document.getElementById('cur-logo-path').textContent = d.path;
+                var fn = filenameFromPath(d.path);
+                document.getElementById('cur-logo-img').src = imgProxy(fn);
+                document.getElementById('prev-logo').src    = imgProxy(fn);
+                fetchDiskSpace();
+            } else {
+                btn.disabled=false;
+                var _logoErr = d.error === 'insufficient_space' ? 'Not enough storage space on device.' : 'Upload failed: '+(d.error||'?');
+                toastr.error(_logoErr);
+                fetchDiskSpace();
+            }
+        }).catch(function(){ btn.disabled=false; btn.textContent='Upload Logo'; toastr.error('Network error.'); });
+    };
+    reader.readAsDataURL(_pendingLogo);
+}
+
+function resetLogo() {
+    if (!confirm('Reset logo back to the default favicon.ico?')) return;
+    fetch('/cgi-bin/hotspot.cgi?action=portal_set', {
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'title='+encodeURIComponent(document.getElementById('r-title').value.trim()||'lmepisowifi')
+            +'&brand='+encodeURIComponent(document.getElementById('r-brand').value.trim()||'beta')
+            +'&reset_logo=1'
+    }).then(function(r){return r.json();}).then(function(d){
+        if (d.ok) {
+            toastr.success('Logo reset to default.');
+            document.getElementById('cur-logo-path').textContent = '/img/favicon.ico';
+            var src = imgProxy('favicon.ico');
+            document.getElementById('cur-logo-img').src = src;
+            document.getElementById('prev-logo').src    = src;
+            document.getElementById('logo-preview').style.display = 'none';
+            document.getElementById('logo-zone-text').style.display = 'block';
+            document.getElementById('logo-upload-btn').disabled = true;
+            _pendingLogo = null;
+        }
+    }).catch(function(){toastr.error('Reset failed.');});
+}
+
+/* ── Promo slots ── */
+function triggerPromoFile(slotId) {
+    document.getElementById('file-'+slotId).click();
+}
+
+function onPromoFileChosen(slotId) {
+    var input = document.getElementById('file-'+slotId);
+    if (!input.files||!input.files[0]) return;
+    var file = input.files[0];
+    if (file.size > 262144) { toastr.warning('File too large — max 256 KB.'); input.value=''; return; }
+    var _promoSpaceErr = checkDiskSpace(file.size);
+    if (_promoSpaceErr) { toastr.error(_promoSpaceErr); input.value=''; return; }
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var src = e.target.result;
+        // Update thumbnail to in-browser preview
+        var thumb = document.getElementById('slot-thumb-'+slotId);
+        var pendEl = document.getElementById('slot-pending-'+slotId);
+        if (thumb.tagName === 'IMG') {
+            thumb.src = src;
+        } else {
+            // was empty placeholder — replace with img
+            var img = document.createElement('img');
+            img.className = 'promo-thumb'; img.id = 'slot-thumb-'+slotId;
+            img.src = src; img.alt = '';
+            thumb.parentNode.replaceChild(img, thumb);
+        }
+        if (pendEl) { pendEl.textContent = '⚠ Not yet uploaded'; pendEl.style.display='block'; }
+        // Show confirm button
+        var upBtn = document.getElementById('slot-upload-btn-'+slotId);
+        if (upBtn) { upBtn.style.display='inline-flex'; upBtn.disabled=false; }
+        // Update preview carousel with first slot that has an image
+        if (slotId === 'promo1' || document.getElementById('prev-carousel').style.display === 'none') {
+            document.getElementById('prev-carousel-img').src = src;
+            document.getElementById('prev-carousel').style.display = 'block';
+        }
+    };
+    reader.readAsDataURL(file);
+}
+
+function uploadPromo(slotId) {
+    var input = document.getElementById('file-'+slotId);
+    if (!input.files||!input.files[0]) { toastr.warning('No file selected.'); return; }
+    var file = input.files[0];
+    var ext = extMap[file.type] || 'png';
+    var btn = document.getElementById('slot-upload-btn-'+slotId);
+    btn.disabled=true; btn.textContent='Saving…';
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var b64 = e.target.result.split(',')[1];
+        fetch('/cgi-bin/hotspot.cgi?action=portal_upload', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:'img_slot='+slotId+'&img_ext='+ext+'&img_data='+encodeURIComponent(b64)
+        }).then(function(r){return r.json();}).then(function(d){
+            if (d.ok) {
+                toastr.success('Slide saved — '+d.path);
+                btn.style.display = 'none';
+                input.value = '';
+                _promos[slotId] = d.path;
+                var pendEl = document.getElementById('slot-pending-'+slotId);
+                if (pendEl) pendEl.style.display='none';
+                var statEl = document.getElementById('slot-status-'+slotId);
+                if (statEl) { statEl.className='promo-status-active'; statEl.textContent='● Active'; }
+                // Ensure clear button is visible
+                var clearBtn = document.getElementById('slot-clear-btn-'+slotId);
+                if (!clearBtn) {
+                    // Refresh the whole slot list to get clean state
+                    loadConfig();
+                }
+                fetchDiskSpace();
+            } else {
+                btn.disabled=false; btn.textContent='Confirm';
+                var _promoErr = d.error === 'insufficient_space' ? 'Not enough storage space on device.' : 'Upload failed: '+(d.error||'?');
+                toastr.error(_promoErr);
+                fetchDiskSpace();
+            }
+        }).catch(function(){
+            btn.disabled=false; btn.textContent='Confirm';
+            toastr.error('Network error.');
+        });
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearPromo(slotId) {
+    if (!confirm('Remove Slide '+slotId.replace('promo','')+' from the portal?')) return;
+    var clearBtn = document.getElementById('slot-clear-btn-'+slotId);
+    if (clearBtn) { clearBtn.disabled=true; clearBtn.textContent='Removing…'; }
+    fetch('/cgi-bin/hotspot.cgi?action=portal_clear_promo', {
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'promo_slot='+slotId
+    }).then(function(r){return r.json();}).then(function(d){
+        if (d.ok) {
+            toastr.success('Slide removed.');
+            _promos[slotId] = null;
+            buildPromoSlots(Object.values(_promos).filter(Boolean));
+        }
+    }).catch(function(){toastr.error('Failed to remove slide.');});
+}
+
+/* ── Drag-over on logo zone ── */
+var lz = document.getElementById('logo-zone');
+if (lz) {
+    lz.addEventListener('dragover', function(e){e.preventDefault();lz.classList.add('drag');});
+    lz.addEventListener('dragleave',function(){lz.classList.remove('drag');});
+    lz.addEventListener('drop',     function(e){e.preventDefault();lz.classList.remove('drag');});
+}
+
+/* ── Audio slot state ── */
+var _audioFiles = { bg_music: null, coin_sound: null, insert_bg_music: null };
+var _audioPending = { bg_music: null, coin_sound: null, insert_bg_music: null };
+
+var AUDIO_SLOT_META = {
+    bg_music:   { label: 'Background Music', hint: 'Loops automatically when the portal opens' },
+    coin_sound: { label: 'Coin Count Sound', hint: 'Plays each time a coin registers on the slot' },
+    insert_bg_music: { label: 'Insert Coin Music', hint: 'Loops only while the insert coin window is open' }
+};
+
+function audioProxy(filename) {
+    return '/cgi-bin/portal_audio.cgi?file=' + encodeURIComponent(filename);
+}
+
+function buildAudioSlots(bgMusicPath, coinSoundPath, insertBgMusicPath) {
+    _audioFiles.bg_music   = bgMusicPath   || null;
+    _audioFiles.coin_sound = coinSoundPath || null;
+    _audioFiles.insert_bg_music = insertBgMusicPath || null;
+
+    var container = document.getElementById('audio-list');
+    container.innerHTML = '';
+
+    ['bg_music', 'coin_sound', 'insert_bg_music'].forEach(function(slot) {
+        var existing = _audioFiles[slot];
+        var meta = AUDIO_SLOT_META[slot];
+
+        var row = document.createElement('div');
+        row.className = 'audio-slot';
+        row.id = 'audio-row-' + slot;
+
+        var iconSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+
+        if (existing) {
+            var fn = existing.split('/').pop();
+            row.innerHTML =
+                '<div class="audio-icon has-file">' + iconSvg + '</div>'
+                + '<div class="audio-info">'
+                +   '<div class="audio-label">' + meta.label + '</div>'
+                +   '<div class="audio-status-active" id="audio-status-' + slot + '">● Active &mdash; ' + fn + '</div>'
+                +   '<div class="audio-pending" id="audio-pending-' + slot + '"></div>'
+                + '</div>'
+                + '<div class="audio-actions">'
+                +   '<button class="btn btn-sm btn-outline-secondary" id="audio-play-btn-' + slot + '" onclick="previewAudio(\'' + slot + '\')">▶ Play</button>'
+                +   '<button class="btn btn-sm btn-outline-secondary" onclick="triggerAudioFile(\'' + slot + '\')">Replace</button>'
+                +   '<button class="btn btn-sm btn-outline-danger" onclick="clearAudio(\'' + slot + '\')">Remove</button>'
+                +   '<button class="btn btn-sm btn-primary" id="audio-upload-btn-' + slot + '" onclick="uploadAudio(\'' + slot + '\')" style="display:none;">Upload</button>'
+                + '</div>';
+        } else {
+            row.innerHTML =
+                '<div class="audio-icon">' + iconSvg + '</div>'
+                + '<div class="audio-info">'
+                +   '<div class="audio-label">' + meta.label + '</div>'
+                +   '<div class="audio-status-empty" id="audio-status-' + slot + '">○ No file &mdash; ' + meta.hint + '</div>'
+                +   '<div class="audio-pending" id="audio-pending-' + slot + '"></div>'
+                + '</div>'
+                + '<div class="audio-actions">'
+                +   '<button class="btn btn-sm btn-outline-secondary" onclick="triggerAudioFile(\'' + slot + '\')">Upload</button>'
+                +   '<button class="btn btn-sm btn-primary" id="audio-upload-btn-' + slot + '" onclick="uploadAudio(\'' + slot + '\')" style="display:none;">Confirm</button>'
+                + '</div>';
+        }
+        container.appendChild(row);
+    });
+}
+
+function triggerAudioFile(slot) {
+    document.getElementById('file-' + slot).click();
+}
+
+function onAudioFileChosen(slot) {
+    var input = document.getElementById('file-' + slot);
+    if (!input.files || !input.files[0]) return;
+    var file = input.files[0];
+    if (file.size > 4194304) { toastr.warning('File too large — max 4 MB.'); input.value = ''; return; }
+    var _audioSpaceErr = checkDiskSpace(file.size);
+    if (_audioSpaceErr) { toastr.error(_audioSpaceErr); input.value = ''; return; }
+    _audioPending[slot] = file;
+
+    var pendEl = document.getElementById('audio-pending-' + slot);
+    if (pendEl) { pendEl.textContent = '⚠ ' + file.name + ' — not yet uploaded'; pendEl.style.display = 'block'; }
+
+    // Update icon to show file is pending
+    var row = document.getElementById('audio-row-' + slot);
+    if (row) {
+        var icon = row.querySelector('.audio-icon');
+        if (icon) icon.classList.add('has-file');
+    }
+
+    var upBtn = document.getElementById('audio-upload-btn-' + slot);
+    if (upBtn) { upBtn.style.display = 'inline-flex'; upBtn.disabled = false; }
+}
+
+function uploadAudio(slot) {
+    var file = _audioPending[slot];
+    if (!file) { toastr.warning('No file selected.'); return; }
+
+    var extMap = { 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/ogg': 'ogg', 'audio/wav': 'wav', 'audio/x-wav': 'wav' };
+    var ext = extMap[file.type] || (file.name.split('.').pop().toLowerCase());
+    if (!['mp3','ogg','wav'].includes(ext)) { toastr.warning('Unsupported format. Use MP3, OGG, or WAV.'); return; }
+
+    var btn = document.getElementById('audio-upload-btn-' + slot);
+    btn.disabled = true; btn.textContent = 'Saving…';
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var b64 = e.target.result.split(',')[1];
+        fetch('/cgi-bin/hotspot.cgi?action=portal_audio_upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'audio_slot=' + slot + '&audio_ext=' + ext + '&audio_data=' + encodeURIComponent(b64)
+        }).then(function(r){ return r.json(); }).then(function(d){
+            if (d.ok) {
+                toastr.success(AUDIO_SLOT_META[slot].label + ' saved.');
+                _audioPending[slot] = null;
+                document.getElementById('file-' + slot).value = '';
+                _audioFiles[slot] = d.path;
+                buildAudioSlots(_audioFiles.bg_music, _audioFiles.coin_sound, _audioFiles.insert_bg_music);
+                fetchDiskSpace();
+            } else {
+                btn.disabled = false; btn.textContent = 'Confirm';
+                var _audioErr = d.error === 'insufficient_space' ? 'Not enough storage space on device.' : 'Upload failed: ' + (d.error || '?');
+                toastr.error(_audioErr);
+                fetchDiskSpace();
+            }
+        }).catch(function(){
+            btn.disabled = false; btn.textContent = 'Confirm';
+            toastr.error('Network error.');
+        });
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearAudio(slot) {
+    var label = AUDIO_SLOT_META[slot].label;
+    if (!confirm('Remove ' + label + ' from the portal?')) return;
+    fetch('/cgi-bin/hotspot.cgi?action=portal_audio_clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'audio_slot=' + slot
+    }).then(function(r){ return r.json(); }).then(function(d){
+        if (d.ok) {
+            toastr.success(label + ' removed.');
+            _audioFiles[slot] = null;
+            buildAudioSlots(_audioFiles.bg_music, _audioFiles.coin_sound, _audioFiles.insert_bg_music);
+        }
+    }).catch(function(){ toastr.error('Failed to remove audio.'); });
+}
+
+var _previewSlot = null;
+
+function updatePreviewBtn(slot, playing) {
+    var btn = document.getElementById('audio-play-btn-' + slot);
+    if (!btn) return;
+    if (playing) {
+        btn.textContent = '■ Stop';
+        btn.classList.remove('btn-outline-secondary');
+        btn.classList.add('btn-outline-danger');
+    } else {
+        btn.textContent = '▶ Play';
+        btn.classList.remove('btn-outline-danger');
+        btn.classList.add('btn-outline-secondary');
+    }
+}
+
+function stopPreviewAudio() {
+    if (window._previewAudio) {
+        window._previewAudio.pause();
+        window._previewAudio.currentTime = 0;
+        window._previewAudio = null;
+    }
+    if (_previewSlot) { updatePreviewBtn(_previewSlot, false); _previewSlot = null; }
+}
+
+function previewAudio(slot) {
+    // Toggle: clicking Play on the active slot stops it
+    if (_previewSlot === slot) { stopPreviewAudio(); return; }
+    stopPreviewAudio(); // Stop any other slot that was playing
+
+    var path = _audioFiles[slot];
+    if (!path) return;
+    var fn = path.split('/').pop();
+    var src = audioProxy(fn);
+    var a = new Audio(src);
+    window._previewAudio = a;
+    _previewSlot = slot;
+    updatePreviewBtn(slot, true);
+
+    a.onended = function() { stopPreviewAudio(); };
+    a.onerror = function() { toastr.warning('Could not play audio.'); stopPreviewAudio(); };
+    a.play().catch(function(err) {
+        toastr.warning('Could not play: ' + err.message);
+        stopPreviewAudio();
+    });
+}
+
+/* ── Boot ── */
+loadConfig();
+</script>
+</body>
+</html>
+

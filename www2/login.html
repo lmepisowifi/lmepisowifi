@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+    <!-- Removed the inline <style> block, as style.css handles everything now -->
+</head>
+<body>
+    <div id="overlay" class="visible">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text">Loading…</span>
+        </div>
+    </div>
+
+    <!-- We replaced the <main> tag with your custom .login-wrap and .login-box -->
+<div class="login-wrap">
+    <div class="d-flex flex-column align-items-center">
+        
+        <img src="/img/logo.png?v=1.0.0" alt="Logo" class="login-logo">
+
+        <div class="login-box">
+            <form action="/cgi-bin/auth.cgi" method="POST">
+                <div class="login-title">The modded web interface<br>| M2-2050-G40</div>
+                
+                <div class="alert alert-danger d-none" id="error-msg">Invalid username or password.</div>
+                <div class="alert alert-warning d-none" id="lockout-msg"></div>
+                
+                <div class="mb-2">
+                    <input type="text" class="form-control form-control-sm" name="username" id="username" placeholder="Username" required>
+                </div>
+                <div class="mb-3">
+                    <input type="password" class="form-control form-control-sm" name="password" id="password" placeholder="Password" required>
+                </div>
+                
+                <button class="btn btn-primary w-100 py-2 mt-2" type="submit" id="login-btn">Log In</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+
+    <script>
+        var overlay    = document.getElementById('overlay');
+        var overlayTxt = document.getElementById('overlay-text');
+
+        // ── Login lockout config ──────────────────────────────
+        var MAX_ATTEMPTS  = 5;          // failed tries before lockout
+        var LOCK_MS       = 60 * 1000;  // lockout duration (60s)
+        var STORE_KEY     = 'loginAttempts';
+
+        var form       = document.querySelector('form');
+        var loginBtn   = document.getElementById('login-btn');
+        var lockoutMsg = document.getElementById('lockout-msg');
+        var userInput  = document.getElementById('username');
+        var passInput  = document.getElementById('password');
+        var lockTimer  = null;
+
+        function getState() {
+            try { return JSON.parse(localStorage.getItem(STORE_KEY)) || { count: 0, lockUntil: 0 }; }
+            catch (e) { return { count: 0, lockUntil: 0 }; }
+        }
+        function setState(s) {
+            try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (e) {}
+        }
+        function clearState() {
+            try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+        }
+
+        function lockForm(msLeft) {
+            loginBtn.disabled = true;
+            if (userInput) userInput.disabled = true;
+            if (passInput) passInput.disabled = true;
+            if (lockTimer) clearInterval(lockTimer);
+            lockoutMsg.classList.remove('d-none');
+            var tick = function () {
+                var secs = Math.ceil(msLeft / 1000);
+                lockoutMsg.textContent =
+                    'Too many failed attempts. Try again in ' + secs + 's.';
+                if (msLeft <= 0) {
+                    clearInterval(lockTimer);
+                    unlockForm();
+                    return;
+                }
+                msLeft -= 1000;
+            };
+            tick();
+            lockTimer = setInterval(tick, 1000);
+        }
+
+        function unlockForm() {
+            if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
+            loginBtn.disabled = false;
+            if (userInput) userInput.disabled = false;
+            if (passInput) passInput.disabled = false;
+            lockoutMsg.classList.add('d-none');
+            clearState();
+        }
+
+        // Check for an active lockout on load
+        (function checkLockout() {
+            var s = getState();
+            if (s.lockUntil && Date.now() < s.lockUntil) {
+                lockForm(s.lockUntil - Date.now());
+            }
+        })();
+
+        // Display error message if redirected back with ?error=1
+        if (window.location.search.includes('error=1')) {
+            document.getElementById('error-msg').classList.remove('d-none');
+
+            // Record the failed attempt
+            var st = getState();
+            // If a prior lockout already elapsed, start fresh
+            if (st.lockUntil && Date.now() >= st.lockUntil) st = { count: 0, lockUntil: 0 };
+            st.count = (st.count || 0) + 1;
+            if (st.count >= MAX_ATTEMPTS) {
+                st.lockUntil = Date.now() + LOCK_MS;
+                setState(st);
+                lockForm(LOCK_MS);
+            } else {
+                setState(st);
+                var remaining = MAX_ATTEMPTS - st.count;
+                toastr.warning(remaining + ' attempt' + (remaining === 1 ? '' : 's') +
+                               ' remaining before lockout.');
+            }
+        }
+        toastr.warning("the modded web interface is still in beta, expect bugs and glitches to occur.")
+
+        // Check if already logged in; hide loader once we know either way
+        fetch('/cgi-bin/check_auth.cgi')
+            .then(function (r) { return r.text(); })
+            .then(function (status) {
+                if (status.trim() === 'authenticated') {
+                    clearState(); // successful login — reset attempt counter
+                    overlayTxt.textContent = 'Redirecting…';
+                    window.location.href = '/index.html';
+                } else {
+                    overlay.classList.remove('visible');
+                }
+            })
+            .catch(function () {
+                overlay.classList.remove('visible');
+            });
+
+        // Show overlay on form submit (blocked while locked out)
+        form.addEventListener('submit', function (e) {
+            var s = getState();
+            if (s.lockUntil && Date.now() < s.lockUntil) {
+                e.preventDefault();
+                lockForm(s.lockUntil - Date.now());
+                return;
+            }
+            overlayTxt.textContent = 'Logging in…';
+            overlay.classList.add('visible');
+        });
+    </script>
+</body>
+</html>

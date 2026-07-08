@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <style>
+        /* ---- Toggle switch (matches wlan24.html) ---- */
+        .wlan-toggle {
+            width: 46px;
+            height: 26px;
+            border-radius: 13px;
+            background: #444;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.25s;
+            flex-shrink: 0;
+        }
+
+        .wlan-toggle.on {
+            background: #ffffff;
+        }
+
+        .wlan-toggle.disabled-ui {
+            opacity: 0.4;
+            pointer-events: none;
+        }
+
+        .wlan-toggle-knob {
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            top: 4px;
+            left: 4px;
+            transition: left 0.25s, background 0.25s, box-shadow 0.25s;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .wlan-toggle.on .wlan-toggle-knob {
+            left: 24px;
+            background: #555;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        /* ---- MAC list box ---- */
+        .mac-list-box {
+            min-height: 38px;
+            max-height: 210px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--bg-input);
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-color) var(--bg-input);
+        }
+
+        .mac-entry {
+            border-bottom: 1px solid var(--border-color);
+            padding: 4px 8px;
+            min-height: 32px;
+        }
+
+        .mac-entry:last-child {
+            border-bottom: none;
+        }
+
+        .mac-addr {
+            font-family: "Nunito", monospace !important;
+            font-size: 12px;
+            color: var(--text-primary);
+            letter-spacing: 0.04em;
+        }
+
+        .mac-del-btn {
+            padding: 0 6px !important;
+            height: 22px !important;
+            font-size: 11px !important;
+            line-height: 1 !important;
+            color: #ff6b6b !important;
+            border-color: rgba(255, 107, 107, 0.3) !important;
+            background: transparent !important;
+            border-radius: 3px !important;
+            flex-shrink: 0;
+        }
+
+        .mac-del-btn:hover {
+            background: rgba(255, 107, 107, 0.12) !important;
+            border-color: #ff6b6b !important;
+        }
+
+        .mac-empty {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-align: center;
+            padding: 8px 0;
+        }
+
+        /* ---- Filter state label (next to toggle in header) ---- */
+        .filter-state {
+            font-size: 11px;
+            font-weight: 600;
+            min-width: 54px;
+            color: var(--text-secondary);
+            letter-spacing: 0.02em;
+        }
+
+        .filter-state.state-whitelist {
+            color: #50c878;
+        }
+
+        .filter-state.state-blacklist {
+            color: #ff6b6b;
+        }
+
+        /* ---- Card divider ---- */
+        .card-divider {
+            border-top: 1px solid var(--border-color);
+            margin: 12px -16px;
+        }
+
+        /* ---- Mode row (switch + dropdown + apply) ---- */
+        .mode-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .mode-row .form-select {
+            flex: 1;
+        }
+
+        .mode-row .btn {
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        /* Disabled dropdown visual when switch is off */
+        .form-select:disabled {
+            opacity: 0.4 !important;
+            cursor: not-allowed !important;
+        }
+
+        /* ---- Error strip ---- */
+        .inline-err {
+            font-size: 11px;
+            color: #ff6b6b;
+            background: rgba(255, 107, 107, 0.08);
+            border: 1px solid rgba(255, 107, 107, 0.25);
+            border-radius: 3px;
+            padding: 3px 8px;
+            margin-top: 5px;
+            display: none;
+        }
+
+        /* ---- Band selector row ---- */
+        .band-selector-wrap {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+
+        .band-selector-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .band-selector-wrap .form-select {
+            max-width: 160px;
+        }
+
+        /* ---- Band tag on Both card ---- */
+        .both-tag {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 8px;
+            letter-spacing: 0.04em;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+            margin-left: 3px;
+        }
+
+        .band-info {
+            font-size: 11px;
+            color: var(--text-secondary);
+            padding-bottom: 6px;
+        }
+
+        /* ---- Lockout warning modal ---- */
+        .warn-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.72);
+            z-index: 9100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+
+        .warn-modal-backdrop.visible {
+            opacity: 1;
+            pointer-events: all;
+        }
+
+        .warn-modal {
+            background: #1a1a1a;
+            border: 1px solid rgba(255, 107, 107, 0.45);
+            border-radius: 10px;
+            padding: 28px 28px 22px;
+            max-width: 420px;
+            width: 92%;
+            box-shadow: 0 8px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 107, 107, 0.12);
+        }
+
+        .warn-modal-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .warn-modal-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #ff6b6b;
+            margin-bottom: 8px;
+        }
+
+        .warn-modal-body {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 18px;
+            line-height: 1.6;
+        }
+
+        .warn-modal-body strong {
+            color: var(--text-primary);
+        }
+
+        .warn-modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .warn-modal-actions .btn-cancel {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            border-radius: 6px;
+            padding: 6px 18px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: border-color 0.15s, color 0.15s;
+        }
+
+        .warn-modal-actions .btn-cancel:hover {
+            border-color: var(--text-secondary);
+            color: var(--text-primary);
+        }
+
+        .warn-modal-actions .btn-apply-anyway {
+            background: rgba(255, 107, 107, 0.15);
+            border: 1px solid rgba(255, 107, 107, 0.5);
+            color: #ff6b6b;
+            border-radius: 6px;
+            padding: 6px 18px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .warn-modal-actions .btn-apply-anyway:hover {
+            background: rgba(255, 107, 107, 0.28);
+        }
+    </style>
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+</head>
+
+<body>
+    <!-- Full-page overlay -->
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <!-- Lockout warning modal -->
+    <div class="warn-modal-backdrop" id="warnModal">
+        <div class="warn-modal">
+            <div class="warn-modal-icon">&#9888;&#65039;</div>
+            <div class="warn-modal-title" id="warnTitle">Warning: Possible Lock-out</div>
+            <div class="warn-modal-body" id="warnBody"></div>
+            <div class="warn-modal-actions">
+                <button class="btn-cancel" id="warnCancel" onclick="closeWarnModal()">Cancel</button>
+                <button class="btn-apply-anyway" id="warnApply">Apply Anyway</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-5">
+
+        <!-- Band selector -->
+        <div class="row justify-content-center">
+            <div class="col-md-10">
+                <div class="band-selector-wrap">
+                    <span class="band-selector-label">Band</span>
+                    <select class="form-select" id="bandSelect" onchange="switchBand(this.value)">
+                        <option value="24">2.4 GHz</option>
+                        <option value="5">5 GHz</option>
+                        <option value="both">Both</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="row justify-content-center g-3">
+
+            <!-- =================== 2.4 GHz card =================== -->
+            <div class="col-md-5" id="wrap24">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>2.4 GHz MAC Filter (wlan1)</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="wlan-toggle" id="switch24" role="switch" aria-checked="false"
+                                title="Enable / disable MAC filter" onclick="toggleEnabled('24')">
+                                <div class="wlan-toggle-knob"></div>
+                            </div>
+                            <span id="state24" class="filter-state">Off</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="band-info" id="hint24">Toggle the switch to enable MAC filtering.</div>
+
+                        <!-- Mode dropdown -->
+                        <div class="mode-row mb-1">
+                            <select class="form-select" id="mode24" onchange="onModeChange('24')" disabled>
+                                <option value="1">Whitelist — Allow Only Listed</option>
+                                <option value="2">Blacklist — Block Listed</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="setMode('24')">Apply</button>
+                        </div>
+
+                        <div class="card-divider"></div>
+
+                        <!-- MAC list -->
+                        <div class="mb-2">
+                            <label class="form-label">MAC Address List
+                                <span id="maccount24" class="text-secondary" style="font-weight:400;">(0)</span>
+                            </label>
+                            <div class="mac-list-box" id="maclist24">
+                                <div class="mac-empty">No addresses configured</div>
+                            </div>
+                        </div>
+
+                        <!-- Add MAC -->
+                        <div>
+                            <label for="macinput24" class="form-label">Add MAC Address</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="macinput24" placeholder="AA:BB:CC:DD:EE:FF"
+                                    maxlength="17" autocomplete="off" spellcheck="false"
+                                    onkeydown="if(event.key==='Enter')addMac('24')" oninput="clearErr('24')">
+                                <button class="btn btn-primary" onclick="addMac('24')">Add</button>
+                            </div>
+                            <div class="inline-err" id="err24"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- =================== 5 GHz card =================== -->
+            <div class="col-md-5" id="wrap5" style="display:none">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>5 GHz MAC Filter (wlan0)</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="wlan-toggle" id="switch5" role="switch" aria-checked="false"
+                                title="Enable / disable MAC filter" onclick="toggleEnabled('5')">
+                                <div class="wlan-toggle-knob"></div>
+                            </div>
+                            <span id="state5" class="filter-state">Off</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="band-info" id="hint5">Toggle the switch to enable MAC filtering.</div>
+
+                        <!-- Mode dropdown -->
+                        <div class="mode-row mb-1">
+                            <select class="form-select" id="mode5" onchange="onModeChange('5')" disabled>
+                                <option value="1">Whitelist — Allow Only Listed</option>
+                                <option value="2">Blacklist — Block Listed</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="setMode('5')">Apply</button>
+                        </div>
+
+                        <div class="card-divider"></div>
+
+                        <!-- MAC list -->
+                        <div class="mb-2">
+                            <label class="form-label">MAC Address List
+                                <span id="maccount5" class="text-secondary" style="font-weight:400;">(0)</span>
+                            </label>
+                            <div class="mac-list-box" id="maclist5">
+                                <div class="mac-empty">No addresses configured</div>
+                            </div>
+                        </div>
+
+                        <!-- Add MAC -->
+                        <div>
+                            <label for="macinput5" class="form-label">Add MAC Address</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="macinput5" placeholder="AA:BB:CC:DD:EE:FF"
+                                    maxlength="17" autocomplete="off" spellcheck="false"
+                                    onkeydown="if(event.key==='Enter')addMac('5')" oninput="clearErr('5')">
+                                <button class="btn btn-primary" onclick="addMac('5')">Add</button>
+                            </div>
+                            <div class="inline-err" id="err5"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- =================== Both card =================== -->
+            <div class="col-md-5" id="wrapboth" style="display:none">
+                <div class="card">
+                    <div class="card-header d-flex align-items-center justify-content-between">
+                        <span>
+                            MAC Filter
+                            <span class="both-tag">2.4 GHz</span>
+                            <span class="both-tag">5 GHz</span>
+                        </span>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="wlan-toggle" id="switchboth" role="switch" aria-checked="false"
+                                title="Enable / disable MAC filter on both bands" onclick="toggleEnabled('both')">
+                                <div class="wlan-toggle-knob"></div>
+                            </div>
+                            <span id="stateboth" class="filter-state">Off</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="band-info" id="hintboth">Toggle the switch to enable MAC filtering.</div>
+
+                        <!-- Mode dropdown -->
+                        <div class="mode-row mb-1">
+                            <select class="form-select" id="modeboth" onchange="onModeChange('both')" disabled>
+                                <option value="1">Whitelist — Allow Only Listed</option>
+                                <option value="2">Blacklist — Block Listed</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="setModeBoth()">Apply</button>
+                        </div>
+
+                        <div class="card-divider"></div>
+
+                        <!-- MAC list -->
+                        <div class="mb-2">
+                            <label class="form-label">MAC Address List
+                                <span id="maccountboth" class="text-secondary" style="font-weight:400;">(0)</span>
+                            </label>
+                            <div class="mac-list-box" id="maclistboth">
+                                <div class="mac-empty">No addresses configured</div>
+                            </div>
+                        </div>
+
+                        <!-- Add MAC -->
+                        <div>
+                            <label for="macinputboth" class="form-label">Add MAC Address</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="macinputboth"
+                                    placeholder="AA:BB:CC:DD:EE:FF" maxlength="17" autocomplete="off" spellcheck="false"
+                                    onkeydown="if(event.key==='Enter')addMacBoth()" oninput="clearErr('both')">
+                                <button class="btn btn-primary" onclick="addMacBoth()">Add</button>
+                            </div>
+                            <div class="inline-err" id="errboth"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- /row -->
+    </div><!-- /container -->
+
+    <script>
+        var CGI = '/cgi-bin/wlanmac.cgi';
+
+        var overlay = document.getElementById('overlay');
+        var overlayTxt = document.getElementById('overlay-text');
+        var spinner = document.getElementById('overlay-spinner');
+
+        // Shared state — updated after every status poll
+        var bandState = {
+            '24': { mode: 0, macs: [] },
+            '5': { mode: 0, macs: [] }
+        };
+
+        var countdownTimer = null;
+
+        // ============================================================
+        // Overlay helpers
+        // ============================================================
+        function showOverlay(text) {
+            overlayTxt.textContent = text;
+            spinner.style.display = 'block';
+            overlay.classList.add('visible');
+        }
+
+        function hideOverlay() {
+            overlay.classList.remove('visible');
+            if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+            setTimeout(unlockAll, 350);
+        }
+
+        function startCountdown(seconds, label) {
+            var left = seconds;
+            overlayTxt.textContent = label + ' ' + left + 's';
+            countdownTimer = setInterval(function () {
+                left--;
+                if (left > 0) {
+                    overlayTxt.textContent = label + ' ' + left + 's';
+                } else {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                    overlayTxt.textContent = 'Reverting Changes.';
+                }
+            }, 1000);
+        }
+
+        // ============================================================
+        // Lock / unlock all controls
+        // ============================================================
+        function lockAll() {
+            document.querySelectorAll('button, select, input').forEach(function (el) {
+                el.disabled = true;
+            });
+            document.querySelectorAll('.wlan-toggle').forEach(function (el) {
+                el.classList.add('disabled-ui');
+            });
+        }
+
+        function unlockAll() {
+            document.querySelectorAll('button, select, input').forEach(function (el) {
+                el.disabled = false;
+            });
+            document.querySelectorAll('.wlan-toggle').forEach(function (el) {
+                el.classList.remove('disabled-ui');
+            });
+            // Re-apply switch-gated disabled state on mode dropdowns
+            ['24', '5', 'both'].forEach(function (b) {
+                var sw = document.getElementById('switch' + b);
+                var sel = document.getElementById('mode' + b);
+                if (sw && sel && !sw.classList.contains('on')) {
+                    sel.disabled = true;
+                }
+            });
+        }
+
+        // ============================================================
+        // State label + hint helpers
+        // ============================================================
+        var STATE_CLASS = ['', 'state-whitelist', 'state-blacklist'];
+        var STATE_LABEL = ['Off', 'Whitelist', 'Blacklist'];
+        var HINT_TEXT = [
+            'Toggle the switch to enable MAC filtering.',
+            'Only MACs in the list below are allowed to connect.',
+            'MACs in the list below are blocked from connecting.'
+        ];
+
+        function updateStateLabel(band, mode) {
+            var el = document.getElementById('state' + band);
+            el.className = 'filter-state' + (STATE_CLASS[mode] ? ' ' + STATE_CLASS[mode] : '');
+            el.textContent = STATE_LABEL[mode];
+            var hint = document.getElementById('hint' + band);
+            if (hint) hint.textContent = HINT_TEXT[mode];
+        }
+
+        // ============================================================
+        // Switch helpers
+        // ============================================================
+        function setSwitchState(band, mode) {
+            var sw = document.getElementById('switch' + band);
+            var sel = document.getElementById('mode' + band);
+            var isOn = (mode > 0);
+            if (isOn) { sw.classList.add('on'); sw.setAttribute('aria-checked', 'true'); }
+            else { sw.classList.remove('on'); sw.setAttribute('aria-checked', 'false'); }
+            sel.disabled = !isOn;
+            if (mode > 0) sel.value = String(mode);
+            updateStateLabel(band, mode);
+        }
+
+        function toggleEnabled(band) {
+            var sw = document.getElementById('switch' + band);
+            var isOn = sw.classList.toggle('on');
+            sw.setAttribute('aria-checked', isOn ? 'true' : 'false');
+            var sel = document.getElementById('mode' + band);
+            sel.disabled = !isOn;
+            updateStateLabel(band, isOn ? parseInt(sel.value) : 0);
+        }
+
+        function onModeChange(band) {
+            var sw = document.getElementById('switch' + band);
+            if (sw.classList.contains('on')) {
+                updateStateLabel(band, parseInt(document.getElementById('mode' + band).value));
+            }
+        }
+
+        // ============================================================
+        // Band selector
+        // ============================================================
+        function switchBand(val) {
+            document.getElementById('wrap24').style.display = (val === '24') ? '' : 'none';
+            document.getElementById('wrap5').style.display = (val === '5') ? '' : 'none';
+            document.getElementById('wrapboth').style.display = (val === 'both') ? '' : 'none';
+            if (val === 'both') syncBothCard();
+        }
+
+        // ============================================================
+        // Both-card sync
+        // ============================================================
+        function syncBothCard() {
+            var mode24 = bandState['24'].mode;
+            var mode5 = bandState['5'].mode;
+            // Pick effective mode: prefer band24 if nonzero, else band5
+            var eff = (mode24 > 0) ? mode24 : ((mode5 > 0) ? mode5 : 0);
+            setSwitchState('both', eff);
+
+            var merged = mergeMacs();
+            renderMacListBoth(merged);
+            document.getElementById('maccountboth').textContent = '(' + merged.length + ')';
+        }
+
+        function mergeMacs() {
+            var seen = {};
+            var result = [];
+            bandState['24'].macs.forEach(function (e) {
+                var key = e.mac.toLowerCase();
+                var entry = { mac: e.mac, idx24: e.idx, idx5: null };
+                seen[key] = entry;
+                result.push(entry);
+            });
+            bandState['5'].macs.forEach(function (e) {
+                var key = e.mac.toLowerCase();
+                if (seen[key]) {
+                    seen[key].idx5 = e.idx;
+                } else {
+                    var entry = { mac: e.mac, idx24: null, idx5: e.idx };
+                    seen[key] = entry;
+                    result.push(entry);
+                }
+            });
+            return result;
+        }
+
+        function renderMacListBoth(macs) {
+            var box = document.getElementById('maclistboth');
+            box.innerHTML = '';
+            if (!macs || macs.length === 0) {
+                var empty = document.createElement('div');
+                empty.className = 'mac-empty';
+                empty.textContent = 'No addresses configured';
+                box.appendChild(empty);
+                return;
+            }
+            macs.forEach(function (entry) {
+                var div = document.createElement('div');
+                div.className = 'mac-entry d-flex align-items-center justify-content-between';
+                var code = document.createElement('span');
+                code.className = 'mac-addr';
+                code.textContent = entry.mac;
+                var btn = document.createElement('button');
+                btn.className = 'btn mac-del-btn';
+                btn.title = 'Remove ' + entry.mac;
+                btn.textContent = '\u2715';
+                (function (e) {
+                    btn.onclick = function () { delMacBoth(e.idx24, e.idx5, e.mac); };
+                }(entry));
+                div.appendChild(code);
+                div.appendChild(btn);
+                box.appendChild(div);
+            });
+        }
+
+        // ============================================================
+        // Render MAC list (single band)
+        // ============================================================
+        function renderMacList(band, macs) {
+            var box = document.getElementById('maclist' + band);
+            var count = document.getElementById('maccount' + band);
+            box.innerHTML = '';
+            count.textContent = '(' + macs.length + ')';
+            if (!macs || macs.length === 0) {
+                var empty = document.createElement('div');
+                empty.className = 'mac-empty';
+                empty.textContent = 'No addresses configured';
+                box.appendChild(empty);
+                return;
+            }
+            macs.forEach(function (entry) {
+                var div = document.createElement('div');
+                div.className = 'mac-entry d-flex align-items-center justify-content-between';
+                var code = document.createElement('span');
+                code.className = 'mac-addr';
+                code.textContent = entry.mac;
+                var btn = document.createElement('button');
+                btn.className = 'btn mac-del-btn';
+                btn.title = 'Remove ' + entry.mac;
+                btn.textContent = '\u2715';
+                (function (b, i) {
+                    btn.onclick = function () { delMac(b, i); };
+                }(band, entry.idx));
+                div.appendChild(code);
+                div.appendChild(btn);
+                box.appendChild(div);
+            });
+        }
+
+        // ============================================================
+        // Apply full status to UI
+        // ============================================================
+        function applyStatus(status) {
+            bandState['24'] = { mode: status.band24.mode, macs: status.band24.macs, disabled: status.band24.disabled || 0 };
+            bandState['5']  = { mode: status.band5.mode,  macs: status.band5.macs,  disabled: status.band5.disabled  || 0 };
+
+            setSwitchState('24', status.band24.mode);
+            renderMacList('24', status.band24.macs);
+
+            setSwitchState('5', status.band5.mode);
+            renderMacList('5', status.band5.macs);
+
+            // Update both card only if it is currently visible
+            if (document.getElementById('wrapboth').style.display !== 'none') {
+                syncBothCard();
+            }
+        }
+
+        // ============================================================
+        // Error helpers
+        // ============================================================
+        function showErr(band, msg) {
+            var el = document.getElementById('err' + band);
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+        function clearErr(band) {
+            var el = document.getElementById('err' + band);
+            el.style.display = 'none';
+            el.textContent = '';
+        }
+
+        // ============================================================
+        // MAC validation — strip non-hex, check 12 chars remain
+        // Handles: AA:BB:CC:DD:EE:FF, AABBCCDDEEFF, AA-BB-CC-DD-EE-FF
+        // ============================================================
+        function isValidMAC(str) {
+            var hex = str.replace(/[^0-9A-Fa-f]/g, '');
+            return hex.length === 12;
+        }
+
+        // ============================================================
+        // Poll until back
+        // ============================================================
+        function pollUntilBack(retries) {
+            retries = (retries === undefined) ? 25 : retries;
+            fetch(CGI)
+                .then(function (r) { return r.text(); })
+                .then(function (data) {
+                    if (data.includes('<!DOCTYPE')) throw new Error('login page');
+                    return fetch(CGI + '?action=status').then(function (r) { return r.json(); });
+                })
+                .then(function (status) {
+                    applyStatus(status);
+                    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+                    spinner.style.display = 'none';
+                    overlayTxt.textContent = 'Changes Applied.';
+                    setTimeout(hideOverlay, 1000);
+                })
+                .catch(function () {
+                    if (retries > 0) {
+                        setTimeout(function () { pollUntilBack(retries - 1); }, 2000);
+                    } else {
+                        hideOverlay();
+                        toastr["warning"]("Network error.", "Error");
+                    }
+                });
+        }
+
+        // ============================================================
+        // Lockout-risk warning modal
+        // ============================================================
+        var _pendingApplyFn = null;
+
+        function showWarnModal(title, bodyHtml, applyFn) {
+            document.getElementById('warnTitle').textContent = title;
+            document.getElementById('warnBody').innerHTML = bodyHtml;
+            _pendingApplyFn = applyFn;
+            document.getElementById('warnApply').onclick = function () {
+                closeWarnModal();
+                applyFn();
+            };
+            document.getElementById('warnModal').classList.add('visible');
+        }
+
+        function closeWarnModal() {
+            document.getElementById('warnModal').classList.remove('visible');
+            _pendingApplyFn = null;
+        }
+
+        // ============================================================
+        // Check lockout risk then call applyFn (or warn first).
+        // Only warns when the client is positively identified via
+        // sta_info + arp (info.found === true).
+        // mode: '0'|'1'|'2'   macList: array of MAC strings (with colons, uppercase)
+        // ============================================================
+        function checkLockoutRisk(bandLabel, mode, macList, applyFn) {
+            // Only relevant for whitelist (1) or blacklist (2)
+            if (mode !== '1' && mode !== '2') {
+                applyFn();
+                return;
+            }
+
+            fetch(CGI + '?action=clientcheck')
+                .then(function (r) { return r.json(); })
+                .then(function (info) {
+                    // Only warn when the client was positively identified
+                    // via sta_info AND arp — if not found, proceed silently.
+                    if (!info.found || !info.mac) {
+                        applyFn();
+                        return;
+                    }
+
+                    var clientNorm = info.mac.replace(/:/g, '').toUpperCase();
+                    var inList = macList.some(function (m) {
+                        return m.replace(/:/g, '').toUpperCase() === clientNorm;
+                    });
+
+                    var shouldWarn = false;
+                    var warnTitle = '';
+                    var warnBody = '';
+
+                    if (mode === '1' && !inList) {
+                        // Whitelist & client NOT in list → will be locked out
+                        shouldWarn = true;
+                        warnTitle = '\u26a0\ufe0f Whitelist Lock-out Risk';
+                        warnBody =
+                            'You are about to enable <strong>Whitelist</strong> mode on ' +
+                            '<strong>' + bandLabel + '</strong>.<br><br>' +
+                            'Your device (<strong>' + info.mac + '</strong>' +
+                            (info.ip ? ', IP&nbsp;<strong>' + info.ip + '</strong>' : '') +
+                            ') is <strong>not</strong> in the MAC list. ' +
+                            'Applying this setting will disconnect you and prevent reconnection ' +
+                            'unless your MAC is added to the list first.';
+                    } else if (mode === '2' && inList) {
+                        // Blacklist & client IS in list → will be blocked
+                        shouldWarn = true;
+                        warnTitle = '\u26a0\ufe0f Blacklist Lock-out Risk';
+                        warnBody =
+                            'You are about to enable <strong>Blacklist</strong> mode on ' +
+                            '<strong>' + bandLabel + '</strong>.<br><br>' +
+                            'Your device (<strong>' + info.mac + '</strong>' +
+                            (info.ip ? ', IP&nbsp;<strong>' + info.ip + '</strong>' : '') +
+                            ') is already in the MAC list. ' +
+                            'Applying this setting will block your device from the network.';
+                    }
+
+                    if (shouldWarn) {
+                        showWarnModal(warnTitle, warnBody, applyFn);
+                    } else {
+                        applyFn();
+                    }
+                })
+                .catch(function () {
+                    // clientcheck unreachable — proceed without warning
+                    applyFn();
+                });
+        }
+
+        // ============================================================
+        // setMode — single band
+        // ============================================================
+        function setMode(band) {
+            var sw = document.getElementById('switch' + band);
+            var isOn = sw.classList.contains('on');
+            var mode = isOn ? document.getElementById('mode' + band).value : '0';
+
+            var macList = (bandState[band] && bandState[band].macs)
+                ? bandState[band].macs.map(function (e) { return e.mac; })
+                : [];
+            var bandLabel = (band === '24') ? '2.4 GHz' : '5 GHz';
+
+            checkLockoutRisk(bandLabel, mode, macList, function () {
+                lockAll();
+                showOverlay('Applying Mode.');
+
+                fetch(CGI + '?action=setmode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'band=' + band + '&mode=' + mode
+                })
+                    .then(function (r) {
+                        if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                        var wlanOff = bandState[band] && bandState[band].disabled;
+                        if (!wlanOff) {
+                            startCountdown(30, 'Applying Mode.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            setTimeout(function () { pollUntilBack(); }, 2000);
+                        }
+                    })
+                    .catch(function (err) {
+                        hideOverlay();
+                        toastr["warning"](err.message || 'Error.', "Error");
+                    });
+            });
+        }
+
+        // ============================================================
+        // setModeBoth — applies same mode to both bands sequentially
+        // ============================================================
+        function setModeBoth() {
+            var sw = document.getElementById('switchboth');
+            var isOn = sw.classList.contains('on');
+            var mode = isOn ? document.getElementById('modeboth').value : '0';
+
+            // Merge MAC lists from both bands for the lockout check
+            var merged = mergeMacs();
+            var macList = merged.map(function (e) { return e.mac; });
+
+            checkLockoutRisk('2.4 GHz + 5 GHz', mode, macList, function () {
+                lockAll();
+                showOverlay('Applying Mode.');
+
+                fetch(CGI + '?action=setmode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'band=24&mode=' + mode
+                })
+                    .then(function (r) {
+                        if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                        return fetch(CGI + '?action=setmode', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: 'band=5&mode=' + mode
+                        });
+                    })
+                    .then(function (r) {
+                        if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                        var wlan24Off = bandState['24'] && bandState['24'].disabled;
+                        var wlan5Off  = bandState['5']  && bandState['5'].disabled;
+                        if (!(wlan24Off && wlan5Off)) {
+                            startCountdown(30, 'Applying Mode.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            setTimeout(function () { pollUntilBack(); }, 2000);
+                        }
+                    })
+                    .catch(function (err) {
+                        hideOverlay();
+                        toastr["warning"](err.message || 'Error.', "Error");
+                    });
+            });
+        }
+
+        // ============================================================
+        // addMac — single band
+        // ============================================================
+        function addMac(band) {
+            var input = document.getElementById('macinput' + band);
+            var raw = input.value.trim();
+            clearErr(band);
+
+            if (!raw) return;
+            if (!isValidMAC(raw)) {
+                showErr(band, 'Invalid format. Use AA:BB:CC:DD:EE:FF or AABBCCDDEEFF.');
+                return;
+            }
+
+            // Use the *applied* mode (what the device actually has), not the UI switch state.
+            // The switch can be toggled without clicking Apply, so DOM state is unreliable here.
+            var isEnabled = bandState[band] && bandState[band].mode > 0;
+
+            lockAll();
+            showOverlay('Adding MAC\u2026');
+
+            fetch(CGI + '?action=addmac', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'band=' + band + '&mac=' + encodeURIComponent(raw)
+            })
+                .then(function (r) {
+                    if (r.status === 409) {
+                        return r.text().then(function (t) { throw new Error(t || 'MAC already in list'); });
+                    }
+                    if (!r.ok) {
+                        return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                    }
+                    input.value = '';
+                    if (isEnabled) {
+                        // Filter active — CGI fires wlan_apply restart; skip countdown if radio is off
+                        var wlanOff = bandState[band] && bandState[band].disabled;
+                        if (!wlanOff) {
+                            startCountdown(15, 'Adding MAC.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            setTimeout(function () { pollUntilBack(); }, 2000);
+                        }
+                    } else {
+                        // Filter disabled — CGI only commits, no restart needed
+                        fetch(CGI + '?action=status')
+                            .then(function (r) { return r.json(); })
+                            .then(function (status) {
+                                applyStatus(status);
+                                spinner.style.display = 'none';
+                                overlayTxt.textContent = 'MAC Added.';
+                                setTimeout(hideOverlay, 1000);
+                            })
+                            .catch(function () {
+                                hideOverlay();
+                                toastr["warning"]("Error refreshing.", "Error");
+                            });
+                    }
+                })
+                .catch(function (err) {
+                    hideOverlay();
+                    toastr["warning"](err.message || 'Error.', "Error");
+                });
+        }
+
+        // ============================================================
+        // addMacBoth — add to both bands (ignores 409 = already exists)
+        // ============================================================
+        function addMacBoth() {
+            var input = document.getElementById('macinputboth');
+            var raw = input.value.trim();
+            clearErr('both');
+
+            if (!raw) return;
+            if (!isValidMAC(raw)) {
+                showErr('both', 'Invalid format. Use AA:BB:CC:DD:EE:FF or AABBCCDDEEFF.');
+                return;
+            }
+
+            // Use the *applied* mode (what the device actually has), not the UI switch state.
+            var isEnabled = (bandState['24'] && bandState['24'].mode > 0) ||
+                            (bandState['5']  && bandState['5'].mode  > 0);
+
+            lockAll();
+            showOverlay('Adding MAC\u2026');
+
+            function addToBand(band) {
+                return fetch(CGI + '?action=addmac', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'band=' + band + '&mac=' + encodeURIComponent(raw)
+                }).then(function (r) {
+                    // 409 = already in list — that's acceptable in "both" mode
+                    if (r.status === 409) return;
+                    if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                });
+            }
+
+            addToBand('24')
+                .then(function () { return addToBand('5'); })
+                .then(function () {
+                    input.value = '';
+                    if (isEnabled) {
+                        // Filter active — CGI fires wlan_apply restart; skip countdown if both radios are off
+                        var wlan24Off = bandState['24'] && bandState['24'].disabled;
+                        var wlan5Off  = bandState['5']  && bandState['5'].disabled;
+                        if (!(wlan24Off && wlan5Off)) {
+                            startCountdown(15, 'Adding MAC.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            setTimeout(function () { pollUntilBack(); }, 2000);
+                        }
+                    } else {
+                        // Filter disabled — CGI only commits, no restart needed
+                        fetch(CGI + '?action=status')
+                            .then(function (r) { return r.json(); })
+                            .then(function (status) {
+                                applyStatus(status);
+                                spinner.style.display = 'none';
+                                overlayTxt.textContent = 'MAC Added.';
+                                setTimeout(hideOverlay, 1000);
+                            })
+                            .catch(function () {
+                                hideOverlay();
+                                toastr["warning"]("Error refreshing.", "Error");
+                            });
+                    }
+                })
+                .catch(function (err) {
+                    hideOverlay();
+                    toastr["warning"](err.message || 'Error.', "Error");
+                });
+        }
+
+        // ============================================================
+        // delMac — single band, by table index
+        // ============================================================
+        function delMac(band, idx) {
+            var currentMode = bandState[band] ? bandState[band].mode : 0;
+
+            // Find the MAC string being deleted (needed for whitelist check)
+            var macEntry = null;
+            if (bandState[band] && bandState[band].macs) {
+                bandState[band].macs.forEach(function (e) {
+                    if (String(e.idx) === String(idx)) macEntry = e;
+                });
+            }
+
+            function doDelete() {
+                var isEnabled = bandState[band] && bandState[band].mode > 0;
+                var wlanOff = bandState[band] && bandState[band].disabled;
+                lockAll();
+                showOverlay('Removing MAC\u2026');
+
+                fetch(CGI + '?action=delmac', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'band=' + band + '&idx=' + idx
+                })
+                    .then(function (r) {
+                        if (!r.ok) return r.text().then(function (t) { throw new Error(t || 'Request failed'); });
+                        if (isEnabled && !wlanOff) {
+                            // Filter active + radio up — restart will happen, wait for it
+                            startCountdown(15, 'Removing MAC.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            // Filter off or radio disabled — quick refresh
+                            fetch(CGI + '?action=status')
+                                .then(function (r) { return r.json(); })
+                                .then(function (status) {
+                                    applyStatus(status);
+                                    spinner.style.display = 'none';
+                                    overlayTxt.textContent = 'MAC Removed.';
+                                    setTimeout(hideOverlay, 1000);
+                                })
+                                .catch(function () {
+                                    hideOverlay();
+                                    toastr["warning"]("Error refreshing.", "Error");
+                                });
+                        }
+                    })
+                    .catch(function (err) {
+                        hideOverlay();
+                        toastr["warning"](err.message || 'Error.', "Error");
+                    });
+            }
+
+            // Warn if whitelist is active and the MAC being deleted is the client's own MAC
+            if (currentMode === 1 && macEntry) {
+                fetch(CGI + '?action=clientcheck')
+                    .then(function (r) { return r.json(); })
+                    .then(function (info) {
+                        if (info.found && info.mac) {
+                            var clientNorm = info.mac.replace(/:/g, '').toUpperCase();
+                            var macNorm = macEntry.mac.replace(/:/g, '').toUpperCase();
+                            if (clientNorm === macNorm) {
+                                var bandLabel = (band === '24') ? '2.4\u202fGHz' : '5\u202fGHz';
+                                showWarnModal(
+                                    '\u26a0\ufe0f Whitelist Lock-out Risk',
+                                    'You are removing <strong>' + macEntry.mac + '</strong> from the ' +
+                                    '<strong>' + bandLabel + '</strong> MAC whitelist.<br><br>' +
+                                    'This MAC belongs to <strong>your device</strong>' +
+                                    (info.ip ? ' (IP\u00a0<strong>' + info.ip + '</strong>)' : '') +
+                                    '. Deleting it will disconnect you and prevent reconnection ' +
+                                    'while Whitelist mode is active.',
+                                    doDelete
+                                );
+                                return;
+                            }
+                        }
+                        doDelete();
+                    })
+                    .catch(function () { doDelete(); });
+            } else {
+                doDelete();
+            }
+        }
+
+        // ============================================================
+        // delMacBoth — delete from both bands in parallel by index.
+        // idx24 / idx5 may be null if the MAC only exists in one band.
+        // mac is the display MAC string (passed from renderMacListBoth).
+        // ============================================================
+        function delMacBoth(idx24, idx5, mac) {
+            var mode24 = bandState['24'] ? bandState['24'].mode : 0;
+            var mode5  = bandState['5']  ? bandState['5'].mode  : 0;
+            // Whitelist risk: deleting from a band whose filter is in whitelist mode
+            var eitherWhitelist = (idx24 !== null && mode24 === 1) || (idx5 !== null && mode5 === 1);
+
+            function doDelete() {
+                var isEnabled = (bandState['24'] && bandState['24'].mode > 0) ||
+                                (bandState['5']  && bandState['5'].mode  > 0);
+                var wlan24Off = bandState['24'] && bandState['24'].disabled;
+                var wlan5Off  = bandState['5']  && bandState['5'].disabled;
+                var allOff = wlan24Off && wlan5Off;
+                lockAll();
+                showOverlay('Removing MAC\u2026');
+
+                var reqs = [];
+                if (idx24 !== null) {
+                    reqs.push(fetch(CGI + '?action=delmac', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'band=24&idx=' + idx24
+                    }));
+                }
+                if (idx5 !== null) {
+                    reqs.push(fetch(CGI + '?action=delmac', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'band=5&idx=' + idx5
+                    }));
+                }
+
+                Promise.all(reqs)
+                    .then(function (responses) {
+                        for (var i = 0; i < responses.length; i++) {
+                            if (!responses[i].ok) throw new Error('Delete failed');
+                        }
+                        if (isEnabled && !allOff) {
+                            // Filter active + at least one radio up — wait for restart
+                            startCountdown(15, 'Removing MAC.');
+                            setTimeout(function () { pollUntilBack(); }, 4000);
+                        } else {
+                            // Filter off or all radios down — quick refresh
+                            fetch(CGI + '?action=status')
+                                .then(function (r) { return r.json(); })
+                                .then(function (status) {
+                                    applyStatus(status);
+                                    spinner.style.display = 'none';
+                                    overlayTxt.textContent = 'MAC Removed.';
+                                    setTimeout(hideOverlay, 1000);
+                                })
+                                .catch(function () {
+                                    hideOverlay();
+                                    toastr["warning"]("Error refreshing.", "Error");
+                                });
+                        }
+                    })
+                    .catch(function (err) {
+                        hideOverlay();
+                        toastr["warning"](err.message || 'Error.', "Error");
+                    });
+            }
+
+            // Warn if any affected band is in whitelist and this is the client's own MAC
+            if (eitherWhitelist && mac) {
+                fetch(CGI + '?action=clientcheck')
+                    .then(function (r) { return r.json(); })
+                    .then(function (info) {
+                        if (info.found && info.mac) {
+                            var clientNorm = info.mac.replace(/:/g, '').toUpperCase();
+                            var macNorm = mac.replace(/:/g, '').toUpperCase();
+                            if (clientNorm === macNorm) {
+                                var bands = [];
+                                if (idx24 !== null && mode24 === 1) bands.push('2.4\u202fGHz');
+                                if (idx5  !== null && mode5  === 1) bands.push('5\u202fGHz');
+                                showWarnModal(
+                                    '\u26a0\ufe0f Whitelist Lock-out Risk',
+                                    'You are removing <strong>' + mac + '</strong> from the MAC whitelist ' +
+                                    'on <strong>' + bands.join(' + ') + '</strong>.<br><br>' +
+                                    'This MAC belongs to <strong>your device</strong>' +
+                                    (info.ip ? ' (IP\u00a0<strong>' + info.ip + '</strong>)' : '') +
+                                    '. Deleting it will disconnect you and prevent reconnection ' +
+                                    'while Whitelist mode is active.',
+                                    doDelete
+                                );
+                                return;
+                            }
+                        }
+                        doDelete();
+                    })
+                    .catch(function () { doDelete(); });
+            } else {
+                doDelete();
+            }
+        }
+
+        // ============================================================
+        // Initial load
+        // ============================================================
+        window.addEventListener('DOMContentLoaded', function () {
+            lockAll();
+            showOverlay('Loading MAC Filter.');
+
+            fetch(CGI + '?action=status')
+                .then(function (r) { return r.json(); })
+                .then(function (status) {
+                    applyStatus(status);
+                    hideOverlay();
+                })
+                .catch(function () {
+                    overlay.classList.remove('visible');
+                    toastr["warning"]("Failed to load MAC filter status.", "Error");
+                });
+        });
+    </script>
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+
+</html>

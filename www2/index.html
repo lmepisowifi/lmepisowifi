@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255,255,255,.05);
+            gap: 12px;
+        }
+        
+        .status-row:last-child { border-bottom: none; }
+        .status-label { font-size: 13px; color: var(--text-secondary); white-space: nowrap; flex-shrink: 0; }
+        .status-value { font-size: 13px; color: var(--text-primary); text-align: right; word-break: break-all; }
+        .load-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: rgba(255,255,255,.07); margin-left: 4px; }
+        .load-badge.warn { background: rgba(255,152,0,.18); color: #ffb74d; }
+        .load-badge.high { background: rgba(244,67,54,.18); color: #ef9a9a; }
+        .skeleton { display: inline-block; background: linear-gradient(90deg,#2a2a2a 25%,#333 50%,#2a2a2a 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 3px; height: .85em; width: 120px; vertical-align: middle; }
+        @keyframes shimmer { from{background-position:200% 0} to{background-position:-200% 0} }
+        .pon-signal-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+        .pon-signal-badge.no-signal  { background: rgba(244,67,54,.15); color: #ef9a9a; }
+        .pon-signal-badge.has-signal { background: rgba(76,175,80,.15);  color: #81c784; }
+        .pon-signal-badge .dot, .port-status-badge .dot, .wan-status-badge .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+        .pon-signal-badge.no-signal .dot  { background: #ef9a9a; }
+        .pon-signal-badge.has-signal .dot { background: #81c784; }
+        .pon-no-signal { color: var(--text-secondary); font-style: italic; font-size: 12px; }
+        .port-status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+        .port-status-badge.port-up   { background: rgba(76,175,80,.15);  color: #81c784; }
+        .port-status-badge.port-down { background: rgba(255,255,255,.07); color: var(--text-secondary); }
+        .port-status-badge.port-unknown { background: rgba(255,152,0,.13); color: #ffb74d; }
+        .port-status-badge.port-up .dot   { background: #81c784; animation: port-pulse 2.4s ease-in-out infinite; }
+        .port-status-badge.port-down .dot { background: rgba(255,255,255,.25); }
+        .port-status-badge.port-unknown .dot { background: #ffb74d; }
+        @keyframes port-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+        .port-link-detail { font-size: 12px; color: var(--text-secondary); margin-left: 8px; }
+        .wan-status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+        .wan-status-badge.wan-up    { background: rgba(76,175,80,.15);  color: #81c784; }
+        .wan-status-badge.wan-down  { background: rgba(244,67,54,.15); color: #ef9a9a; }
+        .wan-status-badge.wan-other { background: rgba(255,152,0,.13);  color: #ffb74d; }
+        .wan-status-badge.wan-up .dot   { background: #81c784; animation: port-pulse 2.4s ease-in-out infinite; }
+        .wan-status-badge.wan-down .dot { background: #ef9a9a; }
+        .wan-status-badge.wan-other .dot { background: #ffb74d; }
+        .wan-iface-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+        .wan-iface-row:last-child { border-bottom: none; }
+        .wan-iface-name { font-size: 13px; font-family: monospace; color: var(--text-primary); min-width: 72px; }
+        .wan-iface-detail { font-size: 12px; color: var(--text-secondary); }
+        .wan-iface-detail strong { color: var(--text-primary); font-weight: 500; }
+        .wan-empty { font-size: 13px; color: var(--text-secondary); font-style: italic; padding: 2px 0; }
+        /* hotspot stats card */
+        .hsp-stat { flex: 1 1 0; min-width: 120px; display: flex; flex-direction: column; align-items: center; padding: 10px 16px; border-radius: 8px; background: rgba(255,255,255,.04); gap: 2px; }
+        .hsp-stat-val { font-size: 22px; font-weight: 700; color: var(--text-primary); }
+        .hsp-stat-lbl { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+        .hsp-stat-row { display: flex; gap: 8px; flex-wrap: wrap; }
+        .hsp-running-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .hsp-running-badge.on  { background: rgba(76,175,80,.15);  color: #81c784; }
+        .hsp-running-badge.off { background: rgba(255,255,255,.06); color: var(--text-secondary); }
+        .hsp-running-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+        /* Each card is injected wrapped in a .dash-card-slot div, which would
+           otherwise sit between .row#dash-grid and the .col-* element and break
+           Bootstrap's flex grid (cards render at raw %-widths, stacked and
+           unevenly sized on desktop). display:contents removes the wrapper from
+           the layout box tree so the inner .col-* becomes the row's direct flex
+           child again, restoring the 2-up, equal-height grid. */
+        .dash-card-slot { display: contents; }
+        /* Dashboard cards have very different heights (e.g. short "LAN Ports" vs
+           tall "System"). A wrapping 2-column flex/grid makes every row as tall as
+           its tallest card, so a short card leaves a big empty gap beneath it.
+           A CSS multi-column (masonry) flow instead lets the next card rise up to
+           fill that gap. display:contents on the slot means the inner .col-* are
+           the actual column items. */
+        .dash-card-slot > [class*="col-"] {
+            width: 100%;
+            max-width: 100%;
+            padding: 0;
+            margin: 0 0 var(--bs-gutter-y, 1rem);
+            break-inside: avoid;
+        }
+        /* Mobile: Bootstrap's .row > * gutter padding lands on .dash-card-slot
+           (display:contents, no box) and never reaches the inner .col-*.
+           The row's -8px negative margins eat into container's 12px padding
+           leaving only 4px each side — cards hug the screen edge.
+           Fix: zero the row negative margins and add explicit column padding
+           so cards sit ~20px from viewport on mobile. */
+        @media (max-width: 991.98px) {
+            #dash-grid { margin-left: 0; margin-right: 0; }
+            .dash-card-slot > [class*="col-"] { padding-left: 0.5rem; padding-right: 0.5rem; }
+        }
+        @media (min-width: 992px) {
+            #dash-grid {
+                display: block;                        /* override Bootstrap row flex */
+                margin: 0;                             /* drop Bootstrap .row negative margins */
+                column-count: 2;
+                column-gap: var(--bs-gutter-x, 1rem);
+            }
+            .dash-card-slot > [class*="col-"] {
+                padding: 0;                            /* no double-gutter in column-count layout */
+            }
+            /* Full-width cards (col-12 with no lg split, e.g. Hotspot / WAN)
+               span both columns instead of squeezing into one. */
+            .dash-card-slot > .col-12:not([class*="col-lg-"]) {
+                column-span: all;
+            }
+        }
+    </style>
+</head>
+<body>
+    <script src="/js/nav.js?v=1.0.0"></script>
+
+    <div class="container mt-4">
+        <div class="row g-3" id="dash-grid">
+            <!-- Cards injected by JS in layout order -->
+        </div>
+    </div>
+
+    <script>
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    function set(id, html) {
+        var el = document.getElementById(id);
+        if (el) el.innerHTML = html;
+    }
+    function esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function loadClass(v) {
+        var n = parseFloat(v);
+        return n >= 4 ? 'high' : n >= 2 ? 'warn' : '';
+    }
+    function sk(w) { return '<span class="skeleton"' + (w ? ' style="width:'+w+'"' : '') + '></span>'; }
+
+    // ── Card HTML skeletons ───────────────────────────────────────────────────
+    var CARD_HTML = {
+        system: [
+            '<div class="col-12 col-lg-6"><div class="card h-100">',
+            '<div class="card-header">System</div><div class="card-body">',
+            '<div class="status-row"><span class="status-label">Hardware S/N</span><span class="status-value" id="s-hwsn">'+sk('100px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Hostname</span><span class="status-value" id="s-hostname">'+sk()+'</span></div>',
+            '<div class="status-row"><span class="status-label">Architecture</span><span class="status-value" id="s-arch">'+sk('60px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Firmware Version</span><span class="status-value" id="s-fw">'+sk()+'</span></div>',
+            '<div class="status-row"><span class="status-label">Kernel Version</span><span class="status-value" id="s-kernel">'+sk('80px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Local Time</span><span class="status-value" id="s-date">'+sk('180px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Uptime</span><span class="status-value" id="s-uptime">'+sk('70px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Load Average</span><span class="status-value" id="s-load">'+sk('150px')+'</span></div>',
+            '<div class="status-row" style="flex-direction:column;align-items:stretch;gap:6px">',
+            '  <div style="display:flex;justify-content:space-between;align-items:baseline">',
+            '    <span class="status-label">CPU Usage</span><span class="status-value" id="s-cpu-text">'+sk('50px')+'</span></div>',
+            '  <div class="progress" style="height:5px;background:rgba(255,255,255,.07)">',
+            '    <div id="s-cpu-bar" class="progress-bar" role="progressbar" style="width:0%;transition:width .6s ease"></div></div></div>',
+            '<div class="status-row" style="flex-direction:column;align-items:stretch;gap:6px">',
+            '  <div style="display:flex;justify-content:space-between;align-items:baseline">',
+            '    <span class="status-label">RAM Usage</span><span class="status-value" id="s-mem-text">'+sk('80px')+'</span></div>',
+            '  <div class="progress" style="height:5px;background:rgba(255,255,255,.07)">',
+            '    <div id="s-mem-bar" class="progress-bar" role="progressbar" style="width:0%;transition:width .6s ease"></div></div></div>',
+            '<div class="status-row" style="flex-direction:column;align-items:stretch;gap:6px">',
+            '  <div style="display:flex;justify-content:space-between;align-items:baseline">',
+            '    <span class="status-label">Used Storage (/lmepisowifi)</span><span class="status-value" id="s-disk-text">'+sk('90px')+'</span></div>',
+            '  <div class="progress" style="height:5px;background:rgba(255,255,255,.07)">',
+            '    <div id="s-disk-bar" class="progress-bar" role="progressbar" style="width:0%;transition:width .6s ease"></div></div></div>',
+            '</div></div></div>'
+        ].join(''),
+
+        network: [
+            '<div class="col-12 col-lg-6"><div class="card h-100">',
+            '<div class="card-header">Network</div><div class="card-body">',
+            '<div class="status-row"><span class="status-label">GPON S/N</span><span class="status-value" id="s-gpon">'+sk()+'</span></div>',
+            '<div class="status-row"><span class="status-label">System MAC</span><span class="status-value" id="s-mac">'+sk()+'</span></div>',
+            '<div class="status-row" style="flex-direction:column;align-items:stretch;gap:6px">',
+            '  <div style="display:flex;justify-content:space-between;align-items:baseline">',
+            '    <span class="status-label">Active Connections</span><span class="status-value" id="s-ct-text">'+sk('70px')+'</span></div>',
+            '  <div class="progress" style="height:5px;background:rgba(255,255,255,.07)">',
+            '    <div id="s-ct-bar" class="progress-bar" role="progressbar" style="width:0%;transition:width .6s ease"></div></div></div>',
+            '</div></div></div>'
+        ].join(''),
+
+        lan: [
+            '<div class="col-12 col-lg-6"><div class="card h-100">',
+            '<div class="card-header">LAN Ports</div><div class="card-body">',
+            '<div class="status-row"><span class="status-label">LAN 1</span><span class="status-value" id="lan-p0">'+sk('140px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">LAN 2</span><span class="status-value" id="lan-p1">'+sk('140px')+'</span></div>',
+            '</div></div></div>'
+        ].join(''),
+
+        pon: [
+            '<div class="col-12 col-lg-6"><div class="card h-100">',
+            '<div class="card-header" style="justify-content:space-between">',
+            '  <span>PON Transceiver</span><span id="p-signal-badge">'+sk('70px')+'</span></div>',
+            '<div class="card-body">',
+            '<div class="status-row"><span class="status-label">Rx Power</span><span class="status-value" id="p-rx">'+sk()+'</span></div>',
+            '<div class="status-row"><span class="status-label">Tx Power</span><span class="status-value" id="p-tx">'+sk()+'</span></div>',
+            '<div class="status-row"><span class="status-label">Bias Current</span><span class="status-value" id="p-bias">'+sk('80px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Temperature</span><span class="status-value" id="p-temp">'+sk('75px')+'</span></div>',
+            '<div class="status-row"><span class="status-label">Voltage</span><span class="status-value" id="p-volt">'+sk('65px')+'</span></div>',
+            '</div></div></div>'
+        ].join(''),
+
+        wan: [
+            '<div class="col-12"><div class="card">',
+            '<div class="card-header">WAN Profile Status</div>',
+            '<div class="card-body" id="wan-profiles-body">',
+            '<div class="wan-iface-row">'+sk('72px')+sk('52px')+sk('130px')+sk('110px')+sk('88px')+sk('88px')+'</div>',
+            '</div></div></div>'
+        ].join(''),
+
+        hotspot: [
+            '<div class="col-12"><div class="card">',
+            '<div class="card-header" style="justify-content:space-between">',
+            '  <span>Hotspot Statistics</span>',
+            '  <span id="hsp-run-badge" class="hsp-running-badge off"><span class="dot"></span><span id="hsp-run-text">…</span></span>',
+            '</div>',
+            '<div class="card-body">',
+            '<div class="hsp-stat-row mb-3" id="hsp-stat-row">',
+            '  <div class="hsp-stat"><span class="hsp-stat-val" id="hsp-sessions">'+sk('36px')+'</span><span class="hsp-stat-lbl">Active Sessions</span></div>',
+            '  <div class="hsp-stat"><span class="hsp-stat-val" id="hsp-daily">'+sk('48px')+'</span><span class="hsp-stat-lbl">Today ₱</span></div>',
+            '  <div class="hsp-stat"><span class="hsp-stat-val" id="hsp-monthly">'+sk('48px')+'</span><span class="hsp-stat-lbl">This Month ₱</span></div>',
+            '  <div class="hsp-stat"><span class="hsp-stat-val" id="hsp-yearly">'+sk('48px')+'</span><span class="hsp-stat-lbl">This Year ₱</span></div>',
+            '</div>',
+            '<div class="d-flex gap-2">',
+            '  <a href="/hotspot.html" class="btn btn-sm btn-outline-secondary">Settings</a>',
+            '  <a href="/hotspot-sessions.html" class="btn btn-sm btn-outline-secondary">Sessions</a>',
+            '  <a href="/hotspot-income.html" class="btn btn-sm btn-outline-secondary">Income</a>',
+            '</div>',
+            '</div></div></div>'
+        ].join('')
+    };
+
+    var CARD_LABELS = {
+        system: 'System', network: 'Network', lan: 'LAN Ports',
+        pon: 'PON Transceiver', wan: 'WAN Profiles', hotspot: 'Hotspot Statistics'
+    };
+
+    var DEFAULT_ORDER = ['system','network','lan','pon','wan','hotspot'];
+
+    // ── Layout persistence ───────────────────────────────────��────────────────
+    // Layout is fetched from the server once at boot so all browsers/devices
+    // share the same card order.  _layout is null until the fetch resolves;
+    // buildGrid() is called only after it arrives.
+    var _layout = null;
+
+    function _defaultLayout() {
+        return DEFAULT_ORDER.map(function(id){return {id:id, visible:true};});
+    }
+
+    // ── Build DOM in layout order ─────────────────────────────────────────────
+    function buildGrid() {
+        var layout = _layout || _defaultLayout();
+        var grid = document.getElementById('dash-grid');
+        grid.innerHTML = '';
+        layout.forEach(function(entry){
+            if (!entry.visible) return;
+            var html = CARD_HTML[entry.id];
+            if (!html) return;
+            var wrap = document.createElement('div');
+            wrap.className = 'dash-card-slot';
+            wrap.setAttribute('data-card', entry.id);
+            wrap.innerHTML = html;
+            grid.appendChild(wrap);
+        });
+    }
+
+    // ── Data fetchers ─────────────────────────────────────────────────────────
+    function fetchStatic() {
+        fetch('/cgi-bin/lme.cgi?action=static')
+            .then(function(r){return r.json();})
+            .then(function(d){
+                set('s-hostname', esc(d.hostname)||'—');
+                set('s-arch',     esc(d.arch)||'—');
+                set('s-fw',       esc(d.sw_version)||'—');
+                set('s-kernel',   esc(d.kernel)||'—');
+                set('s-gpon',     esc(d.gpon_sn)||'—');
+                set('s-mac',      esc(d.mac)||'—');
+                set('s-hwsn',     esc(d.hw_serial_no)||'—');
+            })
+            .catch(function(){
+                ['s-hostname','s-arch','s-fw','s-kernel','s-gpon','s-mac','s-hwsn']
+                    .forEach(function(id){set(id,'—');});
+            });
+    }
+
+    function fetchDynamic() {
+        fetch('/cgi-bin/lme.cgi?action=dynamic')
+            .then(function(r){return r.json();})
+            .then(function(d){
+                set('s-date',   esc(d.date)||'—');
+                set('s-uptime', esc(d.uptime)||'—');
+                set('s-load',
+                    '<span class="load-badge '+loadClass(d.load1) +'">'+ esc(d.load1) +'</span>'+
+                    '<span class="load-badge '+loadClass(d.load5) +'">'+ esc(d.load5) +'</span>'+
+                    '<span class="load-badge '+loadClass(d.load15)+'">'+ esc(d.load15)+'</span>'+
+                    '<span style="font-size:10px;color:var(--text-secondary);margin-left:6px">1m · 5m · 15m</span>');
+                var cpuPct = d.cpu_pct||0;
+                set('s-cpu-text', cpuPct+'%');
+                var cpuBar = document.getElementById('s-cpu-bar');
+                if(cpuBar){ cpuBar.style.width=cpuPct+'%'; cpuBar.className='progress-bar'+(cpuPct>=75?' bg-danger':cpuPct>=50?' bg-warning':''); }
+                var pct = d.mem_pct||0;
+                set('s-mem-text', esc(d.mem_used_mb)+'/'+esc(d.mem_total_mb)+' MB');
+                var bar = document.getElementById('s-mem-bar');
+                if(bar){ bar.style.width=pct+'%'; bar.className='progress-bar'+(pct>=75?' bg-danger':pct>=50?' bg-warning':''); }
+                var diskPct = d.disk_pct||0;
+                if(d.disk_total_mb !== undefined){
+                    set('s-disk-text', esc(d.disk_used_mb)+'/'+esc(d.disk_total_mb)+' MB');
+                    var diskBar = document.getElementById('s-disk-bar');
+                    if(diskBar){ diskBar.style.width=diskPct+'%'; diskBar.className='progress-bar'+(diskPct>=90?' bg-danger':diskPct>=75?' bg-warning':''); }
+                }
+                var ctPct = d.ct_pct||0;
+                if(d.ct_count !== undefined){
+                    set('s-ct-text', esc(d.ct_count)+' / '+esc(d.ct_max));
+                    var ctBar = document.getElementById('s-ct-bar');
+                    if(ctBar){ ctBar.style.width=ctPct+'%'; ctBar.className='progress-bar'+(ctPct>=75?' bg-danger':ctPct>=50?' bg-warning':''); }
+                }
+            })
+            .catch(function(){});
+    }
+
+    function fetchLanLink() {
+        fetch('/cgi-bin/lme.cgi?action=lan_link_status')
+            .then(function(r){return r.json();})
+            .then(function(d){
+                function portHtml(p){
+                    var s=(p.status||'').toLowerCase();
+                    if(s==='up') return '<span class="port-status-badge port-up"><span class="dot"></span>Up</span><span class="port-link-detail">'+esc(p.speed)+' &middot; '+esc(p.duplex)+'</span>';
+                    if(s==='down') return '<span class="port-status-badge port-down"><span class="dot"></span>Down</span>';
+                    return '<span class="port-status-badge port-unknown"><span class="dot"></span>'+esc(p.status||'Unknown')+'</span>';
+                }
+                set('lan-p0', portHtml(d.port0));
+                set('lan-p1', portHtml(d.port1));
+            })
+            .catch(function(){ set('lan-p0','—'); set('lan-p1','—'); });
+    }
+
+    function fetchPon() {
+        fetch('/cgi-bin/lme.cgi?action=pon_transceiver')
+            .then(function(r){return r.json();})
+            .then(function(d){
+                var isInf=function(v){return v&&v.toLowerCase().indexOf('-inf')!==-1;};
+                var noSig=isInf(d.rx_power)||isInf(d.tx_power);
+                set('p-signal-badge', noSig
+                    ? '<span class="pon-signal-badge no-signal"><span class="dot"></span>No Signal</span>'
+                    : '<span class="pon-signal-badge has-signal"><span class="dot"></span>Signal OK</span>');
+                set('p-rx', isInf(d.rx_power)?'<span class="pon-no-signal">No Signal</span>':esc(d.rx_power));
+                set('p-tx', isInf(d.tx_power)?'<span class="pon-no-signal">No Signal</span>':esc(d.tx_power));
+                set('p-bias', esc(d.bias_current));
+                set('p-temp', esc(d.temperature));
+                set('p-volt', esc(d.voltage));
+            })
+            .catch(function(){
+                set('p-signal-badge','—');
+                ['p-rx','p-tx','p-bias','p-temp','p-volt'].forEach(function(id){set(id,'—');});
+            });
+    }
+
+    function fetchWanProfiles() {
+        fetch('/cgi-bin/lme.cgi?action=wan_profile_status')
+            .then(function(r){return r.json();})
+            .then(function(arr){
+                var body=document.getElementById('wan-profiles-body');
+                if(!body) return;
+                if(!arr||arr.length===0){ body.innerHTML='<span class="wan-empty">No WAN interfaces found</span>'; return; }
+                var html='';
+                arr.forEach(function(p){
+                    var st=(p.status||'').toLowerCase();
+                    var bc=st==='up'?'wan-up':st==='down'?'wan-down':'wan-other';
+                    var lbl=st.charAt(0).toUpperCase()+st.slice(1)||'?';
+                    html+='<div class="wan-iface-row">';
+                    html+='<span class="wan-iface-name">'+esc(p.ifname)+'</span>';
+                    html+='<span class="wan-status-badge '+bc+'"><span class="dot"></span>'+lbl+'</span>';
+                    html+='<span class="wan-iface-detail">IP:&nbsp;<strong>'+esc(p.ipaddr)+'</strong></span>';
+                    html+='<span class="wan-iface-detail">Mask:&nbsp;<strong>'+esc(p.subnetmask)+'</strong></span>';
+                    html+='<span class="wan-iface-detail">RX:&nbsp;<strong>'+esc(p.rx_mb)+'&thinsp;MB</strong></span>';
+                    html+='<span class="wan-iface-detail">TX:&nbsp;<strong>'+esc(p.tx_mb)+'&thinsp;MB</strong></span>';
+                    html+='</div>';
+                });
+                body.innerHTML=html;
+            })
+            .catch(function(){
+                var body=document.getElementById('wan-profiles-body');
+                if(body) body.innerHTML='<span class="wan-empty">Failed to load WAN profile status</span>';
+            });
+    }
+
+    function fetchHotspotStats() {
+        fetch('/cgi-bin/hotspot.cgi?action=hotspot_stats', {cache:'no-store'})
+            .then(function(r){return r.json();})
+            .then(function(d){
+                var badge=document.getElementById('hsp-run-badge');
+                var btxt=document.getElementById('hsp-run-text');
+                if(badge&&btxt){
+                    if(d.running){ badge.className='hsp-running-badge on'; btxt.textContent='Running'; }
+                    else          { badge.className='hsp-running-badge off'; btxt.textContent='Stopped'; }
+                }
+                set('hsp-sessions', String(d.sessions||0));
+                var inc=d.income||{};
+                set('hsp-daily',   String(inc.daily||0));
+                set('hsp-monthly', String(inc.monthly||0));
+                set('hsp-yearly',  String(inc.yearly||0));
+            })
+            .catch(function(){
+                set('hsp-sessions','—'); set('hsp-daily','—');
+                set('hsp-monthly','—');  set('hsp-yearly','—');
+            });
+    }
+
+    // ── Polling map — which fetchers run and how often ────────────────────────
+    var POLLS = [
+        { fn: fetchDynamic,      ms: 5000  },
+        { fn: fetchLanLink,      ms: 5000  },
+        { fn: fetchPon,          ms: 10000 },
+        { fn: fetchWanProfiles,  ms: 10000 },
+        { fn: fetchHotspotStats, ms: 15000 }
+    ];
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+    window.addEventListener('DOMContentLoaded', function(){
+        // Fetch layout from server first; build grid only after it arrives so
+        // the card order is correct from the very first paint.  Data fetchers
+        // are also deferred until after the grid exists so their set() calls
+        // find the right DOM elements on the first response.
+        fetch('/cgi-bin/lme.cgi?action=get_layout', {cache:'no-store'})
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                if (Array.isArray(d)) {
+                    var ids = d.map(function(c){return c.id;});
+                    DEFAULT_ORDER.forEach(function(id){
+                        if (ids.indexOf(id) === -1) d.push({id:id, visible:true});
+                    });
+                    _layout = d;
+                } else {
+                    _layout = _defaultLayout();
+                }
+            })
+            .catch(function(){ _layout = _defaultLayout(); })
+            .then(function(){
+                buildGrid();
+                fetchStatic();
+                fetchDynamic();
+                fetchLanLink();
+                fetchPon();
+                fetchWanProfiles();
+                fetchHotspotStats();
+                POLLS.forEach(function(p){ setInterval(p.fn, p.ms); });
+            });
+    });
+    </script>
+
+    <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+    <script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+    <script src="/js/toastr.min.js?v=1.0.0"></script>
+</body>
+</html>
+
