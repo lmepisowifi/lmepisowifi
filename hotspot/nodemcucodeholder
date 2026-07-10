@@ -966,8 +966,8 @@ void handle_update() {
     }
     String md5   = coinServer.arg("md5");
     String token = coinServer.arg("token");
+    
     // Signed, single-use, and bound to the exact image we may flash:
-    //   token = md5(PSK:nonce:md5:update)
     bool good = sig_ok(token, String(cfg.psk) + ":" + resetNonce + ":" + md5 + ":update");
     resetNonce = "";   // single-use: burn the nonce regardless of outcome
     if (!good) {
@@ -984,39 +984,92 @@ void handle_update() {
         coinServer.send(200, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
         return;
     }
+    
     // ACK first so the portal's wget gets a definitive reply before we spend
     // several seconds downloading + flashing (and then rebooting on success).
-    coinServer.send(200, "application/json",
-        "{\"ok\":true,\"msg\":\"updating, will reboot on success\"}");
+    coinServer.send(200, "application/json", "{\"ok\":true,\"msg\":\"updating, will reboot on success\"}");
     delay(50);                 // let the reply drain before we block on the download
 
     setCoinAcceptor(false);    // block coins while we flash
 
-    // Pull from our own portal over the trusted hotspot LAN (plain HTTP — no TLS
-    // memory pressure on the ESP; the link is already IP-restricted + signed).
-    String url = String("http://") + cfg.portal_ip + ":" + cfg.portal_port
-                 + "/firmware/coin_nodemcu.bin";
+    // Pull from our own portal over the trusted hotspot LAN
+    String url = String("http://") + cfg.portal_ip + ":" + cfg.portal_port + "/firmware/coin_nodemcu.bin";
     WiFiClient uc;
     HTTPClient http;
-    if (!http.begin(uc, url)) return;
+    
+    // Force HTTP/1.0 to completely bypass chunked encoding issues
+    http.useHTTP10(true); 
+
+    if (!http.begin(uc, url)) {
+        Serial.println("OTA: http.begin failed");
+        return;
+    }
+    
     http.setTimeout(20000);
     int code = http.GET();
-    if (code != HTTP_CODE_OK) { http.end(); return; }
+    Serial.printf("OTA HTTP %d\n", code);
+
+    if (code != HTTP_CODE_OK) {
+        http.end();
+        return;
+    }
+    
     int len = http.getSize();
+    Serial.printf("OTA size=%d\n", len);
     if (len <= 0) { http.end(); return; }
 
-    if (!Update.begin((size_t)len)) { http.end(); return; }  // no OTA slot / too big
-    Update.setMD5(md5.c_str());                              // enforce integrity
-    size_t written = Update.writeStream(*http.getStreamPtr());
+    if (!Update.begin((size_t)len)) {
+        Serial.printf("Update.begin failed: %s\n", Update.getErrorString());
+        http.end();
+        return;
+    }
+    
+    Update.setMD5(md5.c_str()); // Enforce integrity
+
+    // ── NEW ROBUST CHUNK LOOP ──
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buff[512]; // Tiny buffer to easily handle slower network packets
+    size_t written = 0;
+    unsigned long lastDataTime = millis();
+
+    Serial.println("Starting manual chunk write...");
+
+    while (http.connected() && written < (size_t)len) {
+        size_t available_bytes = stream->available();
+        
+        if (available_bytes > 0) {
+            int bytesRead = stream->readBytes(buff, min(available_bytes, sizeof(buff)));
+            if (bytesRead > 0) {
+                Update.write(buff, bytesRead);
+                written += bytesRead;
+                lastDataTime = millis(); // Reset stream timer
+            }
+        } else {
+            delay(10); // Pause briefly to let the router buffer catch up
+            if (millis() - lastDataTime > 7000) { // 7 second network drop timeout
+                Serial.println("\nOTA Error: Stream went dry.");
+                break;
+            }
+        }
+    }
+
+    Serial.printf("Written %u/%d\n", written, len);
     http.end();
 
-    if (written == (size_t)len && Update.end()) {   // end() verifies size + MD5
-        delay(200);
-        ESP.restart();                              // boot into the new image
+    if (written == (size_t)len) {
+        if (Update.end()) {
+            Serial.println("OTA Success! Rebooting into new firmware...");
+            delay(200);
+            ESP.restart(); // Boot into the new image
+        } else {
+            Serial.printf("Update.end failed: %s\n", Update.getErrorString());
+        }
+    } else {
+        Serial.println("Update aborted: File size mismatch.");
+        Update.end(); 
     }
-    // else: download short or MD5 mismatch → image NOT committed, current
-    // firmware stays live. Portal sees FW_VERSION unchanged and can retry.
 }
+
 
 bool connectWiFi() {
     WiFi.persistent(false);        // don't rewrite creds to flash every boot (wear)
