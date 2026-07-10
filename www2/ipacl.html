@@ -68,13 +68,12 @@
         </div>
     </div>
 
-    <script src="/js/nav.js?v=1.0.0"></script>
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
     <div class="container mt-4">
         <div class="card">
             <div class="card-header">IP Access Control</div>
             <div class="card-body p-0">
-                <p class="acl-note">Controls which services are reachable from WAN, LAN, both, or neither. For SSH, Blocked stops the dropbear daemon entirely; any other level starts it on the configured port.</p>
                 <table class="acl-table" id="acl-table">
                     <tbody id="acl-tbody">
                         <!-- rows populated by JS -->

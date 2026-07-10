@@ -3,6 +3,12 @@
 # ota.sh — GitHub-based OTA updater for lmepisowifi
 # RTL9607C ONT | rootfs = squashfs (ro) | /lmepisowifi = ubifs (rw)
 #
+# Metadata (manifest + changelog) is fetched through the jsDelivr CDN
+# (cdn.jsdelivr.net/gh/...) instead of raw.githubusercontent.com to avoid
+# GitHub's raw-file rate limit (HTTP 429). See cdnify()/fetch() below. The
+# release tarball itself still comes from GitHub Releases (jsDelivr does not
+# serve release binaries) and its sha256 is always verified.
+#
 # This is a FILE-SYNC OTA (not a firmware flash): it downloads a release
 # tarball from GitHub, verifies its sha256, atomically swaps the app trees
 # under /lmepisowifi, restarts the portal + admin httpd + hotspot watchdog,
@@ -66,15 +72,43 @@ notify() {
 # JSON string escaper (backslash + double-quote only — enough for our fields).
 json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# Route GitHub raw-file URLs through the jsDelivr CDN to dodge
+# raw.githubusercontent.com's rate limit (HTTP 429). jsDelivr caches raw repo
+# files globally and does not rate-limit like GitHub raw does.
+#   https://raw.githubusercontent.com/OWNER/REPO/REF/PATH
+#     -> https://cdn.jsdelivr.net/gh/OWNER/REPO@REF/PATH
+# Only raw.githubusercontent.com is rewritten. Release-asset URLs
+# (github.com/.../releases/download/...) are left untouched because jsDelivr's
+# /gh/ endpoint does NOT serve GitHub release binaries, and those downloads are
+# not subject to the raw rate limit anyway.
+cdnify() { # cdnify <url> -> prints CDN url (or the original url unchanged)
+    case "$1" in
+        https://raw.githubusercontent.com/*)
+            _rest=${1#https://raw.githubusercontent.com/}
+            _owner=$(echo "$_rest" | cut -d/ -f1)
+            _repo=$(echo  "$_rest" | cut -d/ -f2)
+            _ref=$(echo   "$_rest" | cut -d/ -f3)
+            _path=$(echo  "$_rest" | cut -d/ -f4-)
+            if [ -n "$_owner" ] && [ -n "$_repo" ] && [ -n "$_ref" ] && [ -n "$_path" ]; then
+                echo "https://cdn.jsdelivr.net/gh/${_owner}/${_repo}@${_ref}/${_path}"
+            else
+                echo "$1"
+            fi
+            ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # wget wrapper: HTTPS-only, retries, timeouts, writable -O target, cert handling.
 fetch() { # fetch <url> <outfile>
+    _u=$(cdnify "$1")
     _wf="--https-only -t 3 -T 30 --retry-connrefused -U lmepisowifi-ota"
     if [ -f "$OTA_CACERT" ]; then
         _wf="$_wf --ca-certificate=$OTA_CACERT"
     else
         _wf="$_wf --no-check-certificate"
     fi
-    wget $_wf -q -O "$2" "$1"
+    wget $_wf -q -O "$2" "$_u"
 }
 
 # parse a key=value line from the manifest (strips CR)
@@ -108,7 +142,17 @@ do_check() {
         return 0
     fi
     if ! fetch "$OTA_MANIFEST_URL" "$DL/manifest.txt"; then
-        printf '{"error":"could not reach GitHub","current":"%s"}\n' "$(json_esc "$_cur")"
+        if grep -Eqi 'rate.limit|Too Many Requests|terms.*service' "$DL/manifest.txt" 2>/dev/null; then
+            printf '{"error":"update server rate limited - wait a few minutes and try again","current":"%s"}\n' "$(json_esc "$_cur")"
+        else
+            printf '{"error":"could not reach update server (jsDelivr/GitHub)","current":"%s"}\n' "$(json_esc "$_cur")"
+        fi
+        return 0
+    fi
+    # Guard: the CDN/GitHub may return an error body with HTTP 200 (wget exits 0
+    # but the file is an error page, not a real manifest).
+    if grep -Eqi 'rate.limit|Too Many Requests|terms.*service' "$DL/manifest.txt" 2>/dev/null; then
+        printf '{"error":"update server rate limited - wait a few minutes and try again","current":"%s"}\n' "$(json_esc "$_cur")"
         return 0
     fi
     _lat=$(mval version)
@@ -150,10 +194,15 @@ do_apply() {
         set_status "failed"; log "ERROR: manifest incomplete (need version/url/sha256)"; return 1
     fi
 
-    # SECURITY: pin the download to our own repo's Releases.
+    # SECURITY: pin the download to our own repo. Accept both a GitHub Release
+    # asset and a jsDelivr-served file from the same repo tree
+    # (cdn.jsdelivr.net/gh/OWNER/REPO@...), so tarballs can be moved onto the CDN
+    # later without touching this guard. The manifest sha256 is verified below
+    # regardless of source, so a tampered download is always rejected.
     case "$_url" in
         "https://github.com/$OTA_REPO/releases/download/"*) : ;;
-        *) set_status "failed"; log "ERROR: refusing url outside repo Releases: $_url"; return 1 ;;
+        "https://cdn.jsdelivr.net/gh/$OTA_REPO@"*) : ;;
+        *) set_status "failed"; log "ERROR: refusing url outside repo (Releases or jsDelivr): $_url"; return 1 ;;
     esac
 
     set_status "downloading"; log "downloading $_lat"

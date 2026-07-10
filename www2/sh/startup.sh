@@ -77,3 +77,22 @@ wait_for_iface() {
 # --- BEGIN_OTA_CHECK ---
 ( sleep 900; [ -x /lmepisowifi/ota.sh ] && sh /lmepisowifi/ota.sh cron >/dev/null 2>&1 ) &
 # --- END_OTA_CHECK ---
+
+# ---------------------------------------------------------------------------
+# Band Steering Watchdog.
+# libmib.so re-applies the WRONG per-radio stactrl_prefer_band values to the
+# driver on every boot / wlan_apply restart (the inverted-preference bug).
+# It only starts when WIFI_STA_CONTROL is 1 (5GHz) or 3 (2.4GHz); when steering
+# is disabled the monitor process is never spawned. When enabled it waits for
+# both radios, corrects the driver state once, then keeps a lightweight monitor
+# loop re-checking every 60s so the fix survives any later libmib re-clobber.
+# Managed alongside wlanadvanced.cgi — do NOT edit by hand.
+# ---------------------------------------------------------------------------
+# --- BEGIN_BANDSTEER_WD ---
+_BSWD_MODE=$(mib get WIFI_STA_CONTROL | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+if [ "$_BSWD_MODE" = "1" ] || [ "$_BSWD_MODE" = "3" ]; then
+    ( wait_for_iface wlan0 && wait_for_iface wlan1 \
+        && sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once \
+        && sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh monitor 60 ) &
+fi
+# --- END_BANDSTEER_WD ---

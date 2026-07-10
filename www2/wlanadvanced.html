@@ -48,8 +48,8 @@
         .setting-label  { font-size: 14px; font-weight: 500; line-height: 1.3; }
         .setting-desc   { font-size: 11px; color: var(--text-secondary, #888); margin-top: 1px; }
 
-        /* ---- TX Beamforming reveal (shown only when MIMO is on) ---- */
-        .txbf-reveal {
+        /* ---- TX Beamforming MIMO reveal (shown only when TX Beamforming is on) ---- */
+        .mimo-reveal {
             overflow: hidden;
             max-height: 0;
             opacity: 0;
@@ -58,7 +58,7 @@
             pointer-events: none;
             transition: max-height 0.32s ease, opacity 0.25s ease, margin-bottom 0.32s ease;
         }
-        .txbf-reveal.show {
+        .mimo-reveal.show {
             max-height: 72px;
             opacity: 1;
             margin-bottom: 0 !important; /* the inner setting-row provides spacing */
@@ -161,7 +161,7 @@
         </div>
     </div>
 
-    <script src="/js/nav.js?v=1.0.0"></script>
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
     <div class="container mt-4" style="max-width:520px;">
 
@@ -172,6 +172,36 @@
                 <option value="24">2.4 GHz</option>
                 <option value="5">5 GHz</option>
             </select>
+        </div>
+
+        <!-- Band Steering (global — one WIFI_STA_CONTROL key shared by both radios) -->
+        <div class="card mb-3" id="card-bandsteer">
+            <div class="card-header d-flex align-items-center gap-2" style="flex-wrap:wrap; row-gap:4px;">
+                <span style="font-size:12px; white-space:nowrap;">Band Steering</span>
+                <span class="mode-badge ap">both radios</span>
+            </div>
+            <div class="card-body pb-2">
+                <div class="setting-row" style="align-items:flex-start;">
+                    <div style="flex:1; margin-right:8px;">
+                        <div class="setting-label">Preferred band</div>
+                        <div class="setting-desc">Nudges dual-band clients toward one radio. Global — applies to 2.4 GHz and 5 GHz together.</div>
+                    </div>
+                    <select id="bandsteer-sel" class="form-select form-select-sm" style="max-width:190px;">
+                        <option value="0">Disabled</option>
+                        <option value="1">Enabled — 5 GHz preferred</option>
+                        <option value="3">Enabled — 2.4 GHz preferred</option>
+                    </select>
+                </div>
+                <!-- Shown only when Unified SSID is OFF: band steering is unavailable -->
+                <div class="field-note" id="bandsteer-locked-note" style="display:none;">
+                    🔗 Band steering needs one shared network across both radios. Turn on
+                    <strong>Unified SSID</strong> on the WiFi (Basic) page to enable it.
+                </div>
+                <div class="mt-3">
+                    <button type="button" class="btn btn-primary w-100" id="bandsteer-save-btn"
+                            onclick="saveBandSteering()">Save</button>
+                </div>
+            </div>
         </div>
 
         <!-- Iface cards injected here (Main AP, VAPs, VXD) -->
@@ -229,23 +259,24 @@
             if (card) card.classList.toggle('collapsed');
         }
 
-        /** Toggle MIMO on card `id` and show/hide its txbf row accordingly. */
-        function toggleMimo(id) {
-            const mimoEl = document.getElementById(id + '-mimo-toggle');
-            const nowOn = mimoEl.classList.toggle('on');
-            mimoEl.setAttribute('aria-checked', nowOn ? 'true' : 'false');
-            applyTxbfVisibility(id, nowOn);
+        /** Toggle TX Beamforming on card `id` and show/hide its TX Beamforming MIMO row accordingly. */
+        function toggleTxbf(id) {
+            const txbfEl = document.getElementById(id + '-txbf-toggle');
+            const nowOn = txbfEl.classList.toggle('on');
+            txbfEl.setAttribute('aria-checked', nowOn ? 'true' : 'false');
+            applyMimoVisibility(id, nowOn);
         }
 
-        /** Show/hide a card's TX Beamforming row based on its MIMO state. */
-        function applyTxbfVisibility(id, mimoOn) {
-            const revealEl = document.getElementById(id + '-txbf-reveal');
-            if (mimoOn) {
+        /** Show/hide a card's TX Beamforming MIMO row based on its TX Beamforming state. */
+        function applyMimoVisibility(id, txbfOn) {
+            const revealEl = document.getElementById(id + '-mimo-reveal');
+            if (txbfOn) {
                 revealEl.classList.add('show');
             } else {
                 revealEl.classList.remove('show');
-                // Force txbf off whenever MIMO is disabled
-                setToggle(id + '-txbf-toggle', false);
+                // TX Beamforming MIMO requires TX Beamforming — force it off
+                // whenever TX Beamforming is disabled
+                setToggle(id + '-mimo-toggle', false);
             }
         }
 
@@ -301,10 +332,36 @@
             const bandSel = document.getElementById('band-select-main');
             if (bandSel) bandSel.disabled = !enabled;
             document.querySelectorAll(
-                '#ifaces-container input, #ifaces-container select, #ifaces-container button'
+                '#ifaces-container input, #ifaces-container select, #ifaces-container button, ' +
+                '#card-bandsteer select, #card-bandsteer button'
             ).forEach(el => { el.disabled = !enabled; });
             document.querySelectorAll('#ifaces-container .wlan-toggle')
                 .forEach(el => el.classList.toggle('disabled-ui', !enabled));
+            // Band steering stays locked whenever Unified SSID is off, even
+            // once the rest of the form is re-enabled after a load.
+            if (enabled) applyBandSteerGating();
+        }
+
+        // --------------------------------------------------------
+        // Band steering availability — only usable when Unified SSID is on
+        // --------------------------------------------------------
+        function applyBandSteerGating() {
+            const unified = currentStatus && currentStatus.unified_ssid === 1;
+            const sel  = document.getElementById('bandsteer-sel');
+            const btn  = document.getElementById('bandsteer-save-btn');
+            const note = document.getElementById('bandsteer-locked-note');
+            if (!sel || !btn || !note) return;
+            if (unified) {
+                sel.disabled = false;
+                btn.disabled = false;
+                note.style.display = 'none';
+            } else {
+                // Not available: reflect the disabled state and lock the controls.
+                sel.value = '0';
+                sel.disabled = true;
+                btn.disabled = true;
+                note.style.display = 'block';
+            }
         }
 
         // --------------------------------------------------------
@@ -390,29 +447,29 @@
                     </div>
                     <div class="card-body pb-2">
 
-                        <!-- MIMO -->
+                        <!-- TX Beamforming -->
                         <div class="setting-row">
                             <div>
-                                <div class="setting-label">MIMO</div>
-                                <div class="setting-desc">Multi-user MIMO (MU-MIMO)</div>
+                                <div class="setting-label">TX Beamforming</div>
+                                <div class="setting-desc">Steers signal toward clients</div>
                             </div>
-                            <div id="${id}-mimo-toggle" class="wlan-toggle"
-                                 onclick="toggleMimo('${id}')" role="switch" aria-checked="false"
-                                 title="Toggle MIMO">
+                            <div id="${id}-txbf-toggle" class="wlan-toggle"
+                                 onclick="toggleTxbf('${id}')" role="switch" aria-checked="false"
+                                 title="Toggle TX Beamforming">
                                 <div class="wlan-toggle-knob"></div>
                             </div>
                         </div>
 
-                        <!-- TX Beamforming — revealed only when MIMO is on -->
-                        <div id="${id}-txbf-reveal" class="txbf-reveal">
+                        <!-- TX Beamforming MIMO — revealed only when TX Beamforming is on -->
+                        <div id="${id}-mimo-reveal" class="mimo-reveal">
                             <div class="setting-row">
                                 <div>
-                                    <div class="setting-label">TX Beamforming</div>
-                                    <div class="setting-desc">Steers signal toward clients (requires MIMO)</div>
+                                    <div class="setting-label">TX Beamforming MIMO</div>
+                                    <div class="setting-desc">Multi-user beamforming, MU-MIMO (requires TX Beamforming)</div>
                                 </div>
-                                <div id="${id}-txbf-toggle" class="wlan-toggle"
-                                     onclick="localToggle('${id}-txbf-toggle')" role="switch" aria-checked="false"
-                                     title="Toggle TX Beamforming">
+                                <div id="${id}-mimo-toggle" class="wlan-toggle"
+                                     onclick="localToggle('${id}-mimo-toggle')" role="switch" aria-checked="false"
+                                     title="Toggle TX Beamforming MIMO">
                                     <div class="wlan-toggle-knob"></div>
                                 </div>
                             </div>
@@ -551,7 +608,7 @@
                 document.getElementById(id + '-tx-restrict').value = iface.tx_restrict;
                 document.getElementById(id + '-rx-restrict').value = iface.rx_restrict;
 
-                applyTxbfVisibility(id, iface.mimo == 1);
+                applyMimoVisibility(id, iface.txbf == 1);
 
                 const rateAdaptive = iface.rate_adaptive == 1;
                 setToggle(id + '-rateadapt-toggle', rateAdaptive);
@@ -563,6 +620,13 @@
                 applyRateFixVisibility(id, !rateAdaptive);
                 updateBandGatingForCard(id);
             });
+
+            // Band steering is global (same value on every band) — sync the
+            // dropdown from the latest status alongside the per-iface cards.
+            const bsSel = document.getElementById('bandsteer-sel');
+            if (bsSel && currentStatus) {
+                bsSel.value = String(currentStatus.band_steering ?? 0);
+            }
         }
 
         // --------------------------------------------------------
@@ -624,9 +688,10 @@
         // --------------------------------------------------------
         function saveAdvanced(idx) {
             const id    = 'adv-' + idx;
-            const mimoOn   = isOn(id + '-mimo-toggle');
-            // txbf is only meaningful (and visible) when MIMO is on; force 0 otherwise
-            const txbfOn   = mimoOn && isOn(id + '-txbf-toggle');
+            const txbfOn   = isOn(id + '-txbf-toggle');
+            // TX Beamforming MIMO is only meaningful (and visible) when TX
+            // Beamforming is on — it requires TX Beamforming to be enabled first
+            const mimoOn   = txbfOn && isOn(id + '-mimo-toggle');
             // mc2u_disable is inverted: toggle ON → mc2u_disable=0 (feature enabled)
             const mc2uDis  = isOn(id + '-mc2u-toggle') ? 0 : 1;
             const sha256On = isOn(id + '-sha256-toggle');
@@ -702,6 +767,32 @@
                 }).catch(() => {});
                 setTimeout(() => pollUntilBack(), 4000);
             }
+        }
+
+        // --------------------------------------------------------
+        // Save global band steering (WIFI_STA_CONTROL — both radios)
+        // --------------------------------------------------------
+        function saveBandSteering() {
+            const val     = document.getElementById('bandsteer-sel').value;
+            // Guard: enabling (1/3) requires Unified SSID. Mirrors the CGI check.
+            if (val !== '0' && !(currentStatus && currentStatus.unified_ssid === 1)) {
+                toastr["warning"]('Turn on Unified SSID on the WiFi (Basic) page before enabling band steering.', "Unavailable");
+                applyBandSteerGating();
+                return;
+            }
+            const body    = 'band_steering=' + encodeURIComponent(val);
+            const postUrl = CGI + '?band=' + currentBand + '&action=save_bandsteer';
+
+            setFormEnabled(false);
+            // Applying band steering restarts WiFi on both radios, so reuse the
+            // same countdown + poll-until-back flow as a live per-interface save.
+            startCountdown();
+            fetch(postUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: body
+            }).catch(() => {});
+            setTimeout(() => pollUntilBack(), 4000);
         }
 
         // --------------------------------------------------------

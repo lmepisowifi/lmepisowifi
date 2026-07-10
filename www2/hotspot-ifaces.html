@@ -61,6 +61,11 @@
         .iface-state.up   { background: rgba(76,175,80,.2); color: #81c784; }
         .iface-state.down { background: rgba(255,255,255,.07); color: #888; }
 
+        /* ── Legend ───────────────────────────────────────────── */
+        .iface-legend { display:flex; flex-wrap:wrap; gap:8px 16px; }
+        .legend-item { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--text-secondary); }
+        .legend-dot { display:inline-block; width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+
         /* ── Bridge members ───────────────────────────────────── */
         .bridge-member {
             display: flex; align-items: center; justify-content: space-between;
@@ -115,7 +120,7 @@
     </div>
 </div>
 
-<script src="/js/nav.js?v=1.0.0"></script>
+<script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
 <div class="container mt-4" style="max-width:860px;">
 
@@ -134,7 +139,7 @@
     <div class="card mb-3">
         <div class="card-header">Bridge Interface</div>
         <div class="card-body">
-            <div class="row g-3 align-items-end">
+            <div class="row g-3">
                 <div class="col-12 col-sm-5">
                     <label class="form-label">Bridge Device Name</label>
                     <input type="text" class="form-control" id="bridge-name" placeholder="br1">
@@ -149,10 +154,10 @@
                     <label class="form-label">Portal Port</label>
                     <input type="number" class="form-control" id="portal-port" placeholder="808" min="1" max="65535" oninput="checkPortalPort()">
                     <div class="field-hint">HTTP port for the portal</div>
-                    <div class="field-hint" id="port80-warning" style="display:none;color:var(--bs-danger,#dc3545);">
-                        ⚠ Port 80 also kills the router's own "boa" admin httpd and clears any vendor firewall rules blocking port 80, so the portal can bind it. Runs continuously as a watchdog while set to 80.
-                    </div>
                 </div>
+            </div>
+            <div class="field-hint mt-2" id="port80-warning" style="display:none;color:var(--bs-danger,#dc3545);">
+                ⚠ Port 80 also stops the router's own admin page and clears firewall rules blocking it, so the portal can bind that port instead — it then runs continuously as a watchdog.
             </div>
         </div>
     </div>
@@ -172,15 +177,14 @@
     <div class="card mb-3">
         <div class="card-header">Available Interfaces</div>
         <div class="card-body">
-            <div class="field-hint mb-3">
-                Tap a card to add or remove it from <code>HOTSPOT_INTERFACES</code>.
-                &nbsp;
-                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#81c784;margin-right:3px;vertical-align:middle;"></span><span style="color:#81c784;">Green</span> = in bridge now.
-                &nbsp;
-                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.5);margin-right:3px;vertical-align:middle;"></span><span style="color:var(--text-primary);">White ✓</span> = selected in config.
-                &nbsp;
-                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#e67e22;margin-right:3px;vertical-align:middle;"></span><span style="color:#e67e22;">Amber ×</span> = in bridge but removed from config.
-                Interfaces beginning with <code>lo</code>, <code>br</code>, <code>sit</code> are hidden.
+            <div class="field-hint mb-2">
+                Tap a card to add or remove it from <code>HOTSPOT_INTERFACES</code>. Interfaces beginning
+                with <code>lo</code>, <code>br</code>, <code>sit</code> are hidden.
+            </div>
+            <div class="iface-legend mb-3">
+                <span class="legend-item"><span class="legend-dot" style="background:#81c784;"></span><span style="color:#81c784;">Green</span> — in bridge now</span>
+                <span class="legend-item"><span class="legend-dot" style="background:rgba(255,255,255,.5);"></span><span style="color:var(--text-primary);">White ✓</span> — selected in config</span>
+                <span class="legend-item"><span class="legend-dot" style="background:#e67e22;"></span><span style="color:#e67e22;">Amber ×</span> — in bridge, removed from config</span>
             </div>
             <div class="iface-grid" id="iface-grid">
                 <div style="color:var(--text-secondary);font-size:13px;grid-column:1/-1;">Loading interfaces…</div>

@@ -43,12 +43,14 @@
         .field-row { margin-bottom:12px; }
         .field-row label { font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px; }
         /* toggle */
-        .nf-toggle { width:46px; height:26px; border-radius:13px; background:#444; position:relative;
-            cursor:pointer; transition:background .25s; flex-shrink:0; }
-        .nf-toggle::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px;
-            border-radius:50%; background:#fff; transition:transform .25s; }
-        .nf-toggle.on { background:#0d6efd; }
-        .nf-toggle.on::after { transform:translateX(20px); }
+        .wlan-toggle { width:50px; height:28px; border-radius:14px; background:#555;
+            position:relative; cursor:pointer; transition:background .25s; flex-shrink:0; user-select:none; }
+        .wlan-toggle.on { background:#ffffff; }
+        .wlan-toggle.disabled-ui { opacity:0.35; pointer-events:none; }
+        .wlan-toggle-knob { position:absolute; width:20px; height:20px; border-radius:50%;
+            background:#fff; top:4px; left:4px; transition:left .25s,background .25s;
+            box-shadow:0 1px 4px rgba(0,0,0,.5); }
+        .wlan-toggle.on .wlan-toggle-knob { left:26px; background:#555; }
     </style>
 </head>
 <body>
@@ -61,7 +63,7 @@
     </div>
 </div>
 
-<script src="/js/nav.js?v=1.0.0"></script>
+<script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
 <div class="container mt-4" style="max-width:960px;">
 
@@ -94,10 +96,6 @@
                 <span id="inc-date"></span>
                 <span id="inc-sync"></span>
             </div>
-            <div class="form-hint" style="margin-top:10px;">
-                Income counts coin-slot sales. Buckets reset automatically when the day, month, or year
-                changes (using NTP-synced time). Stored in <code>/lmepisowifi/hotspot_data/</code>.
-            </div>
         </div>
     </div>
 
@@ -107,7 +105,10 @@
         <div class="card-body">
             <div class="controls-row mb-3">
                 <span style="font-size:13px;">Enable alerts</span>
-                <div class="nf-toggle" id="nf-enabled" onclick="toggleEnabled()"></div>
+                <div class="wlan-toggle" id="nf-enabled" onclick="toggleEnabled()"
+                     role="switch" aria-checked="false" title="Enable alerts">
+                    <div class="wlan-toggle-knob"></div>
+                </div>
                 <span id="nf-enabled-label" style="font-size:12px;color:var(--text-secondary);">Off</span>
             </div>
 
@@ -146,12 +147,6 @@
                 <button class="btn btn-primary" id="nf-save" onclick="saveNotify()">Save</button>
                 <button class="btn btn-outline-secondary" id="nf-test" onclick="testNotify()">Send Test</button>
                 <span class="status-txt" id="nf-status"></span>
-            </div>
-
-            <div class="form-hint" style="margin-top:14px;">
-                Alerts fire on: coin sales (amount, time added, total, remaining), session pauses &amp; resumes,
-                session expiry, voucher redemptions, anti-troll suspensions, and income reports.
-                Requires the device to reach the internet over HTTPS.
             </div>
         </div>
     </div>
@@ -278,6 +273,7 @@ function setEnabledUI(on){
     var t = document.getElementById('nf-enabled');
     var l = document.getElementById('nf-enabled-label');
     t.classList.toggle('on', _enabled);
+    t.setAttribute('aria-checked', _enabled ? 'true' : 'false');
     l.textContent = _enabled ? 'On' : 'Off';
 }
 function toggleEnabled(){ setEnabledUI(!_enabled); }
@@ -311,10 +307,16 @@ function buildEvtToggles(){
         lbl.style.cssText = 'font-size:13px;flex:1;';
         lbl.textContent = ev.label;
         var tog = document.createElement('div');
-        tog.className = 'nf-toggle' + (_evtState[ev.key] ? ' on' : '');
+        tog.className = 'wlan-toggle' + (_evtState[ev.key] ? ' on' : '');
+        tog.setAttribute('role', 'switch');
+        tog.setAttribute('aria-checked', _evtState[ev.key] ? 'true' : 'false');
+        var knob = document.createElement('div');
+        knob.className = 'wlan-toggle-knob';
+        tog.appendChild(knob);
         tog.onclick = (function(k, t){ return function(){
             _evtState[k] = !_evtState[k];
             t.classList.toggle('on', _evtState[k]);
+            t.setAttribute('aria-checked', _evtState[k] ? 'true' : 'false');
         }; })(ev.key, tog);
         row.appendChild(lbl);
         row.appendChild(tog);

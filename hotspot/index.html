@@ -282,11 +282,38 @@
       transition: transform 0.4s ease-in-out;
       width: 100%;
     }
-    .promo-slide {
+    .promo-slide-wrapper {
       min-width: 100%;
       height: 130px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-surface-hover);
+    }
+    .promo-slide-wrapper::before {
+      content: "";
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border: 2px solid var(--border-color);
+      border-top-color: var(--accent-color);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+      z-index: 1;
+    }
+    .promo-slide {
+      min-width: 100%;
+      height: 100%;
       object-fit: cover;
       cursor: pointer;
+      position: relative;
+      z-index: 2;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .promo-slide.loaded {
+      opacity: 1;
     }
     .promo-indicators {
       position: absolute;
@@ -642,7 +669,12 @@
     .coin-preview.active { color: #86efac; }
     .coin-win-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); margin-bottom: 5px; }
     .coin-bar-bg { height: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; margin-bottom: 14px; }
-    .coin-bar-fill { height: 100%; border-radius: 6px; background: var(--coin-bar-high); transition: width 1s linear, background 0.3s; }
+      .coin-bar-fill { height: 100%; border-radius: 6px; background: var(--coin-bar-high); transition: width 1s linear, background 0.3s; }
+      .coin-reconnect { display: flex; align-items: center; gap: 8px; padding: 9px 11px; margin-bottom: 12px; border-radius: 8px; background: rgba(202,138,4,0.12); border: 1px solid var(--coin-bar-med); color: var(--coin-bar-med); font-size: 0.82rem; line-height: 1.35; text-align: left; }
+      .coin-reconnect[hidden] { display: none; }
+      .coin-reconnect-spinner { flex: 0 0 auto; width: 15px; height: 15px; border: 2px solid var(--coin-bar-med); border-top-color: transparent; border-radius: 50%; animation: coin-recon-spin 0.8s linear infinite; }
+      @keyframes coin-recon-spin { to { transform: rotate(360deg); } }
+      .coin-bar-bg.paused .coin-bar-fill { opacity: 0.45; transition: opacity 0.3s; }
     .queue-title-text { color: var(--coin-val-color); }
 
     /* ======================================= RATES MODAL ======================================= */
@@ -963,7 +995,7 @@
   </div>
 </div>
 
-<div class="coin-modal-overlay" id="coin-modal-overlay" onclick="if (event.target === this) closeCoinModal();">
+<div class="coin-modal-overlay" id="coin-modal-overlay">
   <div class="coin-modal">
     <div class="rates-modal-header">
       <span class="rates-modal-title">· Insert Coin</span>
@@ -986,6 +1018,11 @@
       </div>
       <div class="coin-bar-bg">
         <div class="coin-bar-fill" id="coin-bar-fill" style="width:100%"></div>
+      </div>
+
+      <div class="coin-reconnect" id="coin-reconnect" role="status" aria-live="polite" hidden>
+        <span class="coin-reconnect-spinner" aria-hidden="true"></span>
+        <span class="coin-reconnect-txt">Reconnecting to coin slot&hellip; your coins are safe and the timer is paused.</span>
       </div>
 
       <button class="btn btn-coin-done" id="btn-coin-done" onclick="doCoinDone()" disabled>Done</button>
@@ -1130,8 +1167,8 @@ function _tryPlayBg() {
    listening until resume() truly succeeds (state becomes 'running').
    touchstart is included since it's the most reliable unlock signal on
    mobile, and firing before any scroll begins. */
+
 function _unlockAudioCtx() {
-  if (_audioCtx.state !== 'suspended') return;
   _audioCtx.resume().then(function() {
     if (_audioCtx.state === 'running') {
       document.removeEventListener('click', _unlockAudioCtx);
@@ -1199,13 +1236,20 @@ function _playCoinBgMusic() {
       _insertBgSource.disconnect();
     }
 
-    if (_audioCtx.state === 'suspended') _audioCtx.resume();
 
-    _insertBgSource = _audioCtx.createBufferSource();
-    _insertBgSource.buffer = _insertBgBuffer;
-    _insertBgSource.loop = true; // Perfect gapless playback
-    _insertBgSource.connect(_masterGain);
-    _insertBgSource.start(0);
+    var startSource = function() {
+      _insertBgSource = _audioCtx.createBufferSource();
+      _insertBgSource.buffer = _insertBgBuffer;
+      _insertBgSource.loop = true; // Perfect gapless playback
+      _insertBgSource.connect(_masterGain);
+      _insertBgSource.start(0);
+    };
+
+    if (_audioCtx.state !== 'running') {
+      _audioCtx.resume().then(startSource).catch(startSource);
+    } else {
+      startSource();
+    }
   } catch(e) { console.error(e); }
 }
 
@@ -1223,16 +1267,13 @@ function _pauseCoinBgMusic() {
   } catch(e) { console.error(e); }
 }
 
-// Puts the Done/Cancel buttons back to their idle state. Needed on every
-// path that ends a coin session (timeout, expiry, cancel, complete) —
-// otherwise whichever label/disabled state was mid-flight (e.g. "Cancelling…",
-// or cancelBtn disabled because coins were already inserted) stays stuck
-// until the next fetch response happens to overwrite it.
-function _resetCoinButtons() {
+// Properly hide the buttons when the coin session is ending (e.g. expiry, complete)
+// Their visibility is tied to the disabled attribute via CSS.
+function _hideCoinButtons() {
   var doneBtn = document.getElementById('btn-coin-done');
-  if (doneBtn) { doneBtn.disabled = true; doneBtn.innerHTML = 'Done'; }
+  if (doneBtn) doneBtn.disabled = true;
   var cancelBtn = document.getElementById('btn-coin-cancel');
-  if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = 'Cancel'; }
+  if (cancelBtn) cancelBtn.disabled = true;
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -1268,13 +1309,16 @@ var _coinStartTime    = 0;
 var _coinSID          = null;
 var _coinTimeout      = 30;
 var _coinWinLeft      = 0;
-var _coinFromStatus   = false;
-var _isFinalizing     = false;
+    var _coinFromStatus   = false;
+    var _isFinalizing     = false;
+    var _coinReconnecting = false;   // true while NodeMCU link is stale mid-session
 var _queuePollID      = null;
 var _coinPendingWait  = false;   
 var _cachedRates      = '';      
 var _coinSuspended    = false;
 var _coinCooldownRemaining = 0;
+var _wlanRefreshID    = null;    // polls WLAN signal stats while the Connection dropdown is open
+var _wlanRefreshPrefix = null;   // which view ('s'/'l') owns the open dropdown
 
 /* ────────────────────────────────────────────────────────────────
    Utilities
@@ -1331,6 +1375,50 @@ function toggleWlan(prefix) {
   var details = document.getElementById(prefix + '-wlan-details');
   details.classList.toggle('open');
   caret.classList.toggle('open');
+
+  // While the dropdown is open on an active WLAN connection, poll the live
+  // signal stats (RSSI/SNR/etc.) every 5s so they stay current. Stop as soon
+  // as it's collapsed.
+  if (details.classList.contains('open')) {
+    startWlanRefresh(prefix);
+  } else {
+    stopWlanRefresh();
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────
+   WLAN signal auto-refresh (only while the Connection dropdown is open)
+──────────────────────────────────────────────────────────────── */
+function startWlanRefresh(prefix) {
+  stopWlanRefresh();
+  _wlanRefreshPrefix = prefix;
+  _wlanRefreshID = setInterval(function() { refreshWlanData(prefix); }, 5000);
+}
+
+function stopWlanRefresh() {
+  if (_wlanRefreshID) { clearInterval(_wlanRefreshID); _wlanRefreshID = null; }
+  _wlanRefreshPrefix = null;
+}
+
+/* Lightweight status poll that only re-renders the device/WLAN detail fields.
+   Unlike checkStatus() it never switches views or restarts the countdown, so
+   it won't disturb the UI while the user is looking at the dropdown. */
+function refreshWlanData(prefix) {
+  var details = document.getElementById(prefix + '-wlan-details');
+  // Bail (and stop) if the dropdown was closed out from under us.
+  if (!details || !details.classList.contains('open')) { stopWlanRefresh(); return; }
+
+  fetch('/cgi-bin/status.sh?_=' + Math.random(), { cache: 'no-store' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      // Render into whichever view currently matches the connection state.
+      var activePrefix = d.logged_in ? 's' : 'l';
+      renderDeviceInfo(d, activePrefix);
+      // If the connection is no longer WLAN, renderDeviceInfo collapses the
+      // dropdown — reflect that by stopping the poll.
+      if (d.connection !== 'WLAN') stopWlanRefresh();
+    })
+    .catch(function() { /* transient error — keep the last values, try again next tick */ });
 }
 
 /* ────────────────────────────────────────────────────────────────
@@ -1420,7 +1508,7 @@ window.addEventListener("pageshow", function(event) {
   }
 });
 
-/* ────────────────────────────────────────────────────────────────
+/* ──────────────────────────��─────────────────────────────────────
    API calls — status / login / logout / add
 ──────────────────────────────────────────────────────────────── */
 function renderDeviceInfo(d, prefix) {
@@ -1653,11 +1741,16 @@ function checkCoinEnabled(pendingRetries) {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       var on = d.enabled === true;
-      ['btn-coin-login', 'btn-coin-status', 'btn-rates-login', 'btn-rates-status'].forEach(function(id) {
+      var hasRates = on && !!(d.rates && d.rates.trim());
+      ['btn-coin-login', 'btn-coin-status'].forEach(function(id) {
         var el = document.getElementById(id);
         if (el) el.style.display = on ? 'block' : 'none';
       });
-      if (on && d.rates) {
+      ['btn-rates-login', 'btn-rates-status'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = hasRates ? 'block' : 'none';
+      });
+      if (hasRates) {
         _cachedRates = d.rates;
       }
 
@@ -1721,7 +1814,7 @@ function doQueueCancel() {
 
 /* ────────────────────────────────────────────────────────────────
    Coin — rates modal
-──────────────────────────────────────────────────────────────── */
+─────────────────────────────────────────────��────────────────── */
 function renderRatesList(ratesStr) {
   var list = document.getElementById('rates-list');
   if (!list) return;
@@ -1776,6 +1869,15 @@ function closeRatesModal() {
    Coin — insert coin modal
 ──────────────────────────────────────────────────────────────── */
 function openCoinModal() {
+  // Defensively clear any leftover reconnecting UI from a prior session so a
+  // fresh (or resumed) session never opens with a stale "Reconnecting…" banner
+  // or a frozen/paused countdown bar still showing.
+  _coinReconnecting = false;
+  var recon = document.getElementById('coin-reconnect');
+  if (recon) recon.hidden = true;
+  var barBg = document.querySelector('.coin-bar-bg');
+  if (barBg) barBg.classList.remove('paused');
+
   var overlay = document.getElementById('coin-modal-overlay');
   if (overlay) overlay.classList.add('open');
 }
@@ -1798,7 +1900,7 @@ function doCoinStart(fromStatus, isPolling) {
   // If suspended, don't proceed — show error instead
   if (!isPolling && _coinSuspended) {
     var mins = Math.ceil(_coinCooldownRemaining / 60);
-    toastr.warning('\u26d4 You are temporarily suspended from the coinslot. Please wait '
+    toastr.warning('You are temporarily suspended from inserting coins for: '
       + mins + ' more minute' + (mins !== 1 ? 's' : '') + '.');
     return;
   }
@@ -1848,7 +1950,6 @@ function doCoinStart(fromStatus, isPolling) {
         else if (msg === 'Coinslot Unavailable')
           msg = 'The Coinslot is currently unavailable, try again later or notify the vendo owner.';
         else
-          msg = '\ud83e\ude99 ' + msg;
         toastr.error(msg);
         return;
       }
@@ -1989,6 +2090,48 @@ function updateCoinProgress(secs) {
   else bar.style.background = 'var(--coin-bar-low)';
 }
 
+/* Enter the "reconnecting" state: NodeMCU stopped answering the portal's polls
+   mid-session. We freeze the on-screen coin-window countdown (so the customer
+   doesn't watch their window drain toward zero while the slot is unreachable),
+   surface a reassuring banner, and — crucially — keep BOTH Done and Cancel
+   clickable so they can bail out or bank their coins at any time. The inserted
+   amount is left untouched; NodeMCU is holding it in RAM (and mirrored it to
+   flash), and coin.sh is preserving the session server-side. */
+function enterCoinReconnecting() {
+  if (_coinReconnecting) return;
+  _coinReconnecting = true;
+
+  // Freeze the local countdown — stop ticking and cancel the forced-close net.
+  if (_coinWinID) { clearInterval(_coinWinID); _coinWinID = null; }
+  if (_coinExpireTimeout) { clearTimeout(_coinExpireTimeout); _coinExpireTimeout = null; }
+
+  var banner = document.getElementById('coin-reconnect');
+  if (banner) banner.hidden = false;
+  var barBg = document.querySelector('.coin-bar-bg');
+  if (barBg) barBg.classList.add('paused');
+  var winTxt = document.getElementById('coin-win-txt');
+  if (winTxt) winTxt.textContent = 'paused';
+
+  // Coins are held safely, so let the user finish (bank them) or cancel even
+  // though we're offline — these requests are queued/handled server-side.
+  var doneBtn = document.getElementById('btn-coin-done');
+  if (doneBtn && !_isFinalizing) doneBtn.disabled = !(_lastCoinAmount > 0);
+  var cancelBtn = document.getElementById('btn-coin-cancel');
+  if (cancelBtn && !_isFinalizing) cancelBtn.disabled = false;
+}
+
+/* Leave the reconnecting state once verified polls resume. The normal 'active'
+   handler re-syncs the amount and restarts the countdown from the server's
+   (frozen) remaining value, so here we just tear down the reconnecting UI. */
+function exitCoinReconnecting() {
+  if (!_coinReconnecting) return;
+  _coinReconnecting = false;
+  var banner = document.getElementById('coin-reconnect');
+  if (banner) banner.hidden = true;
+  var barBg = document.querySelector('.coin-bar-bg');
+  if (barBg) barBg.classList.remove('paused');
+}
+
 function startCoinPoll() {
   if (_coinPollID) clearInterval(_coinPollID);
   _coinPollID = setInterval(function() {
@@ -2005,6 +2148,9 @@ function startCoinPoll() {
         }
 
         if (d.status === 'active') {
+          // Verified polls are flowing again — clear any reconnecting UI before
+          // the normal active handling re-syncs and restarts the countdown.
+          if (_coinReconnecting) exitCoinReconnecting();
           if (!_isFinalizing) {
             // Play coin sound whenever the amount goes up (new coin detected)
             if (typeof d.amount === 'number' && d.amount > _lastCoinAmount) {
@@ -2046,12 +2192,37 @@ function startCoinPoll() {
                 if (_coinExpireTimeout) { clearTimeout(_coinExpireTimeout); _coinExpireTimeout = null; }
                 if (!_coinWinID) { _coinWinID = setInterval(tickCoinTimer, 1000); }
               }
+            } else if (!_coinWinID && typeof d.remaining === 'number' && d.remaining > 0) {
+              // Countdown was frozen (e.g. we just came back from a reconnect).
+              // The remaining value barely changed, so the branch above didn't
+              // fire — restart the ticker from the server's value so the window
+              // resumes exactly where it paused instead of staying stuck.
+              _coinInitialLeft = d.remaining;
+              _coinStartTime = Date.now();
+              _coinWinLeft = d.remaining;
+              updateCoinProgress(_coinWinLeft);
+              _coinWinID = setInterval(tickCoinTimer, 1000);
             }
+          }
+
+        } else if (d.status === 'reconnecting') {
+          // NodeMCU link went stale mid-session. Do NOT tear anything down:
+          // the coins already inserted are preserved server-side and in the
+          // NodeMCU's flash, the countdown is frozen on both ends, and we keep
+          // polling so we can resume the instant the slot answers again. Keep
+          // the last known amount on screen and show the reassuring banner.
+          if (!_isFinalizing) {
+            if (typeof d.amount === 'number') {
+              _lastCoinAmount = d.amount;
+              document.getElementById('coin-amount').textContent = d.amount;
+            }
+            enterCoinReconnecting();
           }
 
         } else if (d.status === 'complete') {
           stopCoinPoll();
           _isFinalizing = false;
+          _coinReconnecting = false;
           document.getElementById('coin-amount').textContent = d.amount;
           var prev2 = document.getElementById('coin-preview');
           if (d.minutes > 0) {
@@ -2065,7 +2236,7 @@ function startCoinPoll() {
             }, 1500);
           } else {
             _pauseCoinBgMusic();
-            _resetCoinButtons();
+            _hideCoinButtons();
             toastr.error("No was time granted, there wasn't not enough coins inserted.");
             setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
           }
@@ -2073,11 +2244,21 @@ function startCoinPoll() {
         } else if (d.status === 'expired') {
           stopCoinPoll();
           _isFinalizing = false;
+          exitCoinReconnecting();
           _pauseCoinBgMusic();
-          _resetCoinButtons();
-          var amt = parseInt(document.getElementById('coin-amount').textContent, 10) || 0;
+          _hideCoinButtons();
+          // Prefer the server's preserved amount (a reconnect that never came
+          // back still hands back the coins it was holding) so the message and
+          // any credited time reflect what the customer actually inserted.
+          var amt = (typeof d.amount === 'number' && d.amount > 0)
+                      ? d.amount
+                      : (parseInt(document.getElementById('coin-amount').textContent, 10) || 0);
           if (amt > 0) {
-            toastr.error('Coinslot session expired.');
+            if (d.minutes > 0) {
+              toastr.success('Coinslot disconnected, but your ' + amt + ' peso(s) were saved as time.');
+            } else {
+              toastr.error('Coinslot session expired.');
+            }
             setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
           } else {
             toastr.error('No coins were inserted.');
@@ -2099,6 +2280,7 @@ function doCoinCancel() {
   var sid = _coinSID;
   _isFinalizing = true; // explicitly mark as finalizing to halt any in-flight polls
   stopCoinPoll();
+  exitCoinReconnecting();
   _coinSID = null;
 
   var cancelBtn = document.getElementById('btn-coin-cancel');
@@ -2126,6 +2308,9 @@ function doCoinDone() {
 
   _isFinalizing = true;
   if (_coinWinID) { clearInterval(_coinWinID); _coinWinID = null; }
+  // If we were mid-reconnect, tear down the banner — the user chose to bank
+  // their coins, so "Finishing up." should replace the reconnecting message.
+  exitCoinReconnecting();
 
   var doneBtn = document.getElementById('btn-coin-done');
   if (doneBtn) { doneBtn.disabled = true; doneBtn.textContent = 'Finishing up.'; }
@@ -2191,12 +2376,18 @@ checkCoinEnabled();
       var pNext = document.getElementById('promo-next');
       
       promos.forEach(function(src, i){
+        var wrapper = document.createElement('div');
+        wrapper.className = 'promo-slide-wrapper';
+        
         var img = document.createElement('img');
         img.className = 'promo-slide';
         img.src = src;
         img.alt = '';
+        img.onload = function() { img.classList.add('loaded'); };
         img.onclick = function() { openImgModal(src); };
-        track.appendChild(img);
+        
+        wrapper.appendChild(img);
+        track.appendChild(wrapper);
         
         if(promos.length > 1){
           var dot = document.createElement('div');

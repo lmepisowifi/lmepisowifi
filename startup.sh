@@ -1,5 +1,4 @@
 #!/bin/sh
-
 (
     # --- STEP 1: Wait for /lmepisowifi/ to be writable ---
     while [ ! -w "/lmepisowifi" ]; do
@@ -63,5 +62,4 @@
     # here would ignore the configured access level and port, and race against
     # apply_all — if level=0 (blocked), dropbear would start and then
     # immediately be killed a moment later by apply_all's dropbear_stop.
-
 ) &

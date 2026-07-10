@@ -1,13 +1,35 @@
 #!/bin/sh
 
-# 1. Read POST data
-if [ "$REQUEST_METHOD" = "POST" ]; then
-    # Clamp body size: reject non-numeric and cap to 64KB to stop a
-    # malicious Content-Length from forcing a huge/slow byte-by-byte read (DoS).
-    __CL="${CONTENT_LENGTH:-0}"; case "$__CL" in *[!0-9]*|"") __CL=0 ;; esac
-    [ "$__CL" -gt 65536 ] && __CL=65536
-    POST_DATA=$(busybox dd bs=1 count="$__CL" 2>/dev/null)
+. /lmepisowifi/www2/sh/auth_lockout.sh --lib
+
+# 0. Global lockout gate — checked first, before even reading the POST body.
+#    Blocks EVERYONE (not just whichever client tripped it) until the
+#    lockout expires, regardless of what credentials this request carries.
+_LOCK_RES=$(lockout_status)
+case "$_LOCK_RES" in
+    locked*)
+        _LOCK_SECS=$(printf '%s' "$_LOCK_RES" | busybox cut -d' ' -f2)
+        printf "Status: 302 Found\r\n"
+        printf "Location: /login.html?locked=1&secs=%s\r\n\r\n" "$_LOCK_SECS"
+        exit 0
+        ;;
+esac
+
+# A bare GET (no submitted credentials) isn't a login attempt — don't let it
+# consume a slot in the failure counter, or anyone could grief-lock the
+# admin by just repeatedly loading this URL.
+if [ "$REQUEST_METHOD" != "POST" ]; then
+    printf "Status: 302 Found\r\n"
+    printf "Location: /login.html\r\n\r\n"
+    exit 0
 fi
+
+# 1. Read POST data
+# Clamp body size: reject non-numeric and cap to 64KB to stop a
+# malicious Content-Length from forcing a huge/slow byte-by-byte read (DoS).
+__CL="${CONTENT_LENGTH:-0}"; case "$__CL" in *[!0-9]*|"") __CL=0 ;; esac
+[ "$__CL" -gt 65536 ] && __CL=65536
+POST_DATA=$(busybox dd bs=1 count="$__CL" 2>/dev/null)
 
 # 2. Extract and decode submitted credentials
 FORM_USER=$(echo "$POST_DATA" | busybox sed -n 's/.*username=\([^&]*\).*/\1/p')
@@ -21,6 +43,12 @@ REAL_PASS=$(mib get SUSER_PASSWORD | grep "SUSER_PASSWORD=" | busybox cut -d'=' 
 
 # 4. Validate credentials
 if [ -n "$FORM_USER" ] && [ "$FORM_USER" = "$REAL_USER" ] && [ "$FORM_PASS" = "$REAL_PASS" ]; then
+
+    # Correct password — clear the global failure/lockout cycle immediately,
+    # server-side, right here. This (not a client-side reload of login.html,
+    # which never happens on success) is what keeps the next wrong password
+    # from anyone starting from a stale count.
+    lockout_reset
 
     # Generate unique session ID
     SESSION_ID=$(printf "%s%s%s" "$(date)" "$RANDOM" "$FORM_USER" | busybox sha256sum | busybox cut -d' ' -f1)
@@ -42,6 +70,17 @@ if [ -n "$FORM_USER" ] && [ "$FORM_USER" = "$REAL_USER" ] && [ "$FORM_PASS" = "$
     printf "Set-Cookie: session=%s; Path=/; HttpOnly; SameSite=Strict\r\n" "$SESSION_ID"
     printf "Location: /index.html\r\n\r\n"
 else
-    printf "Status: 302 Found\r\n"
-    printf "Location: /login.html?error=1\r\n\r\n"
+    _FAIL_RES=$(lockout_register_failure)
+    case "$_FAIL_RES" in
+        locked*)
+            _FAIL_SECS=$(printf '%s' "$_FAIL_RES" | busybox cut -d' ' -f2)
+            printf "Status: 302 Found\r\n"
+            printf "Location: /login.html?locked=1&secs=%s\r\n\r\n" "$_FAIL_SECS"
+            ;;
+        ok*)
+            _REMAINING=$(printf '%s' "$_FAIL_RES" | busybox cut -d' ' -f2)
+            printf "Status: 302 Found\r\n"
+            printf "Location: /login.html?error=1&remaining=%s\r\n\r\n" "$_REMAINING"
+            ;;
+    esac
 fi

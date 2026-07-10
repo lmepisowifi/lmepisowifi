@@ -9,7 +9,7 @@ BB="busybox"
 HOTSPOT_INTERFACES="eth0.2.0 wlan0 wlan1"
 HOTSPOT_BR="br1"
 PORTAL_IP="10.0.0.1"
-PORTAL_PORT="808"
+PORTAL_PORT="80"
 WWW2_PORT="8080"   # busybox httpd -h /lmepisowifi/www2 -p 8080 (admin UI). /admin on the portal redirects here.
 SESSION_FILE="/tmp/active_sessions.txt"
 USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
@@ -20,12 +20,12 @@ WAN_INT="br0"
 BR0_GATEWAY="192.168.18.1"   # FALLBACK only. The live gateway is auto-detected from br0's
                              # current IP (see resolve_br0_gateway); this value is used only
                              # if br0 has no IPv4 address yet.
-GLOBAL_RATE="50mbit"
+GLOBAL_RATE="20mbit"
 INACTIVITY_TIMEOUT="300"
 BOOT_MARKER="/tmp/hotspot_boot.mark"
 ACTIVITY_FILE="/tmp/hotspot_activity.txt"
 PER_USER_RATE="5mbit"
-PER_USER_BURST="10k"
+PER_USER_BURST="100k"
 UNAUTH_RATE="1000kbit"
 IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
 
@@ -40,6 +40,10 @@ COIN_TIMEOUT="30"
 COIN_RATES="1:15 5:90 10:210 15:360 20:720 25:1080 30:2160 35:2880 40:3600 45:4320 50:5040 55:5760"
 COIN_STRIKE_THRESHOLD="3"
 COIN_COOLDOWN="60"
+# Seconds the portal keeps a mid-insert coin session alive while the NodeMCU is
+# unreachable (reporting "reconnecting", coins preserved, countdown frozen)
+# before giving up. Keep equal to the firmware's MAX_PAUSE_MS (300s).
+COIN_RECONNECT_GRACE="300"
 
 # NTP servers used by busybox ntpd to discipline the system clock over the WAN.
 NTP_SERVERS="pool.ntp.org time.google.com time.cloudflare.com"
@@ -696,6 +700,16 @@ pause_session() {
     # expiry alert) so the watchdog never blocks on a network call. The
     # session_paused event key lets the admin mute just this alert from the
     # www2 UI. reason defaults to "Automatically" (inactivity timeout).
+    #
+    # Re-source templates right before rendering: this whole script (and its
+    # TPL_* variables) is sourced ONCE when the watchdog forks at boot and
+    # then lives for days in the background loop below. If the admin edits
+    # a template in the www2 UI later, that only rewrites
+    # notify_templates.env on disk — it doesn't touch this already-running
+    # process's memory. Without this re-source, the daemon keeps using
+    # whatever TPL_SESSION_PAUSED value it had at startup (a stale custom
+    # value, or the built-in default) no matter what's saved afterward.
+    [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
     _P_ACTIVE=$($BB grep -c '.' "$SESSION_FILE" 2>/dev/null)
     [ -n "$_P_ACTIVE" ] || _P_ACTIVE=0
     _P_MSG=$(tpl_render "$TPL_SESSION_PAUSED" \
@@ -713,7 +727,7 @@ check_inactivity() {
     [ -f "$SESSION_FILE" ] || return
 
     local NOW mac expiry total pkts record last_pkts last_active inactive_for
-    local TO_PAUSE entry FWD_DUMP
+    local TO_PAUSE entry FWD_DUMP client_ip is_alive
     NOW=$($BB awk '{print int($1)}' /proc/uptime)
     FWD_DUMP=$(iptables -t filter -L HOTSPOT_FWD -v -n 2>/dev/null)
     TO_PAUSE=""
@@ -735,8 +749,36 @@ check_inactivity() {
             last_active=${last_active:-$NOW}
             inactive_for=$(( NOW - last_active ))
             if [ "$inactive_for" -ge "$INACTIVITY_TIMEOUT" ]; then
-                [ -z "$total" ] && total=$(( expiry - NOW ))
-                TO_PAUSE="$TO_PAUSE ${mac}|${expiry}|${total}"
+                # No WAN-bound packets for a full timeout window, BUT that
+                # only proves the client isn't running any data-hungry app
+                # right now (phone screen off, doze mode, etc.) — it does
+                # NOT prove the client actually walked away / disconnected.
+                # Before pausing, do a direct LAN-side liveness probe (ARP
+                # reply / ICMP ping) to the client's own IP. This checks the
+                # device's network stack directly, which answers instantly
+                # even when no app is generating traffic, so a device that
+                # is genuinely still connected won't get falsely paused.
+                is_alive=0
+                client_ip=$(get_ip_for_mac "$mac")
+                if [ -n "$client_ip" ]; then
+                    if $BB ping -c 1 -W 1 "$client_ip" >/dev/null 2>&1; then
+                        is_alive=1
+                    fi
+                fi
+
+                if [ "$is_alive" = "1" ]; then
+                    # Still reachable on the LAN → treat as active, reset the
+                    # inactivity clock (pkts unchanged, but last_active moves
+                    # up to NOW) instead of pausing.
+                    (
+                        $BB grep -v "^$mac " "$ACTIVITY_FILE" 2>/dev/null
+                        echo "$mac $pkts $NOW"
+                    ) > /tmp/activity_upd.tmp
+                    $BB mv /tmp/activity_upd.tmp "$ACTIVITY_FILE"
+                else
+                    [ -z "$total" ] && total=$(( expiry - NOW ))
+                    TO_PAUSE="$TO_PAUSE ${mac}|${expiry}|${total}"
+                fi
             fi
         else
             (
@@ -770,6 +812,7 @@ write_coin_config() {
         printf 'COIN_RATES="%s"\n'          "$COIN_RATES"
         printf 'COIN_STRIKE_THRESHOLD="%s"\n' "$COIN_STRIKE_THRESHOLD"
         printf 'COIN_COOLDOWN="%s"\n'       "$COIN_COOLDOWN"
+        printf 'COIN_RECONNECT_GRACE="%s"\n' "$COIN_RECONNECT_GRACE"
         printf 'COIN_ENABLED="%s"\n'        "$COIN_ENABLED"
         printf 'HOTSPOT_BR="%s"\n'          "$HOTSPOT_BR"
         printf 'SESSION_FILE="%s"\n'        "$SESSION_FILE"
@@ -1226,6 +1269,10 @@ fi
                         $BB grep -v "^$mac " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
                         $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
                         
+                        # See pause_session()'s identical comment: re-source
+                        # so this long-running watchdog picks up template
+                        # edits made via the www2 UI after it started.
+                        [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
                         _exp_active=$($BB grep -c '.' "$SESSION_FILE" 2>/dev/null)
                         [ -n "$_exp_active" ] || _exp_active=0
                         _exp_msg=$(tpl_render "$TPL_SESSION_EXPIRED" \

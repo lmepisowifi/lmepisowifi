@@ -6,6 +6,15 @@
     <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
     <link href="/css/style.css?v=1.0.0" rel="stylesheet">
     <style>
+        /* ── Toggle switch ── */
+        .wlan-toggle { width:50px; height:28px; border-radius:14px; background:#555;
+            position:relative; cursor:pointer; transition:background .25s; flex-shrink:0; user-select:none; }
+        .wlan-toggle.on { background:#ffffff; }
+        .wlan-toggle.disabled-ui { opacity:0.35; pointer-events:none; }
+        .wlan-toggle-knob { position:absolute; width:20px; height:20px; border-radius:50%;
+            background:#fff; top:4px; left:4px; transition:left .25s,background .25s;
+            box-shadow:0 1px 4px rgba(0,0,0,.5); }
+        .wlan-toggle.on .wlan-toggle-knob { left:26px; background:#555; }
         /* ── AP table ── */
         .ap-table {
             width: 100%;
@@ -139,7 +148,7 @@
     <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
 </head>
 <body>
-    <script src="/js/nav.js?v=1.0.0"></script>
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
     <div id="overlay">
         <div id="overlay-blur"></div>
@@ -235,9 +244,12 @@
                         <label for="cm-pw" class="form-label" style="font-size:12px;">Password</label>
                         <input type="password" class="form-control" id="cm-pw" autocomplete="off"
                                placeholder="Network password">
-                        <div class="form-check mt-2">
-                            <input class="form-check-input" type="checkbox" id="cm-show">
-                            <label class="form-check-label" for="cm-show" style="font-size:12px;">Show password</label>
+                        <div class="d-flex align-items-center gap-2 mt-2">
+                            <div class="wlan-toggle" id="cm-show" role="switch" aria-checked="false"
+                                 onclick="toggleShowPw()" title="Show password">
+                                <div class="wlan-toggle-knob"></div>
+                            </div>
+                            <span style="font-size:12px;">Show password</span>
                         </div>
                     </div>
                     <div id="cm-open-note" class="mb-1" style="display:none;font-size:12px;color:var(--text-secondary);">
@@ -828,7 +840,7 @@
             '<table class="ap-table">' +
             '<thead><tr>' +
             '<th>SSID</th><th>BSSID</th><th>CH</th>' +
-            '<th>RSSI</th><th>Security</th><th>Network</th><th>Width</th>' +
+            '<th>RSSI</th><th>Security</th><th>802.11</th><th>Width</th>' +
             (showConnect ? '<th style="text-align:center;">Connect</th>' : '') +
             '</tr></thead>' +
             '<tbody>' + rows + '</tbody>' +
@@ -877,7 +889,8 @@
         var showChk = document.getElementById('cm-show');
         pw.value = '';
         pw.type  = 'password';
-        showChk.checked = false;
+        showChk.classList.remove('on');
+        showChk.setAttribute('aria-checked', 'false');
 
         if (m.open) {
             pwWrap.style.display   = 'none';
@@ -892,9 +905,13 @@
     }
 
     // Show/hide password toggle
-    document.getElementById('cm-show').addEventListener('change', function() {
-        document.getElementById('cm-pw').type = this.checked ? 'text' : 'password';
-    });
+    function toggleShowPw() {
+        var t = document.getElementById('cm-show');
+        t.classList.toggle('on');
+        var on = t.classList.contains('on');
+        t.setAttribute('aria-checked', on ? 'true' : 'false');
+        document.getElementById('cm-pw').type = on ? 'text' : 'password';
+    }
 
     // Enter submits (guard against IME composition)
     document.getElementById('cm-pw').addEventListener('keydown', function(e) {

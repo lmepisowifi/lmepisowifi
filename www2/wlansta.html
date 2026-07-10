@@ -83,7 +83,7 @@
     <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
 </head>
 <body>
-    <script src="/js/nav.js?v=1.0.0"></script>
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
     <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
 
     <!-- Full-page overlay -->
@@ -246,7 +246,7 @@
             '<table class="sta-table">' +
             '<thead><tr>' +
             '<th></th><th>MAC Address</th><th>Band</th><th>Signal</th><th>SNR</th>' +
-            '<th>TX / RX Rate</th><th>BW</th><th>Mode</th><th>Beamforming</th>' +
+            '<th>TX / RX Rate</th><th>BW</th><th>802.11</th><th>Beamforming</th>' +
             '<th>Conn. Time</th><th>Traffic</th>' +
             '</tr></thead><tbody>' + rows + '</tbody></table>';
 

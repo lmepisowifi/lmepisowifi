@@ -206,14 +206,16 @@ start)
                         _ok "{\"sid\":\"$LOCK_SID\",\"timeout\":$COIN_TIMEOUT,\"remaining\":$RESUME_REMAINING,\"amount\":$RESUME_AMOUNT,\"minutes\":$RESUME_MINUTES,\"resumed\":true}"
                     fi
                     rm -f "$LOCK_FILE" "/tmp/coin_sessions/${LOCK_SID}" \
-                        "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt"
+                        "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt" \
+                        "/tmp/coin_sessions/${LOCK_SID}.rem"
                 fi
             else
                 LOCKED=1
             fi
         else
             rm -f "$LOCK_FILE" "/tmp/coin_sessions/${LOCK_SID}" \
-                "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt"
+                "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt" \
+                "/tmp/coin_sessions/${LOCK_SID}.rem"
         fi
     fi
 
@@ -260,9 +262,16 @@ start)
     # Write a PENDING lock. Prevents parallel requests, but ignores automatic UI page reloads.
     printf '%s %s %s %s\n' "$SID" "$NOW" "$CLIENT_MAC" "PENDING" > "$LOCK_FILE"
 
-    # Contact NodeMCU — it verifies START_SIG before accepting coins
+    # Contact NodeMCU — it verifies START_SIG before accepting coins. We also
+    # hand it the client MAC so that, if power is cut mid-session, NodeMCU can
+    # POST a signed recovery grant for this exact device on its next boot (see
+    # recoverSessionFromFlash in the firmware + the recover branch in
+    # coin_result.sh). The MAC is not part of START_SIG, but that's fine: a
+    # forged MAC only ever credits time to some *other* real device's account
+    # and can't manufacture coins, while coin_result.sh still verifies the PSK
+    # signature before granting anything.
     RESP=$(wget -q -T 5 -O - \
-        "http://${NODEMCU_IP}:${NODEMCU_PORT}/start?sid=${SID}&sig=${START_SIG}&timeout=${COIN_TIMEOUT}" \
+        "http://${NODEMCU_IP}:${NODEMCU_PORT}/start?sid=${SID}&sig=${START_SIG}&timeout=${COIN_TIMEOUT}&mac=${CLIENT_MAC}" \
         2>/dev/null)
 
     if printf '%s' "$RESP" | grep -q '"ok"'; then
@@ -308,6 +317,17 @@ poll)
     LAST_SEEN=$(awk '{print ($3==""?$2:$3)}' "$SESSION_PATH")
     SINCE_SEEN=$(( NOW - LAST_SEEN ))
 
+    # How long we keep a session alive while NodeMCU is unreachable before
+    # finally giving up. During this window the poll reports "reconnecting"
+    # (coins preserved, countdown frozen) instead of throwing the session away.
+    # Matches the NodeMCU firmware's MAX_PAUSE_MS (5 min) so both sides abandon
+    # a truly dead link at roughly the same time.
+    RECONNECT_GRACE=${COIN_RECONNECT_GRACE:-300}
+
+    MISS_PATH="${SESSION_PATH}.miss"
+    AMT_PATH="${SESSION_PATH}.amt"
+    REM_PATH="${SESSION_PATH}.rem"
+
     # Fallback estimate in case NodeMCU doesn't answer this particular poll —
     # overwritten below with NodeMCU's own authoritative value when it does.
     REMAINING=$(( COIN_TIMEOUT - (NOW - CREATED_AT) ))
@@ -316,15 +336,17 @@ poll)
     # Hard expiry is based on time-since-last-successful-contact, not time
     # since the session was created. A rolling (per-coin-reset) session can
     # legitimately run far longer than COIN_TIMEOUT as long as NodeMCU keeps
-    # answering polls — only give up once contact has actually gone stale.
-    if [ "$SINCE_SEEN" -gt $(( COIN_TIMEOUT + 25 )) ]; then
-        rm -f "$SESSION_PATH" "/tmp/coin_lock"
-        _ok '{"status":"expired","amount":0,"minutes":0}'
+    # answering polls. We now also tolerate a whole RECONNECT_GRACE window of
+    # silence on top of that so a mid-insert dropout doesn't nuke the coins the
+    # customer already dropped — only give up once even the reconnect grace has
+    # elapsed, and even then hand back the preserved amount rather than zero.
+    if [ "$SINCE_SEEN" -gt $(( COIN_TIMEOUT + 25 + RECONNECT_GRACE )) ]; then
+        GIVEUP_AMT=$(cat "$AMT_PATH" 2>/dev/null); GIVEUP_AMT=${GIVEUP_AMT:-0}
+        rm -f "$SESSION_PATH" "$MISS_PATH" "$AMT_PATH" "$REM_PATH" "/tmp/coin_lock"
+        _ok "{\"status\":\"expired\",\"amount\":${GIVEUP_AMT},\"minutes\":$(_calc_time "$GIVEUP_AMT")}"
     fi
 
     # Query NodeMCU for live coin count — verify its response signature
-    MISS_PATH="${SESSION_PATH}.miss"
-    AMT_PATH="${SESSION_PATH}.amt"
     POLL_SIG=$(_md5 "${COIN_PSK}:${SID}:poll")
     LIVE=$(wget -q -T 2 -O - \
         "http://${NODEMCU_IP}:${NODEMCU_PORT}/status?sid=${SID}&sig=${POLL_SIG}" \
@@ -348,7 +370,10 @@ poll)
                 > "/tmp/coin_sessions/${SID}.tmp" 2>/dev/null \
                 && mv "/tmp/coin_sessions/${SID}.tmp" "$SESSION_PATH"
             RAW_REM=$(printf '%s' "$LIVE" | grep -o '"remaining":[0-9]*' | grep -o '[0-9]*$')
-            [ -n "$RAW_REM" ] && REMAINING=$RAW_REM
+            if [ -n "$RAW_REM" ]; then
+                REMAINING=$RAW_REM
+                echo "$REMAINING" > "$REM_PATH" 2>/dev/null  # freeze point for a later reconnect
+            fi
         fi
     fi
 
@@ -357,16 +382,20 @@ poll)
     else
         # NodeMCU didn't answer this poll. Tolerate a few consecutive misses
         # (polling runs about once a second, so ~4s) to absorb a one-off wifi
-        # hiccup, but don't wait the full COIN_TIMEOUT+25s window the way the
-        # generic staleness check above does — that's exactly what let the
-        # coin slot keep looking "active" (and inviting more coins) for up
-        # to a minute after it actually lost power.
+        # hiccup and keep reporting "active". Past that we do NOT expire the
+        # session anymore — we report "reconnecting" and hold everything: the
+        # coins already inserted are preserved, the countdown is frozen (we
+        # hand back the last NodeMCU-reported "remaining" and the frontend
+        # stops ticking), and the heartbeat is intentionally NOT refreshed so
+        # the RECONNECT_GRACE expiry above can eventually fire if the slot is
+        # truly dead. The customer can still press Done/Cancel meanwhile.
         MISSES=$(cat "$MISS_PATH" 2>/dev/null)
         MISSES=$(( ${MISSES:-0} + 1 ))
         echo "$MISSES" > "$MISS_PATH" 2>/dev/null
         if [ "$MISSES" -ge 4 ]; then
-            rm -f "$SESSION_PATH" "$MISS_PATH" "$AMT_PATH" "/tmp/coin_lock"
-            _ok "{\"status\":\"expired\",\"amount\":${LIVE_AMOUNT},\"minutes\":$(_calc_time "$LIVE_AMOUNT")}"
+            FROZEN_REM=$(cat "$REM_PATH" 2>/dev/null); FROZEN_REM=${FROZEN_REM:-$REMAINING}
+            PREVIEW=$(_calc_time "$LIVE_AMOUNT")
+            _ok "{\"status\":\"reconnecting\",\"amount\":${LIVE_AMOUNT},\"minutes\":${PREVIEW},\"remaining\":${FROZEN_REM}}"
         fi
     fi
 

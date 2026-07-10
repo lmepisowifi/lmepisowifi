@@ -19,7 +19,7 @@ layout) is preserved across updates.
 
 ## One-time GitHub setup (repo is currently empty)
 
-Repo: `https://github.com/lmepisowifi/lmepisowifimoddedwebinterface`
+Repo: `https://github.com/lmepisowifi/lmepisowifi`
 
 Recommended repo layout:
 ```
@@ -37,8 +37,8 @@ Recommended repo layout:
 
 Bootstrap:
 ```sh
-git clone https://github.com/lmepisowifi/lmepisowifimoddedwebinterface
-cd lmepisowifimoddedwebinterface
+git clone https://github.com/lmepisowifi/lmepisowifi
+cd lmepisowifi
 mkdir payload
 # copy the device tree into payload/ (everything that lives under /lmepisowifi)
 cp -a /path/to/lmepisowifi/* payload/
