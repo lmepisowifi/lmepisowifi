@@ -70,14 +70,6 @@
         }
         @keyframes rspin { to { transform: rotate(360deg); } }
 
-        /* ── Poll-tick badge in card header ── */
-        .poll-dot {
-            font-size: 10px;
-            padding: 1px 6px;
-            border-radius: 3px;
-            font-weight: 400;
-            transition: background .3s;
-        }
 
         /* ── Empty / no-iface message ── */
         .no-iface-msg {
@@ -98,7 +90,7 @@
         </div>
     </div>
 
-    <script src="/js/nav.js?v=1.0.0"></script>
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
     <div class="container mt-5">
         <div class="row justify-content-center">
@@ -142,7 +134,6 @@
                 <div class="card" id="status-card" style="display:none">
                     <div class="card-header d-flex align-items-center justify-content-between">
                         <span>WAN Status</span>
-                        <span class="poll-dot bg-secondary" id="poll-dot">●</span>
                     </div>
                     <div class="card-body" id="status-body"></div>
                 </div>
@@ -395,16 +386,9 @@ function pollNow() {
         .then(function(r) { return r.json(); })
         .then(function(d) {
             renderStatus(d);
-            flashDot('bg-success');
         })
-        .catch(function() { flashDot('bg-danger'); });
 }
 
-function flashDot(cls) {
-    var dot = document.getElementById('poll-dot');
-    dot.className = 'poll-dot ' + cls;
-    setTimeout(function() { dot.className = 'poll-dot bg-secondary'; }, 900);
-}
 
 // ── Render status card ────────────────────────────────────────────────────────
 function renderStatus(d) {

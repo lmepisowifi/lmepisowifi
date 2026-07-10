@@ -50,10 +50,12 @@
         var overlay    = document.getElementById('overlay');
         var overlayTxt = document.getElementById('overlay-text');
 
-        // ── Login lockout config ──────────────────────────────
-        var MAX_ATTEMPTS  = 5;          // failed tries before lockout
-        var LOCK_MS       = 60 * 1000;  // lockout duration (60s)
-        var STORE_KEY     = 'loginAttempts';
+        // ── Login lockout ──────────────────────────────────────
+        // All attempt-counting and lockout state lives server-side now
+        // (see /cgi-bin/auth.cgi + /cgi-bin/check_lockout.cgi). Nothing is
+        // tracked in this browser, so there's nothing here to fall out of
+        // sync after a successful login or a lockout triggered elsewhere —
+        // this page just displays whatever the server reports.
 
         var form       = document.querySelector('form');
         var loginBtn   = document.getElementById('login-btn');
@@ -61,76 +63,69 @@
         var userInput  = document.getElementById('username');
         var passInput  = document.getElementById('password');
         var lockTimer  = null;
+        var isLocked   = false;
 
-        function getState() {
-            try { return JSON.parse(localStorage.getItem(STORE_KEY)) || { count: 0, lockUntil: 0 }; }
-            catch (e) { return { count: 0, lockUntil: 0 }; }
-        }
-        function setState(s) {
-            try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch (e) {}
-        }
-        function clearState() {
-            try { localStorage.removeItem(STORE_KEY); } catch (e) {}
-        }
-
-        function lockForm(msLeft) {
+        function lockForm(secsLeft) {
+            isLocked = true;
             loginBtn.disabled = true;
             if (userInput) userInput.disabled = true;
             if (passInput) passInput.disabled = true;
             if (lockTimer) clearInterval(lockTimer);
             lockoutMsg.classList.remove('d-none');
             var tick = function () {
-                var secs = Math.ceil(msLeft / 1000);
                 lockoutMsg.textContent =
-                    'Too many failed attempts. Try again in ' + secs + 's.';
-                if (msLeft <= 0) {
+                    'Too many failed attempts (from any device). Try again in ' + secsLeft + 's.';
+                if (secsLeft <= 0) {
                     clearInterval(lockTimer);
                     unlockForm();
                     return;
                 }
-                msLeft -= 1000;
+                secsLeft -= 1;
             };
             tick();
             lockTimer = setInterval(tick, 1000);
         }
 
         function unlockForm() {
+            isLocked = false;
             if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
             loginBtn.disabled = false;
             if (userInput) userInput.disabled = false;
             if (passInput) passInput.disabled = false;
             lockoutMsg.classList.add('d-none');
-            clearState();
         }
 
-        // Check for an active lockout on load
-        (function checkLockout() {
-            var s = getState();
-            if (s.lockUntil && Date.now() < s.lockUntil) {
-                lockForm(s.lockUntil - Date.now());
-            }
-        })();
+        // Ask the server what the current state actually is. Used on a
+        // fresh page load with no query string (e.g. someone else's failed
+        // attempts already tripped the lockout, or a prior lockout is
+        // still counting down).
+        function refreshLockoutState() {
+            fetch('/cgi-bin/check_lockout.cgi')
+                .then(function (r) { return r.text(); })
+                .then(function (txt) {
+                    var parts = txt.trim().split(' ');
+                    if (parts[0] === 'locked') {
+                        lockForm(parseInt(parts[1], 10) || 60);
+                    }
+                })
+                .catch(function () {});
+        }
 
-        // Display error message if redirected back with ?error=1
-        if (window.location.search.includes('error=1')) {
+        // Reflect the outcome of the POST we just redirected from, if any.
+        var params = new URLSearchParams(window.location.search);
+        if (params.get('locked') === '1') {
+            lockForm(parseInt(params.get('secs'), 10) || 60);
+        } else if (params.get('error') === '1') {
             document.getElementById('error-msg').classList.remove('d-none');
-
-            // Record the failed attempt
-            var st = getState();
-            // If a prior lockout already elapsed, start fresh
-            if (st.lockUntil && Date.now() >= st.lockUntil) st = { count: 0, lockUntil: 0 };
-            st.count = (st.count || 0) + 1;
-            if (st.count >= MAX_ATTEMPTS) {
-                st.lockUntil = Date.now() + LOCK_MS;
-                setState(st);
-                lockForm(LOCK_MS);
-            } else {
-                setState(st);
-                var remaining = MAX_ATTEMPTS - st.count;
+            var remaining = parseInt(params.get('remaining'), 10);
+            if (!isNaN(remaining)) {
                 toastr.warning(remaining + ' attempt' + (remaining === 1 ? '' : 's') +
                                ' remaining before lockout.');
             }
+        } else {
+            refreshLockoutState();
         }
+
         toastr.warning("the modded web interface is still in beta, expect bugs and glitches to occur.")
 
         // Check if already logged in; hide loader once we know either way
@@ -138,7 +133,6 @@
             .then(function (r) { return r.text(); })
             .then(function (status) {
                 if (status.trim() === 'authenticated') {
-                    clearState(); // successful login — reset attempt counter
                     overlayTxt.textContent = 'Redirecting…';
                     window.location.href = '/index.html';
                 } else {
@@ -149,12 +143,13 @@
                 overlay.classList.remove('visible');
             });
 
-        // Show overlay on form submit (blocked while locked out)
+        // Show overlay on form submit. The server is the sole authority on
+        // lockout (auth.cgi checks it before looking at credentials at
+        // all), so this is just UX — it stops an obviously-locked form from
+        // submitting, but isn't what actually enforces the lockout.
         form.addEventListener('submit', function (e) {
-            var s = getState();
-            if (s.lockUntil && Date.now() < s.lockUntil) {
+            if (isLocked) {
                 e.preventDefault();
-                lockForm(s.lockUntil - Date.now());
                 return;
             }
             overlayTxt.textContent = 'Logging in…';

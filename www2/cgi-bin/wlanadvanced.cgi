@@ -57,6 +57,18 @@ band_keys() {
     esac
 }
 
+# ---- Actual netdev name for a given VAP index, for iwpriv targeting ----
+# idx 0 → wlan0/wlan1 (Main AP), idx 5 → wlan{0,1}-vxd (repeater/client),
+# idx 1-4 → wlan{0,1}-vapN (N = idx-1). Mirrors vifName() in wlanadvanced.html
+# and the naming already used by hotspot.cgi / wan-repurpose.cgi.
+vif_name() {
+    case "$1" in
+        0) printf '%s' "$WLAN_IF" ;;
+        5) printf '%s-vxd' "$WLAN_IF" ;;
+        *) printf '%s-vap%s' "$WLAN_IF" "$(($1 - 1))" ;;
+    esac
+}
+
 ADV_TIMEOUT=90
 
 # ---- MIB helpers ----
@@ -69,6 +81,22 @@ mib_get() {
         | busybox cut -d'=' -f2- \
         | busybox tr -d '\r\n'
 }
+
+# ---- Unified SSID (merge) state ----
+# Band steering only makes sense when the two radios advertise one SSID, which
+# is exactly what the Unified SSID feature on wlanbasic does. That state lives
+# in the same flat-integer JSON wlanbasic.cgi writes; read it here (read-only)
+# so the advanced page can gate the band-steering control on it.
+MERGE_FILE="/lmepisowifi/www2/data/merged_ssid.json"
+merge_get() {
+    if [ ! -f "$MERGE_FILE" ]; then printf '%s' "$2"; return; fi
+    _mv=$(busybox sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\(-\\{0,1\\}[0-9]\\{1,\\}\\).*/\\1/p" \
+            "$MERGE_FILE" 2>/dev/null | busybox head -n1 | busybox tr -d '\r\n')
+    [ -z "$_mv" ] && _mv="$2"
+    printf '%s' "$_mv"
+}
+# unified_enabled → prints 1 when Unified SSID is on, else 0
+unified_enabled() { [ "$(merge_get enabled 0)" = "1" ] && printf '1' || printf '0'; }
 
 
 # POST field helper: extract an integer field; $1 = field name, $2 = default
@@ -133,6 +161,16 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
     if echo "$QUERY_STRING" | busybox grep -q "action=adv_status"; then
         SGI=$(get_sgi); [ -z "$SGI" ] && SGI=0
 
+        # Band steering is a GLOBAL key (WIFI_STA_CONTROL), shared by both
+        # radios (not per-band / per-idx). 0=disabled, 1=enabled 5GHz preferred,
+        # 3=enabled 2.4GHz preferred. Returned on every band so the (global)
+        # card shows the same value regardless of which band is selected.
+        BSTEER=$(mib_get "WIFI_STA_CONTROL"); case "$BSTEER" in 0|1|3) ;; *) BSTEER=0 ;; esac
+
+        # Whether Unified SSID is enabled — the page uses this to allow/lock the
+        # band-steering control (steering is only offered when it's on).
+        UNIFIED=$(unified_enabled)
+
         # Build ifaces JSON array (idx 0-5), aggregating the max remaining
         # revert time across every interface that has a pending timer.
         IFACES_J="["
@@ -175,8 +213,8 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
 
         printf "Status: 200 OK\r\n"
         printf "Content-Type: application/json\r\n\r\n"
-        printf '{"band":"%s","wlan_if":"%s","shortgi":%s,"ifaces":%s,"pending":%s,"remaining":%d}' \
-            "$BAND" "$WLAN_IF" "$SGI" "$IFACES_J" "$PENDING" "$REMAINING"
+        printf '{"band":"%s","wlan_if":"%s","shortgi":%s,"band_steering":%s,"unified_ssid":%s,"ifaces":%s,"pending":%s,"remaining":%d}' \
+            "$BAND" "$WLAN_IF" "$SGI" "$BSTEER" "$UNIFIED" "$IFACES_J" "$PENDING" "$REMAINING"
         exit 0
     fi
 
@@ -196,6 +234,67 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         | busybox tr -d '\r\n')
     case "$BAND" in 5) ;; *) BAND=24 ;; esac
     band_keys "$BAND"
+
+    # --- action=save_bandsteer: global band steering (WIFI_STA_CONTROL) -------
+    # This is a single radio-wide key (no band / no idx). Applying it restarts
+    # WiFi on both radios, so the page uses its loading overlay + poll-until-back
+    # around this request. A valid enum (0/1/3) cannot lock the admin out, so no
+    # per-interface revert timer is needed here.
+    if echo "$QUERY_STRING" | busybox grep -q "action=save_bandsteer"; then
+        __CL="${CONTENT_LENGTH:-0}"; case "$__CL" in *[!0-9]*|"") __CL=0 ;; esac
+        [ "$__CL" -gt 65536 ] && __CL=65536
+        POST_DATA=$(busybox dd bs=1 count="$__CL" 2>/dev/null)
+
+        FORM_BSTEER=$(pd_int band_steering 0)
+        case "$FORM_BSTEER" in 0|1|3) ;; *) FORM_BSTEER=0 ;; esac
+
+        # Guard: band steering may only be ENABLED (1/3) when Unified SSID is
+        # on. Without one shared SSID across both radios there is nothing to
+        # steer clients between, and the per-radio prefer-band values would be
+        # meaningless. Disabling (0) is always allowed. The UI already locks the
+        # control, but enforce it here too so a direct POST can't turn it on.
+        if [ "$FORM_BSTEER" != "0" ] && [ "$(unified_enabled)" != "1" ]; then
+            dbg "save_bandsteer: rejected enable=$FORM_BSTEER — Unified SSID is off"
+            printf "Status: 409 Conflict\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Band steering requires Unified SSID. Enable Unified SSID on the WiFi (Basic) page first."
+            exit 0
+        fi
+
+        mib set "WIFI_STA_CONTROL" "$FORM_BSTEER"
+        mib commit
+        dbg "save_bandsteer: applied WIFI_STA_CONTROL=$FORM_BSTEER"
+        wlan_apply restart
+
+        # libmib.so pushes the WRONG per-radio stactrl_prefer_band values into
+        # the driver on every `wlan_apply restart` (the inverted-preference
+        # bug). Kick off the watchdog in the background to wait for the radios
+        # to come back and re-assert the correct iwpriv state. A few spaced
+        # passes catch the case where libmib clobbers the driver slightly after
+        # the interfaces reappear. Only relevant when steering is enabled (1/3).
+        if [ "$FORM_BSTEER" = "1" ] || [ "$FORM_BSTEER" = "3" ]; then
+            (
+                _T=0
+                while [ "$_T" -lt 60 ]; do
+                    if ifconfig wlan0 >/dev/null 2>&1 \
+                       && ifconfig wlan1 >/dev/null 2>&1; then
+                        break
+                    fi
+                    sleep 1
+                    _T=$((_T + 1))
+                done
+                sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
+                sleep 5;  sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
+                sleep 10; sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
+            ) &
+            dbg "save_bandsteer: launched band steering watchdog"
+        fi
+
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: text/plain\r\n\r\n"
+        printf "OK"
+        exit 0
+    fi
 
     IDX=$(echo "$QUERY_STRING" \
         | busybox sed -n 's/.*idx=\([^&]*\).*/\1/p' \
@@ -235,8 +334,9 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     case "$FORM_SHA"  in 0|1)   ;; *) FORM_SHA=0  ;; esac
     case "$FORM_RATEADAPT" in 0|1) ;; *) FORM_RATEADAPT=1 ;; esac
 
-    # txbf requires mimo — force off if mimo is being disabled
-    [ "$FORM_MIMO" = "0" ] && FORM_TXBF=0
+    # TX Beamforming MIMO (txbf_mu) requires the base TX Beamforming (txbf)
+    # to be enabled first — force MIMO off if TX Beamforming is being disabled
+    [ "$FORM_TXBF" = "0" ] && FORM_MIMO=0
 
     # Fixed TX rate: only 5GHz has a validated 11ac MCS mapping right now.
     # Reject fixed mode (and any unrecognized fixedTxRate value) on any other
@@ -270,15 +370,15 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     # interfaces' pending timers untouched.
     rm -f "${RP}_"*
 
-    # Apply MIMO/txbf in dependency order:
-    #   Disable: set txbf_mu=0, then txbf=0 (mimo first, then dependent)
-    #   Enable:  set txbf_mu=1, then txbf=N (mimo must be on before txbf)
-    if [ "$FORM_MIMO" = "0" ]; then
+    # Apply TX Beamforming / TX Beamforming MIMO in dependency order:
+    #   Disable: set txbf_mu=0 (dependent first), then txbf=0 (base last)
+    #   Enable:  set txbf=1 (base first), then txbf_mu=N (MIMO needs txbf on)
+    if [ "$FORM_TXBF" = "0" ]; then
         mib set "${TBL_PFX}.${IDX}.txbf_mu" 0
         mib set "${TBL_PFX}.${IDX}.txbf"    0
     else
-        mib set "${TBL_PFX}.${IDX}.txbf_mu"  1
         mib set "${TBL_PFX}.${IDX}.txbf"     "$FORM_TXBF"
+        mib set "${TBL_PFX}.${IDX}.txbf_mu"  "$FORM_MIMO"
     fi
 
     mib set "${TBL_PFX}.${IDX}.mc2u_disable"  "$FORM_MC2U"
@@ -302,18 +402,58 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         exit 0
     fi
 
-    # Interface is enabled — capture OLD live values for rollback (mib get
-    # reads the running radio state, which hasn't been updated by wlan_apply yet)
-    get_mimo      "$IDX" > "${RP}_mimo"
-    get_txbf      "$IDX" > "${RP}_txbf"
-    get_mc2u      "$IDX" > "${RP}_mc2u"
-    get_txr       "$IDX" > "${RP}_txr"
-    get_rxr       "$IDX" > "${RP}_rxr"
-    get_pmf       "$IDX" > "${RP}_pmf"
-    get_sha256    "$IDX" > "${RP}_sha256"
-    get_rateadapt "$IDX" > "${RP}_rateadapt"
-    get_fixedrate "$IDX" > "${RP}_fixedrate"
-    [ "$IDX" = "0" ] && get_sgi > "${RP}_sgi"
+    # Interface is enabled — capture OLD live values (mib get reads the
+    # running radio state, which hasn't been updated by wlan_apply yet)
+    OLD_MIMO=$(get_mimo      "$IDX")
+    OLD_TXBF=$(get_txbf      "$IDX")
+    OLD_MC2U=$(get_mc2u      "$IDX")
+    OLD_TXR=$(get_txr        "$IDX")
+    OLD_RXR=$(get_rxr        "$IDX")
+    OLD_PMF=$(get_pmf        "$IDX")
+    OLD_SHA=$(get_sha256     "$IDX")
+    OLD_RATEADAPT=$(get_rateadapt "$IDX")
+    OLD_FIXEDRATE=$(get_fixedrate "$IDX")
+    [ "$IDX" = "0" ] && OLD_SGI=$(get_sgi)
+
+    # TX Beamforming (txbf/txbfer/txbfee) and TX Beamforming MIMO (txbf_mu)
+    # can be poked live via iwpriv without dropping any client associations.
+    # Every other field on this form still needs a full wlan_apply restart,
+    # so only take the iwpriv fast path when nothing else changed.
+    OTHER_FIELDS_UNCHANGED=1
+    [ "$FORM_MC2U"      != "$OLD_MC2U" ]      && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_TXR"       != "$OLD_TXR" ]       && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_RXR"       != "$OLD_RXR" ]       && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_PMF"       != "$OLD_PMF" ]       && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_SHA"       != "$OLD_SHA" ]       && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_RATEADAPT" != "$OLD_RATEADAPT" ] && OTHER_FIELDS_UNCHANGED=0
+    [ "$FORM_RATEADAPT" = "0" ] && [ "$FORM_FIXEDRATE" != "$OLD_FIXEDRATE" ] && OTHER_FIELDS_UNCHANGED=0
+    [ "$IDX" = "0" ] && [ "$FORM_SGI" != "$OLD_SGI" ] && OTHER_FIELDS_UNCHANGED=0
+
+    if [ "$OTHER_FIELDS_UNCHANGED" = "1" ]; then
+        IWPRIV_IF=$(vif_name "$IDX")
+        dbg "save_adv idx=$IDX: TX Beamforming-only change (txbf=$FORM_TXBF txbf_mu=$FORM_MIMO) on $IWPRIV_IF, using iwpriv set_mib instead of wlan_apply restart"
+        iwpriv "$IWPRIV_IF" set_mib "txbf=$FORM_TXBF"
+        iwpriv "$IWPRIV_IF" set_mib "txbfer=$FORM_TXBF"
+        iwpriv "$IWPRIV_IF" set_mib "txbfee=$FORM_TXBF"
+        iwpriv "$IWPRIV_IF" set_mib "txbf_mu=$FORM_MIMO"
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: text/plain\r\n\r\n"
+        printf "OK"
+        exit 0
+    fi
+
+    # Some other field changed too — fall back to the full wlan_apply
+    # restart path with revert-timer safety, same as before.
+    printf '%s' "$OLD_MIMO"      > "${RP}_mimo"
+    printf '%s' "$OLD_TXBF"      > "${RP}_txbf"
+    printf '%s' "$OLD_MC2U"      > "${RP}_mc2u"
+    printf '%s' "$OLD_TXR"       > "${RP}_txr"
+    printf '%s' "$OLD_RXR"       > "${RP}_rxr"
+    printf '%s' "$OLD_PMF"       > "${RP}_pmf"
+    printf '%s' "$OLD_SHA"       > "${RP}_sha256"
+    printf '%s' "$OLD_RATEADAPT" > "${RP}_rateadapt"
+    printf '%s' "$OLD_FIXEDRATE" > "${RP}_fixedrate"
+    [ "$IDX" = "0" ] && printf '%s' "$OLD_SGI" > "${RP}_sgi"
     touch "${RP}_pending"
     date +%s > "${RP}_start"
 
@@ -332,12 +472,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
             RB_RATEADAPT=$(cat "${RP}_rateadapt")
             RB_FIXEDRATE=$(cat "${RP}_fixedrate")
 
-            if [ "$RB_MIMO" = "0" ]; then
+            if [ "$RB_TXBF" = "0" ]; then
                 mib set "${TBL_PFX}.${IDX}.txbf_mu" 0
                 mib set "${TBL_PFX}.${IDX}.txbf"    0
             else
-                mib set "${TBL_PFX}.${IDX}.txbf_mu"  1
                 mib set "${TBL_PFX}.${IDX}.txbf"     "$RB_TXBF"
+                mib set "${TBL_PFX}.${IDX}.txbf_mu"  "$RB_MIMO"
             fi
             mib set "${TBL_PFX}.${IDX}.mc2u_disable"  "$RB_MC2U"
             mib set "${TBL_PFX}.${IDX}.tx_restrict"   "$RB_TXR"

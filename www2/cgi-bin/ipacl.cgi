@@ -160,12 +160,18 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
             printf "Status: 200 OK\r\nContent-Type: application/json\r\n\r\n"
             printf '{"ok":true,"service":"%s","level":%s,"daemonRunning":%s}' \
                 "$(json_esc "$FORM_SVC")" "$FORM_LVL" "$DBR"
-            exit 0
+        else
+            printf "Status: 200 OK\r\nContent-Type: application/json\r\n\r\n"
+            printf '{"ok":true,"service":"%s","level":%s}' \
+                "$(json_esc "$FORM_SVC")" "$FORM_LVL"
         fi
 
-        printf "Status: 200 OK\r\nContent-Type: application/json\r\n\r\n"
-        printf '{"ok":true,"service":"%s","level":%s}' \
-            "$(json_esc "$FORM_SVC")" "$FORM_LVL"
+        # the response above before any daemon restart takes effect.
+        {
+            [ "$FORM_SVC" = "ftp"    ] && [ "$FORM_LVL" = "0" ] && busybox pkill -f ftpd
+            [ "$FORM_SVC" = "telnet" ] && [ "$FORM_LVL" = "0" ] && busybox pkill -f telnetd
+            /etc/scripts/loadinetdconf.sh
+        } >/dev/null 2>&1 &
         exit 0
     fi
 

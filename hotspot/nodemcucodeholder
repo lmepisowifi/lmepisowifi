@@ -44,7 +44,7 @@ const int COIN_ENABLE_ACTIVE = HIGH;
 // ota.sh compares it against the release manifest's nodemcu_version and pushes a
 // self-flash ONLY when they differ, so a portal-only update (www2/hotspot files)
 // never needlessly reflashes the coin slot.
-#define FW_VERSION          "1.0.0"
+#define FW_VERSION          "1.0.2"
 // No AP password — open so owner can connect immediately on first setup
 
 // ── CONFIG STRUCT ─────────────────────────────────────────────────────
@@ -72,12 +72,41 @@ volatile int           coinPesos        = 0;
 bool                   sessionActive    = false;
 volatile bool          finalizing       = false;  // True when waiting for pulses to settle
 String                 activeSid        = "";
+String                 activeClientMac  = "";      // MAC of the paying client (from portal /start)
 volatile unsigned long sessionStartMs   = 0;      
 unsigned long          sessionTimeoutMs = 30000UL;
 volatile bool          cancelRequested  = false;  
+volatile bool          coinDirty        = false;   // set by ISR when a coin was counted → loop persists it
 
 // For anti-tamper / pulse limiting
 volatile unsigned long lastPulseMs      = 0;
+
+// ── LINK-LOSS COUNTDOWN PAUSE ─────────────────────────────────────────
+// The portal polls /status roughly once a second while its Insert-Coin modal
+// is open. If those polls stop arriving (portal rebooted, Wi-Fi dropped, or the
+// whole unit briefly lost the AP) we must NOT keep burning the customer's
+// coin-insert window — the coins they already dropped would silently time out
+// and be lost. Instead we FREEZE the countdown while the link is stale and
+// resume it the instant polls come back, so a reconnect continues exactly where
+// it paused. Coins can still be inserted during the pause (each still resets the
+// window) and the customer can still hit Done/Cancel once the portal reconnects.
+volatile unsigned long lastPollMs       = 0;       // millis() of the last /status poll from the portal
+unsigned long          lastLoopMs       = 0;       // for freezing sessionStartMs while paused
+bool                   countdownPaused  = false;
+unsigned long          pauseStartMs     = 0;
+const unsigned long    LINK_STALE_MS    = 4000UL;          // no poll for 4s → treat link as stale, pause
+const unsigned long    MAX_PAUSE_MS     = 5UL*60UL*1000UL; // after 5 min stalled, finalize so coins convert to time
+
+// ── CRASH / POWER-OUTAGE COIN PRESERVATION ────────────────────────────
+// A Piso-Wifi unit and its coin slot usually share one power brick, so a power
+// outage kills both mid-session. Coins counted so far live only in RAM
+// (coinPesos), so without help they vanish on the blackout. We therefore mirror
+// the live session (sid + client MAC + running peso total) to LittleFS every
+// time the total changes. On the next boot we read it back and POST a signed
+// "recovery" result to the portal, which grants the customer the time they paid
+// for — even though the portal's own /tmp bookkeeping was wiped by the same
+// outage (coin_result.sh rebuilds it from the MAC we send).
+#define SESSION_PATH_FS   "/coin_session.txt"
 
 // Piezo igniter ("BBQ lighter") fraud: a spark touched to the pulse wire
 // induces a clean FALLING edge that looks identical to a real coin pulse to
@@ -111,7 +140,7 @@ bool          wifiChangePending = false;
 unsigned long wifiChangeReqMs   = 0;      // millis() when /setwifi was accepted
 const unsigned long WIFI_CHANGE_DELAY_MS = 1500UL;
 
-// ── AUTO-REBOOT + HEAP WATCHDOG ────────────────────────────────────
+// ── AUTO-REBOOT + HEAP WATCHDOG ───────────────────────────────────�������
 // Why reboot at all: this firmware leans hard on Arduino String
 // concatenation (every coin pulse, /status poll and result POST builds
 // throwaway Strings) plus HTTPClient, which fragments the ESP8266's small
@@ -211,6 +240,7 @@ void IRAM_ATTR onCoinPulse() {
         lastPulseMs    = nowMs;
         coinPesos     += cfg.coin_value;
         sessionStartMs = nowMs;   // each valid coin extends the timeout window
+        coinDirty      = true;    // loop() will mirror the new total to flash
     }
 }
 
@@ -286,6 +316,34 @@ bool saveConfig() {
 void wipeConfig() {
     LittleFS.remove(CONFIG_PATH);
 }
+
+
+// ══════════════════════════════════════════════════════════════════��═��═
+// LIVE-SESSION MIRROR — LittleFS, survives power loss
+// ══════════════════════════════════════════════════════════════════════
+// One line: SID CLIENT_MAC PESOS
+// Written every time the peso total changes during an active session, cleared
+// once the session finalizes cleanly (endSession) or is recovered on boot.
+
+void persistSession() {
+    // Snapshot the volatile total once so an ISR mid-write can't tear it.
+    int amt = coinPesos;
+    File f = LittleFS.open(SESSION_PATH_FS, "w");
+    if (!f) return;
+    f.print(activeSid);
+    f.print(' ');
+    f.print(activeClientMac.length() ? activeClientMac : String("-"));
+    f.print(' ');
+    f.println(amt);
+    f.close();
+}
+
+void clearPersistedSession() {
+    LittleFS.remove(SESSION_PATH_FS);
+}
+
+// Forward decl — defined in NORMAL MODE section below.
+void recoverSessionFromFlash();
 
 
 // ══════════════════════════════════════════════════════════════════════
@@ -537,14 +595,76 @@ void post_result() {
     http.end();
 }
 
+// ── POWER-OUTAGE RECOVERY ──────────────────────────────────────────────────
+// Called once on boot (from startNormalMode, after Wi-Fi is up). If a session
+// mirror survived on flash, the previous run died mid-session — almost always a
+// power cut that took the portal down too. We POST the preserved amount to the
+// portal's coin_result.sh in RECOVERY mode: it carries the client MAC and is
+// signed with it, so coin_result.sh can grant/extend that device's time even
+// though its own /tmp session bookkeeping was wiped by the same outage. The
+// mirror is cleared only after the portal confirms "ok", so a failed/limited
+// reconnect simply retries on the next boot rather than losing the coins.
+void recoverSessionFromFlash() {
+    if (!LittleFS.exists(SESSION_PATH_FS)) return;
+
+    File f = LittleFS.open(SESSION_PATH_FS, "r");
+    if (!f) return;
+    String line = f.readStringUntil('\n');
+    f.close();
+    line.trim();
+    if (line.length() == 0) { clearPersistedSession(); return; }
+
+    // Parse "SID MAC PESOS"
+    int s1 = line.indexOf(' ');
+    int s2 = (s1 >= 0) ? line.indexOf(' ', s1 + 1) : -1;
+    if (s1 < 0 || s2 < 0) { clearPersistedSession(); return; }
+    String rSid = line.substring(0, s1);
+    String rMac = line.substring(s1 + 1, s2);
+    String rAmtS = line.substring(s2 + 1);
+    rSid.trim(); rMac.trim(); rAmtS.trim();
+    int rAmt = rAmtS.toInt();
+
+    // Nothing was actually paid, or we never learned the MAC → nothing to
+    // recover; just drop the stale mirror.
+    if (rAmt <= 0 || rMac.length() == 0 || rMac == "-") {
+        clearPersistedSession();
+        return;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) return;   // try again next boot
+
+    // token = md5(PSK:SID:AMOUNT:MAC:recover)
+    String plain = String(cfg.psk) + ":" + rSid + ":" + String(rAmt)
+                   + ":" + rMac + ":recover";
+    String body  = "sid=" + rSid + "&amount=" + String(rAmt)
+                   + "&mac=" + rMac + "&recover=1&sig=" + md5_hex(plain);
+
+    HTTPClient http;
+    String url = String("http://") + cfg.portal_ip + ":"
+                 + cfg.portal_port + "/cgi-bin/coin_result.sh";
+    http.begin(wifiClient, url);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    int code = http.POST(body);
+    bool ok = (code > 0 && http.getString().indexOf("\"ok\":true") >= 0);
+    http.end();
+
+    // Only forget the coins once the portal has definitively credited them.
+    if (ok) clearPersistedSession();
+}
+
 void endSession() {
     setCoinAcceptor(false);         // block coins immediately
     sessionActive  = false;
     finalizing     = false;
+    countdownPaused = false;
     sessionStartMs = 0;
 
     int finalAmount = coinPesos;
     coinPesos = 0;
+
+    // Session is closing cleanly — drop the crash-recovery mirror so it can't
+    // be double-granted on a later boot.
+    clearPersistedSession();
 
     String plain = String(cfg.psk) + ":" + activeSid + ":"
                    + String(finalAmount) + ":end";
@@ -553,6 +673,7 @@ void endSession() {
     pendingRetries = 0;
     pendingResult  = true;
     activeSid      = "";
+    activeClientMac = "";
     lastSessionEndMs = millis();   // start the post-session grace clock for any queued reboot
     post_result();
 }
@@ -616,6 +737,7 @@ void handle_coin_start() {
     String sid = coinServer.arg("sid");
     String sig = coinServer.arg("sig");
     String to  = coinServer.arg("timeout");
+    String mac = coinServer.arg("mac");   // paying client's MAC, for power-outage recovery
 
     if (sid.length() != 16) {
         coinServer.send(400, "application/json", "{\"ok\":false,\"error\":\"bad_sid\"}");
@@ -630,14 +752,19 @@ sessionActive    = true;
     finalizing       = false;
     cancelRequested  = false;
     activeSid        = sid;
+    activeClientMac  = mac;       // remembered so a recovery POST can rebuild the portal session
     coinPesos        = 0;
+    coinDirty        = false;
     sessionStartMs   = millis();
     lastPulseMs      = millis(); // Init
+    lastPollMs       = millis(); // the /start request itself counts as fresh contact
+    countdownPaused  = false;
     
     sessionTimeoutMs = (to.length() > 0)
                        ? (unsigned long)to.toInt() * 1000UL
                        : (unsigned long)cfg.timeout_sec * 1000UL;
     setCoinAcceptor(true);
+    persistSession();            // mirror the (zero-peso) session to flash immediately
     coinServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -674,6 +801,15 @@ void handle_coin_status() {
         coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_sig\"}");
         return;
     }
+
+    // A verified poll landed → the portal link is alive. Record it so the
+    // link-loss watchdog in loop() knows the countdown may keep running, and
+    // un-pause: while paused, loop() froze the window by advancing
+    // sessionStartMs every tick, so simply clearing the flag resumes the
+    // countdown exactly where it left off — no coin-insert time was consumed
+    // while the portal was unreachable.
+    lastPollMs = millis();
+    countdownPaused = false;
 
     int amt = coinPesos;
 
@@ -940,6 +1076,11 @@ void startNormalMode() {
     // or the signed /reset endpoint — not by self-wiping on a transient miss.
     connectWiFi();
 
+    // If a coin session was mirrored to flash and never cleared, the last run
+    // died mid-session (power cut). Push the preserved coins to the portal now
+    // so the customer still gets the time they paid for.
+    recoverSessionFromFlash();
+
     coinServer.on("/start",   handle_coin_start);
     coinServer.on("/status",  handle_coin_status);
     coinServer.on("/cancel",  handle_coin_cancel);
@@ -1028,6 +1169,52 @@ void loop() {
         pinMode(COIN_ENABLE_PIN, OUTPUT);
         digitalWrite(COIN_ENABLE_PIN, COIN_ENABLE_ACTIVE);
     }
+
+    // --- CRASH-SAFE COIN MIRROR ---
+    // A coin was counted since we last checked → flush the new running total to
+    // flash so a power cut in the next instant can't erase it. Done here in
+    // loop() (not the ISR) because LittleFS writes must not run inside an
+    // interrupt. The flag is cleared before the write so a coin landing during
+    // the write is caught on the following pass.
+    if (sessionActive && coinDirty) {
+        coinDirty = false;
+        persistSession();
+    }
+
+    // --- LINK-LOSS COUNTDOWN PAUSE ---
+    // While a session is open the portal polls /status ~1/s. If those polls go
+    // silent the portal/link is down; freeze the coin-insert countdown so the
+    // customer doesn't lose their window (and already-inserted coins) to a
+    // dropout. We freeze by advancing sessionStartMs in lock-step with millis()
+    // every tick, so "elapsed" stops growing. A verified poll clears
+    // countdownPaused (see handle_coin_status) and the window resumes intact.
+    // Coins may still be inserted while paused (the ISR still counts them and
+    // extends the window). If the outage drags on past MAX_PAUSE_MS we stop
+    // waiting and finalize, converting the inserted coins into time so they are
+    // never stuck.
+    {
+        unsigned long nowMs = millis();
+        if (sessionActive && !finalizing) {
+            bool linkStale = (nowMs - lastPollMs) > LINK_STALE_MS;
+            if (linkStale && !countdownPaused) {
+                countdownPaused = true;
+                pauseStartMs = nowMs;
+            }
+            if (countdownPaused) {
+                // Keep the window frozen: consume the delta so elapsed is flat.
+                if (lastLoopMs != 0) sessionStartMs += (nowMs - lastLoopMs);
+                // Safety valve: don't pause forever. Finalize (grant the coins
+                // as time) after MAX_PAUSE_MS of continuous silence.
+                if ((nowMs - pauseStartMs) >= MAX_PAUSE_MS) {
+                    countdownPaused = false;
+                    finalizing = true;
+                    setCoinAcceptor(false);
+                }
+            }
+        }
+        lastLoopMs = nowMs;
+    }
+
     // PHASE 1: Initiate shutdown (user clicked Done/Cancel OR time ran out naturally)
     if (sessionActive && !finalizing && (cancelRequested || (millis() - sessionStartMs) >= sessionTimeoutMs)) {
         finalizing = true;

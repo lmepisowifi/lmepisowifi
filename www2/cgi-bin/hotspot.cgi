@@ -35,16 +35,13 @@ busybox mv "$_SESS_TMP" "$SESSION_FILE"
 # Clamp body size once for every action below: reject non-numeric and cap
 # to 64KB so a malicious Content-Length can't force an oversized read (DoS).
 case "${CONTENT_LENGTH:-0}" in *[!0-9]*|"") CONTENT_LENGTH=0 ;; esac
-# portal_upload sends base64 image data (≤512 KB); portal_audio_upload allows ≤5 MB
+# portal_upload and portal_audio_upload allow larger base64 payloads (up to ~15 MB)
 _ACT_PRE=$(echo "$QUERY_STRING" | grep -o 'action=[^&]*' | sed 's/action=//')
-if [ "$_ACT_PRE" = "portal_upload" ]; then
-    [ "$CONTENT_LENGTH" -gt 524288   ] && CONTENT_LENGTH=524288
-elif [ "$_ACT_PRE" = "portal_audio_upload" ]; then
-    [ "$CONTENT_LENGTH" -gt 5242880 ] && CONTENT_LENGTH=5242880
+if [ "$_ACT_PRE" = "portal_upload" ] || [ "$_ACT_PRE" = "portal_audio_upload" ]; then
+    [ "$CONTENT_LENGTH" -gt 15728640 ] && CONTENT_LENGTH=15728640
 else
     [ "$CONTENT_LENGTH" -gt 65536   ] && CONTENT_LENGTH=65536
 fi
-
 # ---------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------

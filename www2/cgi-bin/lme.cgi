@@ -125,6 +125,12 @@ MAC_REVERT_MODE=/tmp/macfilter_revert_mode
 MAC_REVERT_START=/tmp/macfilter_revert_start
 MAC_REVERT_TIMEOUT=90
 
+# ---- DHCP server revert state files ----
+DHCP_REVERT_PENDING=/tmp/dhcp_revert_pending
+DHCP_REVERT_MODE=/tmp/dhcp_revert_mode
+DHCP_REVERT_START=/tmp/dhcp_revert_start
+DHCP_REVERT_TIMEOUT=90
+
 # ---- WLAN helper functions ----
 get_ssid() {
     mib get WLAN1_MBSSIB_TBL.0.ssid \
@@ -407,6 +413,62 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
         printf "Status: 200 OK\r\n"
         printf "Content-Type: application/json\r\n\r\n"
         printf '{"ip":"%s","subnet":"%s"}' "$LAN_IP" "$LAN_SN"
+        exit 0
+    fi
+
+    # --- action=dhcp_status: return current DHCP server settings as JSON ---
+    if echo "$QUERY_STRING" | busybox grep -q "action=dhcp_status"; then
+        DHCP_MODE_VAL=$(mib get DHCP_MODE 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_POOL_START=$(mib get LAN_DHCP_POOL_START 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_POOL_END=$(mib get LAN_DHCP_POOL_END 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_MASK=$(mib get DHCP_SUBNET_MASK 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_GW=$(mib get LAN_DHCP_GATEWAY 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_LEASE=$(mib get LAN_DHCP_LEASE 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_DOMAIN=$(mib get LAN_DHCP_DOMAIN 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_DNS_OPT=$(mib get LAN_DHCP_DNS_OPT 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_DNS1=$(mib get DHCPS_DNS1 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_DNS2=$(mib get DHCPS_DNS2 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        DHCP_DNS3=$(mib get DHCPS_DNS3 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+
+        DHCP_ENABLED=false
+        [ -n "$DHCP_MODE_VAL" ] && [ "$DHCP_MODE_VAL" != "0" ] && DHCP_ENABLED=true
+
+        [ -z "$DHCP_LEASE" ]  && DHCP_LEASE="86400"
+        [ -z "$DHCP_MASK" ]   && DHCP_MASK="255.255.255.0"
+        [ -z "$DHCP_DOMAIN" ] && DHCP_DOMAIN="bbrouter"
+
+        ESC_DOMAIN=$(printf '%s' "$DHCP_DOMAIN" | busybox sed 's/\\/\\\\/g; s/"/\\"/g')
+
+        # Surface any pending dhcp_enable revert the same way lan_status/status do,
+        # so the UI can reflect it if/when it's wired up to show a countdown.
+        DHCP_PENDING=false
+        DHCP_REMAINING=0
+        if [ -f "$DHCP_REVERT_PENDING" ] && [ -f "$DHCP_REVERT_START" ]; then
+            D_START=$(cat "$DHCP_REVERT_START")
+            D_NOW=$(date +%s)
+            D_ELAPSED=$((D_NOW - D_START))
+            DHCP_REMAINING=$((DHCP_REVERT_TIMEOUT - D_ELAPSED))
+            [ "$DHCP_REMAINING" -lt 0 ] && DHCP_REMAINING=0
+            DHCP_PENDING=true
+        fi
+
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: application/json\r\n\r\n"
+        printf '{"enabled":%s,"pool_start":"%s","pool_end":"%s","mask":"%s","gateway":"%s","lease":%s,"domain":"%s","dns_opt":%s,"dns1":"%s","dns2":"%s","dns3":"%s","pending":%s,"remaining":%d}' \
+            "$DHCP_ENABLED" "$DHCP_POOL_START" "$DHCP_POOL_END" "$DHCP_MASK" "$DHCP_GW" \
+            "$DHCP_LEASE" "$ESC_DOMAIN" "${DHCP_DNS_OPT:-0}" "$DHCP_DNS1" "$DHCP_DNS2" "$DHCP_DNS3" \
+            "$DHCP_PENDING" "$DHCP_REMAINING"
         exit 0
     fi
 
@@ -1256,10 +1318,213 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         mib set LAN_SUBNET "$FORM_SN"
         mib commit
 
+        # LAN IP just changed -- udhcpd.conf's "server" line is now stale, rebuild + restart it.
+        sh /lmepisowifi/www2/sh/dhcp_control.sh restart
+
         # Return new IP so the client can redirect if it changed
         printf "Status: 200 OK\r\n"
         printf "Content-Type: application/json\r\n\r\n"
         printf '{"ip":"%s"}' "$FORM_IP"
+        exit 0
+    fi
+
+    # --- action=dhcp_save: apply DHCP server pool/lease/DNS settings ---
+    if echo "$QUERY_STRING" | busybox grep -q "action=dhcp_save"; then
+        FORM_POOL_START=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^pool_start=' | busybox cut -d'=' -f2-)
+        FORM_POOL_START=$(busybox httpd -d "$FORM_POOL_START" | busybox tr -d '\r\n')
+        FORM_POOL_END=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^pool_end=' | busybox cut -d'=' -f2-)
+        FORM_POOL_END=$(busybox httpd -d "$FORM_POOL_END" | busybox tr -d '\r\n')
+        FORM_MASK=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^mask=' | busybox cut -d'=' -f2-)
+        FORM_MASK=$(busybox httpd -d "$FORM_MASK" | busybox tr -d '\r\n')
+        FORM_GATEWAY=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^gateway=' | busybox cut -d'=' -f2-)
+        FORM_GATEWAY=$(busybox httpd -d "$FORM_GATEWAY" | busybox tr -d '\r\n')
+        FORM_LEASE=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^lease=' | busybox cut -d'=' -f2-)
+        FORM_LEASE=$(busybox httpd -d "$FORM_LEASE" | busybox tr -d '\r\n')
+        FORM_DOMAIN=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^domain=' | busybox cut -d'=' -f2-)
+        FORM_DOMAIN=$(busybox httpd -d "$FORM_DOMAIN" | busybox tr -d '\r\n')
+        FORM_DNS_OPT=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^dns_opt=' | busybox cut -d'=' -f2-)
+        FORM_DNS_OPT=$(busybox httpd -d "$FORM_DNS_OPT" | busybox tr -d '\r\n')
+        FORM_DNS1=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^dns1=' | busybox cut -d'=' -f2-)
+        FORM_DNS1=$(busybox httpd -d "$FORM_DNS1" | busybox tr -d '\r\n')
+        FORM_DNS2=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^dns2=' | busybox cut -d'=' -f2-)
+        FORM_DNS2=$(busybox httpd -d "$FORM_DNS2" | busybox tr -d '\r\n')
+        FORM_DNS3=$(echo "$POST_DATA" | busybox sed 's/&/\n/g' \
+            | busybox grep '^dns3=' | busybox cut -d'=' -f2-)
+        FORM_DNS3=$(busybox httpd -d "$FORM_DNS3" | busybox tr -d '\r\n')
+
+        # Validate pool start/end, mask, gateway: four dot-separated octets 0-255
+        # (same validator as lan_ip_save, reused rather than rewritten)
+        VALID_START=$(echo "$FORM_POOL_START" | busybox awk -F. '
+            NF==4 { ok=1; for(i=1;i<=4;i++) if($i!~/^[0-9]+$/||$i+0>255) ok=0; print ok; exit }
+            { print 0 }')
+        if [ "$VALID_START" != "1" ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Invalid pool start address"
+            exit 0
+        fi
+        VALID_END=$(echo "$FORM_POOL_END" | busybox awk -F. '
+            NF==4 { ok=1; for(i=1;i<=4;i++) if($i!~/^[0-9]+$/||$i+0>255) ok=0; print ok; exit }
+            { print 0 }')
+        if [ "$VALID_END" != "1" ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Invalid pool end address"
+            exit 0
+        fi
+        VALID_MASK=$(echo "$FORM_MASK" | busybox awk -F. '
+            NF==4 { ok=1; for(i=1;i<=4;i++) if($i!~/^[0-9]+$/||$i+0>255) ok=0; print ok; exit }
+            { print 0 }')
+        if [ "$VALID_MASK" != "1" ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Invalid subnet mask"
+            exit 0
+        fi
+        VALID_GW=$(echo "$FORM_GATEWAY" | busybox awk -F. '
+            NF==4 { ok=1; for(i=1;i<=4;i++) if($i!~/^[0-9]+$/||$i+0>255) ok=0; print ok; exit }
+            { print 0 }')
+        if [ "$VALID_GW" != "1" ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Invalid gateway address"
+            exit 0
+        fi
+
+        # Lease: positive integer
+        case "$FORM_LEASE" in
+            ''|*[!0-9]*)
+                printf "Status: 400 Bad Request\r\n"
+                printf "Content-Type: text/plain\r\n\r\n"
+                printf "Invalid lease time"
+                exit 0
+                ;;
+        esac
+        if [ "$FORM_LEASE" -le 0 ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Lease time must be positive"
+            exit 0
+        fi
+
+        # Domain: non-empty
+        if [ -z "$FORM_DOMAIN" ]; then
+            printf "Status: 400 Bad Request\r\n"
+            printf "Content-Type: text/plain\r\n\r\n"
+            printf "Domain must not be empty"
+            exit 0
+        fi
+
+        # DNS opt: 0/1 only
+        case "$FORM_DNS_OPT" in
+            0|1) ;;
+            *) FORM_DNS_OPT=0 ;;
+        esac
+
+        # DNS servers are optional (dhcp_control.sh falls back to this router's
+        # IP when dns_opt=0 or all three are blank) -- validate only if set.
+        for _DNS_VAL in "$FORM_DNS1" "$FORM_DNS2" "$FORM_DNS3"; do
+            if [ -n "$_DNS_VAL" ]; then
+                _DNS_OK=$(echo "$_DNS_VAL" | busybox awk -F. '
+                    NF==4 { ok=1; for(i=1;i<=4;i++) if($i!~/^[0-9]+$/||$i+0>255) ok=0; print ok; exit }
+                    { print 0 }')
+                if [ "$_DNS_OK" != "1" ]; then
+                    printf "Status: 400 Bad Request\r\n"
+                    printf "Content-Type: text/plain\r\n\r\n"
+                    printf "Invalid DNS server address"
+                    exit 0
+                fi
+            fi
+        done
+
+        mib set LAN_DHCP_POOL_START "$FORM_POOL_START"
+        mib set LAN_DHCP_POOL_END "$FORM_POOL_END"
+        mib set DHCP_SUBNET_MASK "$FORM_MASK"
+        mib set LAN_DHCP_GATEWAY "$FORM_GATEWAY"
+        mib set LAN_DHCP_LEASE "$FORM_LEASE"
+        mib set LAN_DHCP_DOMAIN "$FORM_DOMAIN"
+        mib set LAN_DHCP_DNS_OPT "$FORM_DNS_OPT"
+        mib set DHCPS_DNS1 "$FORM_DNS1"
+        mib set DHCPS_DNS2 "$FORM_DNS2"
+        mib set DHCPS_DNS3 "$FORM_DNS3"
+        mib commit
+
+        sh /lmepisowifi/www2/sh/dhcp_control.sh restart
+
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: text/plain\r\n\r\n"
+        printf "OK"
+        exit 0
+    fi
+
+    # --- action=dhcp_enable: enable/disable DHCP server, mirrors macfilter_mode's revert-timer shape ---
+    if echo "$QUERY_STRING" | busybox grep -q "action=dhcp_enable"; then
+        FORM_MODE=$(echo "$POST_DATA" \
+            | busybox sed -n 's/.*mode=\([^&]*\).*/\1/p' \
+            | busybox tr -d '\r\n')
+        case "$FORM_MODE" in
+            0|1) ;;
+            *)
+                printf "Status: 400 Bad Request\r\n"
+                printf "Content-Type: text/plain\r\n\r\n"
+                printf "Invalid mode value"
+                exit 0
+                ;;
+        esac
+
+        OLD_MODE=$(mib get DHCP_MODE 2>/dev/null \
+            | busybox grep "=" | busybox cut -d'=' -f2- | busybox tr -d '\r\n')
+        [ -z "$OLD_MODE" ] && OLD_MODE=0
+
+        # Save rollback state
+        rm -f "$DHCP_REVERT_PENDING" "$DHCP_REVERT_MODE" "$DHCP_REVERT_START"
+        echo "$OLD_MODE" > "$DHCP_REVERT_MODE"
+        touch "$DHCP_REVERT_PENDING"
+        date +%s > "$DHCP_REVERT_START"
+
+        if [ "$FORM_MODE" = "0" ]; then
+            mib set DHCP_MODE 0
+            mib set LAN_DHCP 0
+            mib commit
+            sh /lmepisowifi/www2/sh/dhcp_control.sh stop
+        else
+            mib set DHCP_MODE 2
+            mib set LAN_DHCP 1
+            mib commit
+            sh /lmepisowifi/www2/sh/dhcp_control.sh restart
+        fi
+
+        # Background revert timer (same shape as macfilter_mode's)
+        (
+            sleep $DHCP_REVERT_TIMEOUT
+            if [ -f "$DHCP_REVERT_PENDING" ]; then
+                RB_MODE=$(cat "$DHCP_REVERT_MODE")
+                mib set DHCP_MODE "$RB_MODE"
+                if [ "$RB_MODE" = "0" ]; then
+                    mib set LAN_DHCP 0
+                    mib commit
+                    sh /lmepisowifi/www2/sh/dhcp_control.sh stop
+                else
+                    mib set LAN_DHCP 1
+                    mib commit
+                    sh /lmepisowifi/www2/sh/dhcp_control.sh restart
+                fi
+                rm -f "$DHCP_REVERT_PENDING" "$DHCP_REVERT_MODE" "$DHCP_REVERT_START"
+            fi
+        ) &
+
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: text/plain\r\n\r\n"
+        printf "OK"
         exit 0
     fi
 

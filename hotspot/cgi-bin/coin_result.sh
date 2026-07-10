@@ -86,32 +86,61 @@ _post() {
 SID=$(_post "sid")
 AMOUNT=$(_post "amount")
 SIG=$(_post "sig")
+RECOVER=$(_post "recover")   # "1" when NodeMCU is replaying a power-outage session on boot
+RECOVER_MAC=$(_post "mac")   # paying client's MAC, only trusted in recovery mode
 
 [ -n "$SID" ] && [ -n "$AMOUNT" ] && [ -n "$SIG" ] || _err "Missing params"
 printf '%s' "$SID"    | grep -qE '^[0-9a-f]{16}$' || _err "Invalid sid"
 printf '%s' "$AMOUNT" | grep -qE '^[0-9]+$'        || _err "Invalid amount"
 
-# --- Guard 3: Verify PSK-based signature ---
-EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${AMOUNT}:end")
-[ "$SIG" = "$EXP_SIG" ] || _err "Bad sig"
-
 SESSION_PATH="/tmp/coin_sessions/${SID}"
 RESULT_PATH="/tmp/coin_sessions/${SID}.result"
-
-[ -f "$SESSION_PATH" ] || _err "Session not found"
-
-if [ -f "$RESULT_PATH" ]; then
-    PREV_MIN=$(awk '{print $2}' "$RESULT_PATH")
-    _ok "{\"ok\":true,\"minutes\":${PREV_MIN},\"duplicate\":true}"
-fi
-
-# --- Guard 4: Reject stale replays ---
 NOW=$(awk '{print int($1)}' /proc/uptime)
-LAST_SEEN=$(awk '{print ($3==""?$2:$3)}' "$SESSION_PATH")
-SESSION_AGE=$(( NOW - LAST_SEEN ))
-[ "$SESSION_AGE" -le $(( COIN_TIMEOUT + 30 )) ] || _err "Session expired"
 
-CLIENT_MAC=$(awk '{print $1}' "$SESSION_PATH")
+if [ "$RECOVER" = "1" ]; then
+    # ── POWER-OUTAGE RECOVERY PATH ──────────────────────────────────────
+    # A blackout wiped both the NodeMCU RAM total AND the portal's /tmp
+    # bookkeeping, but the NodeMCU mirrored the session to its flash and is
+    # now replaying it on boot. There is therefore NO session file to read
+    # the MAC from, so the MAC is carried in the POST and folded into the
+    # signature: sig = md5(PSK:SID:AMOUNT:MAC:recover). Because the PSK is
+    # secret, only the real NodeMCU can produce this — a LAN attacker can't
+    # forge a grant. We validate the MAC shape, then jump straight to the
+    # grant/extend logic below.
+    printf '%s' "$RECOVER_MAC" | grep -qE '^[0-9a-f:]{17}$' || _err "Invalid mac"
+    R_EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${AMOUNT}:${RECOVER_MAC}:recover")
+    [ "$SIG" = "$R_EXP_SIG" ] || _err "Bad sig"
+
+    # Idempotency: if this exact recovery SID was already credited (NodeMCU
+    # retried on a later boot before clearing its flash), don't double-grant.
+    if [ -f "$RESULT_PATH" ]; then
+        PREV_MIN=$(awk '{print $2}' "$RESULT_PATH")
+        _ok "{\"ok\":true,\"minutes\":${PREV_MIN},\"duplicate\":true,\"recovered\":true}"
+    fi
+
+    CLIENT_MAC="$RECOVER_MAC"
+    # A recovery with no coins is meaningless — nothing to restore.
+    [ "${AMOUNT:-0}" -gt 0 ] || _ok '{"ok":true,"amount":0,"minutes":0,"recovered":true}'
+else
+    # ── NORMAL END-OF-SESSION PATH ──────────────────────────────────────
+    # --- Guard 3: Verify PSK-based signature ---
+    EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${AMOUNT}:end")
+    [ "$SIG" = "$EXP_SIG" ] || _err "Bad sig"
+
+    [ -f "$SESSION_PATH" ] || _err "Session not found"
+
+    if [ -f "$RESULT_PATH" ]; then
+        PREV_MIN=$(awk '{print $2}' "$RESULT_PATH")
+        _ok "{\"ok\":true,\"minutes\":${PREV_MIN},\"duplicate\":true}"
+    fi
+
+    # --- Guard 4: Reject stale replays ---
+    LAST_SEEN=$(awk '{print ($3==""?$2:$3)}' "$SESSION_PATH")
+    SESSION_AGE=$(( NOW - LAST_SEEN ))
+    [ "$SESSION_AGE" -le $(( COIN_TIMEOUT + 30 )) ] || _err "Session expired"
+
+    CLIENT_MAC=$(awk '{print $1}' "$SESSION_PATH")
+fi
 
 if [ "${AMOUNT:-0}" -eq 0 ]; then
     STRIKES=$($BB grep "^$CLIENT_MAC " /tmp/coin_strikes.txt 2>/dev/null | $BB awk '{print $2}')
@@ -131,7 +160,7 @@ if [ "${AMOUNT:-0}" -eq 0 ]; then
     fi
 
     printf '0 0\n' > "$RESULT_PATH"
-    rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "/tmp/coin_lock"
+    rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
     _ok '{"ok":true,"amount":0,"minutes":0}'
 fi
 
@@ -262,6 +291,9 @@ fi
 # -------------------------------------------------------------------------
 
 printf '%s %s\n' "$AMOUNT" "$MINUTES" > "$RESULT_PATH"
-rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "/tmp/coin_lock"
+rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
 
+if [ "$RECOVER" = "1" ]; then
+    _ok "{\"ok\":true,\"amount\":${AMOUNT},\"minutes\":${MINUTES},\"recovered\":true}"
+fi
 _ok "{\"ok\":true,\"amount\":${AMOUNT},\"minutes\":${MINUTES}}"

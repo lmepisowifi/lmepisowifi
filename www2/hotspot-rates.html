@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint{ font-size:11.5px;color:var(--text-secondary);margin-top:3px; }
+        /* ── Coin rate entries ── */
+        .coin-rate-entry{
+            position:relative;
+            display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px;
+            margin-bottom:8px; background:var(--bg-surface); border:1px solid var(--border-color);
+            border-radius:8px; padding:10px 34px 10px 12px;
+            transition:border-color .15s;
+        }
+        .coin-rate-entry:hover{ border-color:#444; }
+
+        /* Peso amount */
+        .cr-peso-wrap{
+            display:flex; align-items:center; flex-shrink:0;
+            background:var(--bg-input); border:1px solid var(--border-color); border-radius:6px;
+            padding:0 9px; height:34px;
+        }
+        .cr-peso-wrap:focus-within{ border-color:var(--accent-color); box-shadow:0 0 0 3px rgba(255,255,255,.08); }
+        .cr-peso-sign{ color:var(--text-secondary); font-size:13px; font-weight:700; margin-right:4px; }
+        .cr-peso{
+            border:none !important; background:transparent !important; color:var(--text-primary) !important;
+            font-size:14px !important; font-weight:700; width:52px; padding:0 !important; height:32px !important;
+            -moz-appearance:textfield;
+        }
+        .cr-peso::-webkit-outer-spin-button, .cr-peso::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
+        .cr-peso:focus{ outline:none !important; box-shadow:none !important; }
+
+        /* Duration (d / h / m) */
+        .cr-duration{ display:flex; align-items:center; gap:6px; }
+        .cr-dur-field{
+            display:flex; align-items:center; gap:4px;
+            background:var(--bg-input); border:1px solid var(--border-color); border-radius:6px;
+            padding:0 8px; height:34px;
+        }
+        .cr-dur-field:focus-within{ border-color:var(--accent-color); box-shadow:0 0 0 3px rgba(255,255,255,.08); }
+        .cr-dur-field input{
+            border:none !important; background:transparent !important; color:var(--text-primary) !important;
+            font-size:14px !important; font-weight:700; width:32px; text-align:center; padding:0 !important; height:32px !important;
+            -moz-appearance:textfield;
+        }
+        .cr-dur-field input::-webkit-outer-spin-button, .cr-dur-field input::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
+        .cr-dur-field input:focus{ outline:none !important; box-shadow:none !important; }
+        .cr-dur-field span{ font-size:11px; color:var(--text-secondary); }
+
+        .rate-summary{ font-size:11px; color:var(--text-secondary); flex-basis:100%; }
+
+        /* Remove button — small ghost icon, not a full bootstrap button */
+        .cr-remove{
+            position:absolute; top:9px; right:8px;
+            width:22px; height:22px; border-radius:50%; flex-shrink:0;
+            border:none; background:transparent; color:var(--text-secondary);
+            font-size:15px; line-height:1; cursor:pointer;
+            display:flex; align-items:center; justify-content:center;
+            transition:background .15s, color .15s;
+        }
+        .cr-remove:hover{ background:rgba(255,107,107,.15); color:#ff6b6b; }
+
+        .add-rate-btn{ background:none;border:1px dashed var(--border-color);color:var(--text-secondary);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;width:100%;margin-top:4px;transition:border-color .18s,color .18s; }
+        .add-rate-btn:hover{ border-color:#888;color:var(--text-primary); }
+        .empty-state{ color:var(--text-secondary);font-size:13px;text-align:center;padding:14px 0; }
+    </style>
+</head>
+<body>
+<div id="overlay"><div id="overlay-blur"></div><div id="overlay-msg"><div id="overlay-spinner"></div><span id="overlay-text"></span></div></div>
+<script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
+
+<div class="container mt-4" style="max-width:640px;">
+
+    <!-- ═══ WiFi Rates ═══ -->
+    <div class="card">
+        <div class="card-header">WiFi Rates</div>
+        <div class="card-body">
+            <div class="field-hint mb-2">
+                Peso amounts and the time each one buys. Customers see these exact rates in the
+                WiFi Rates list on the login page once at least one rate is added below.
+            </div>
+            <div id="coin-rate-rows"></div>
+            <div id="coin-rate-empty" class="empty-state" style="display:none;">No rates configured yet — add one below.</div>
+            <button class="add-rate-btn" onclick="addRateRow()">+ Add Rate</button>
+
+            <hr class="my-3" style="border-color:var(--border-color);">
+            <div class="d-flex gap-2">
+                <button class="btn btn-primary" onclick="saveRates()">Save Rates</button>
+                <button class="btn btn-outline-secondary" onclick="loadConfig()">Discard</button>
+            </div>
+        </div>
+    </div>
+
+</div><!-- /container -->
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = {positionClass:'toast-bottom-right',timeOut:3000,progressBar:true,closeButton:true};
+function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
+function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
+
+/* ── Coin rate rows ── */
+function minsToDHM(t){ t=parseInt(t)||0; return{d:Math.floor(t/1440),h:Math.floor((t%1440)/60),m:t%60}; }
+function dhmToMins(d,h,m){ return(parseInt(d)||0)*1440+(parseInt(h)||0)*60+(parseInt(m)||0); }
+function fmtDuration(t){
+    if(!t||t<=0) return '';
+    var d=Math.floor(t/1440),h=Math.floor((t%1440)/60),m=t%60,parts=[];
+    if(d) parts.push(d+'d');
+    if(h) parts.push(h+'h');
+    if(m) parts.push(m+'m');
+    return parts.length?'= '+parts.join(' '):'';
+}
+function updateRateSummary(entry){
+    var total=dhmToMins(
+        entry.querySelector('.cr-days').value,
+        entry.querySelector('.cr-hours').value,
+        entry.querySelector('.cr-mins').value);
+    entry.querySelector('.rate-summary').textContent=fmtDuration(total);
+}
+function toggleEmptyState(){
+    var wrap=document.getElementById('coin-rate-rows');
+    document.getElementById('coin-rate-empty').style.display = wrap.children.length ? 'none' : 'block';
+}
+function addRateRow(peso,mins){
+    var wrap=document.getElementById('coin-rate-rows');
+    var dhm=minsToDHM(mins);
+    var entry=document.createElement('div');
+    entry.className='coin-rate-entry';
+    entry.innerHTML=
+        '<button type="button" class="cr-remove" title="Remove rate" onclick="this.closest(\'.coin-rate-entry\').remove();toggleEmptyState();">&times;</button>'
+        +'<div class="cr-peso-wrap">'
+        +  '<span class="cr-peso-sign">₱</span>'
+        +  '<input type="number" class="cr-peso" placeholder="0" value="'+(peso||'')+'" min="1">'
+        +'</div>'
+        +'<div class="cr-duration">'
+        +  '<div class="cr-dur-field"><input type="number" class="cr-days" placeholder="0" value="'+(dhm.d||'')+'" min="0" oninput="updateRateSummary(this.closest(\'.coin-rate-entry\'))"><span>d</span></div>'
+        +  '<div class="cr-dur-field"><input type="number" class="cr-hours" placeholder="0" value="'+(dhm.h||'')+'" min="0" max="23" oninput="updateRateSummary(this.closest(\'.coin-rate-entry\'))"><span>h</span></div>'
+        +  '<div class="cr-dur-field"><input type="number" class="cr-mins" placeholder="0" value="'+(dhm.m||'')+'" min="0" max="59" oninput="updateRateSummary(this.closest(\'.coin-rate-entry\'))"><span>m</span></div>'
+        +'</div>'
+        +'<div class="rate-summary"></div>';
+    wrap.appendChild(entry);
+    updateRateSummary(entry);
+    toggleEmptyState();
+}
+function buildRateRows(rateStr){
+    var wrap=document.getElementById('coin-rate-rows'); wrap.innerHTML='';
+    if(rateStr){
+        rateStr.trim().split(/\s+/).forEach(function(pair){
+            if(!pair) return;
+            var parts=pair.split(':'); addRateRow(parts[0]||'',parts[1]||'');
+        });
+    }
+    toggleEmptyState();
+}
+function collectRates(){
+    var pairs=[];
+    document.querySelectorAll('#coin-rate-rows .coin-rate-entry').forEach(function(entry){
+        var p=entry.querySelector('.cr-peso').value.trim();
+        var total=dhmToMins(entry.querySelector('.cr-days').value,entry.querySelector('.cr-hours').value,entry.querySelector('.cr-mins').value);
+        if(p&&total>0) pairs.push(p+':'+total);
+    });
+    return pairs.join(' ');
+}
+
+/* ── Config load ── */
+function loadConfig(){
+    fetch('/cgi-bin/hotspot.cgi?action=config_get',{cache:'no-store'})
+        .then(function(r){return r.json();})
+        .then(function(d){
+            if(!d.ok){toastr.error('Failed to load config');return;}
+            buildRateRows(d.coin_rates||'');
+        })
+        .catch(function(){toastr.error('Network error loading config');});
+}
+
+/* ── Save rates ── */
+function saveRates(){
+    var rates=collectRates();
+    if(!rates){toastr.warning('Add at least one rate row');return;}
+    showOverlay('Saving rates…');
+    var body='coin_rates='+encodeURIComponent(rates);
+    postForm('config_set',body,function(d){
+        hideOverlay();
+        if(d.ok) toastr.success('WiFi rates saved');
+        else toastr.error('Save failed: '+(d.error||''));
+    });
+}
+
+/* ── Shared fetch helper ── */
+function postForm(action,body,cb){
+    fetch('/cgi-bin/hotspot.cgi?action='+action,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){return r.json();}).then(cb)
+    .catch(function(e){toastr.error('Network error');console.error(e);});
+}
+
+window.addEventListener('DOMContentLoaded', loadConfig);
+</script>
+</body>
+</html>

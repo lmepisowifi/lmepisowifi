@@ -18,7 +18,7 @@ fi
 
 # 4. HARD guarantee: never allow an empty host (empty host => redirect loop)
 _srv_ip="${_srv_ip:-10.0.0.1}"
-_srv_port="${_srv_port:-${PORTAL_PORT:-808}}"
+_srv_port="${_srv_port:-${PORTAL_PORT:-80}}"
 
 case "${REQUEST_URI%%\?*}" in
     /admin|/admin/|/admin/*)
