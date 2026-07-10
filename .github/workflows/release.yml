@@ -2,14 +2,11 @@ name: release
 # Cuts a release when you push a tag like v1.0.0.
 # Builds the NodeMCU bin, packs the tarball, writes+commits manifest.txt,
 # and publishes the GitHub Release. Mirrors release.sh.
-
 on:
   push:
     tags: ["v*"]
-
 permissions:
   contents: write   # needed to commit manifest.txt and create the release
-
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -18,7 +15,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-
+          
       - name: Install arduino-cli + ESP8266 core
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
@@ -28,7 +25,7 @@ jobs:
             https://arduino.esp8266.com/stable/package_esp8266com_index.json
           ./bin/arduino-cli core update-index
           ./bin/arduino-cli core install esp8266:esp8266
-
+          
       - name: Build firmware
         run: |
           mkdir -p coin_nodemcu build hotspot/firmware
@@ -37,7 +34,7 @@ jobs:
             --fqbn "esp8266:esp8266:nodemcuv2:eesz=4M2M,xtal=80" \
             --output-dir build coin_nodemcu
           cp build/coin_nodemcu.ino.bin hotspot/firmware/coin_nodemcu.bin
-
+          
       - name: Pack, manifest, commit, release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,3 +61,10 @@ jobs:
           git commit -m "release $VER (nodemcu fw $FW)" || echo "nothing to commit"
           git push origin HEAD:main
           gh release create "v$VER" "$TAR" --title "v$VER" --notes "Release $VER"
+          
+      - name: Purge jsDelivr cache
+        run: |
+          echo "Purging CHANGELOG.md..."
+          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/CHANGELOG.md
+          echo -e "\nPurging manifest.txt..."
+          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/manifest.txt
