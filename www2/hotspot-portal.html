@@ -102,17 +102,6 @@
 <!-- LEFT column -->
 <div class="col-lg-7">
 
-    <!-- Storage indicator -->
-    <div id="disk-bar" class="mb-3 px-1" style="display:none;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:11px;margin-bottom:5px;gap:8px;">
-            <span id="disk-bar-label" style="color:var(--text-secondary);white-space:nowrap;">UBI Storage</span>
-            <span id="disk-bar-text" style="color:var(--text-secondary);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
-        </div>
-        <div style="height:4px;background:var(--bg-input);border-radius:2px;overflow:hidden;">
-            <div id="disk-bar-fill" style="height:100%;width:0%;background:#3b82f6;transition:width .5s,background .3s;border-radius:2px;"></div>
-        </div>
-    </div>
-
     <!-- Branding text -->
     <div class="card mb-3">
         <div class="card-header">Branding</div>
@@ -286,35 +275,8 @@ function formatBytes(b) {
 function fetchDiskSpace() {
     fetch('/cgi-bin/hotspot.cgi?action=portal_disk_space', { cache: 'no-store' })
         .then(function(r) { return r.json(); })
-        .then(function(d) { if (d.ok) { _diskInfo = d; updateDiskBar(); } })
+        .then(function(d) { if (d.ok) { _diskInfo = d; } })
         .catch(function() { /* non-fatal; backend guard is the hard stop */ });
-}
-
-function updateDiskBar() {
-    if (!_diskInfo) return;
-    var d = _diskInfo;
-    var bar = document.getElementById('disk-bar');
-    if (!bar) return;
-    var pct = d.size_bytes > 0 ? Math.min(100, Math.round(d.used_bytes / d.size_bytes * 100)) : 0;
-    var availMB  = (d.avail_bytes  / 1048576).toFixed(1);
-    var usableMB = (d.usable_bytes / 1048576).toFixed(1);
-    var fillColor, textColor, msg;
-    if (d.usable_bytes <= 0) {
-        fillColor = '#ef4444'; textColor = '#ef4444';
-        msg = '⚠ Uploads blocked — less than 10 MB remaining';
-    } else if (d.usable_bytes < 5 * 1048576) {
-        fillColor = '#f59e0b'; textColor = '#fbbf24';
-        msg = usableMB + ' MB usable · ' + availMB + ' MB free (10 MB reserved)';
-    } else {
-        fillColor = '#3b82f6'; textColor = 'var(--text-secondary)';
-        msg = usableMB + ' MB usable · ' + availMB + ' MB free (10 MB reserved)';
-    }
-    bar.style.display = '';
-    document.getElementById('disk-bar-fill').style.width  = pct + '%';
-    document.getElementById('disk-bar-fill').style.background = fillColor;
-    document.getElementById('disk-bar-label').style.color = textColor;
-    document.getElementById('disk-bar-text').textContent  = msg;
-    document.getElementById('disk-bar-text').style.color  = textColor;
 }
 
 /* Returns an error string when the file is too large for available space, null if OK */
@@ -548,7 +510,7 @@ function onPromoFileChosen(slotId) {
         if (pendEl) { pendEl.textContent = '⚠ Not yet uploaded'; pendEl.style.display='block'; }
         // Show confirm button
         var upBtn = document.getElementById('slot-upload-btn-'+slotId);
-        if (upBtn) { upBtn.style.display='inline-flex'; upBtn.disabled=false; }
+        if (upBtn) { upBtn.style.display='inline-block'; upBtn.disabled=false; }
         // Update preview carousel with first slot that has an image
         if (slotId === 'promo1' || document.getElementById('prev-carousel').style.display === 'none') {
             document.getElementById('prev-carousel-img').src = src;
@@ -714,7 +676,7 @@ function onAudioFileChosen(slot) {
     }
 
     var upBtn = document.getElementById('audio-upload-btn-' + slot);
-    if (upBtn) { upBtn.style.display = 'inline-flex'; upBtn.disabled = false; }
+    if (upBtn) { upBtn.style.display = 'inline-block'; upBtn.disabled = false; }
 }
 
 function uploadAudio(slot) {

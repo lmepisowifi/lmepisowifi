@@ -44,7 +44,7 @@ const int COIN_ENABLE_ACTIVE = HIGH;
 // ota.sh compares it against the release manifest's nodemcu_version and pushes a
 // self-flash ONLY when they differ, so a portal-only update (www2/hotspot files)
 // never needlessly reflashes the coin slot.
-#define FW_VERSION          "1.0.7"
+#define FW_VERSION          "1.0.8"
 // No AP password — open so owner can connect immediately on first setup
 
 // ── CONFIG STRUCT ─────────────────────────────────────────────────────
@@ -126,7 +126,14 @@ volatile unsigned long lastEdgeMs = 0;
 volatile int           activeState = LOW; // Assumes NO by default
 bool   pendingResult  = false;
 String pendingBody    = "";
+String pendingSid     = "";   // SID pendingBody belongs to — only clear that
+                               // session's flash mirror once the portal confirms it
 int    pendingRetries = 0;
+
+// Boot-time power-outage recovery must be retried periodically, not attempted
+// only once — see the recovery-retry block in loop().
+unsigned long lastRecoveryAttemptMs = 0;
+const unsigned long RECOVERY_RETRY_MS = 10000UL;
 
 // One-time, short-lived nonce backing the signed /reset flow (see coin.sh).
 String        resetNonce    = "";
@@ -340,6 +347,23 @@ void persistSession() {
 
 void clearPersistedSession() {
     LittleFS.remove(SESSION_PATH_FS);
+}
+
+// Only clears the mirror if it still belongs to the given SID. Needed because
+// a new session can legitimately start (and overwrite the mirror with its own
+// zero-peso entry) before a *previous* session's delayed/retried result POST
+// finally gets confirmed — a blind clear at that point would wipe the new,
+// still-live session's crash protection instead of the old one's.
+void clearPersistedSessionIfMatches(const String &sid) {
+    if (sid.length() == 0 || !LittleFS.exists(SESSION_PATH_FS)) return;
+    File f = LittleFS.open(SESSION_PATH_FS, "r");
+    if (!f) return;
+    String line = f.readStringUntil('\n');
+    f.close();
+    int sp = line.indexOf(' ');
+    String fileSid = (sp >= 0) ? line.substring(0, sp) : line;
+    fileSid.trim();
+    if (fileSid == sid) clearPersistedSession();
 }
 
 // Forward decl — defined in NORMAL MODE section below.
@@ -590,20 +614,30 @@ void post_result() {
             pendingResult  = false;
             pendingBody    = "";
             pendingRetries = 0;
+            // Portal has now definitively credited these coins — safe to drop
+            // the crash-recovery mirror for this session.
+            clearPersistedSessionIfMatches(pendingSid);
+            pendingSid     = "";
         }
     }
     http.end();
 }
 
 // ── POWER-OUTAGE RECOVERY ──────────────────────────────────────────────────
-// Called once on boot (from startNormalMode, after Wi-Fi is up). If a session
-// mirror survived on flash, the previous run died mid-session — almost always a
-// power cut that took the portal down too. We POST the preserved amount to the
-// portal's coin_result.sh in RECOVERY mode: it carries the client MAC and is
-// signed with it, so coin_result.sh can grant/extend that device's time even
-// though its own /tmp session bookkeeping was wiped by the same outage. The
-// mirror is cleared only after the portal confirms "ok", so a failed/limited
-// reconnect simply retries on the next boot rather than losing the coins.
+// Called once right after connectWiFi() in startNormalMode(), and then again
+// every RECOVERY_RETRY_MS from loop() for as long as the mirror file exists.
+// The repeat calls matter because the ONT/router often hasn't finished
+// booting yet when this device comes up after a shared power outage, so the
+// very first attempt frequently finds WiFi not connected and simply returns.
+// If a session mirror survived on flash, the previous run died mid-session —
+// almost always a power cut that took the portal down too. We POST the
+// preserved amount to the portal's coin_result.sh in RECOVERY mode: it
+// carries the client MAC and is signed with it, so coin_result.sh can
+// grant/extend that device's time even though its own /tmp session
+// bookkeeping was wiped by the same outage. The mirror is cleared only after
+// the portal confirms "ok" AND it still belongs to this SID, so a
+// failed/limited reconnect just retries on the next pass instead of losing
+// the coins.
 void recoverSessionFromFlash() {
     if (!LittleFS.exists(SESSION_PATH_FS)) return;
 
@@ -648,8 +682,10 @@ void recoverSessionFromFlash() {
     bool ok = (code > 0 && http.getString().indexOf("\"ok\":true") >= 0);
     http.end();
 
-    // Only forget the coins once the portal has definitively credited them.
-    if (ok) clearPersistedSession();
+    // Only forget the coins once the portal has definitively credited them —
+    // and only if the mirror still holds this session (a new session may have
+    // already started and overwritten it while this POST was in flight).
+    if (ok) clearPersistedSessionIfMatches(rSid);
 }
 
 void endSession() {
@@ -662,9 +698,12 @@ void endSession() {
     int finalAmount = coinPesos;
     coinPesos = 0;
 
-    // Session is closing cleanly — drop the crash-recovery mirror so it can't
-    // be double-granted on a later boot.
-    clearPersistedSession();
+    // NOTE: the flash mirror is deliberately NOT cleared here. It's only
+    // cleared once post_result() gets a confirmed "ok" from the portal. If we
+    // cleared it now, a power cut during the up-to-50s retry window below
+    // would erase the only surviving record of these coins before the portal
+    // ever actually saw them.
+    pendingSid = activeSid;
 
     String plain = String(cfg.psk) + ":" + activeSid + ":"
                    + String(finalAmount) + ":end";
@@ -1292,6 +1331,19 @@ void loop() {
             pendingRetries++;
             post_result();
         }
+    }
+
+    // Retry the boot-time power-outage recovery POST until the portal
+    // confirms it. A single attempt right after connectWiFi() in
+    // startNormalMode() isn't enough: if the ONT/router hasn't finished
+    // booting yet (common right after a shared power outage), that first
+    // attempt fails and — without this — would never be retried until the
+    // NEXT full reboot, leaving a customer's coins uncredited for hours.
+    // recoverSessionFromFlash() is already a cheap no-op once nothing is left
+    // to recover or WiFi still isn't connected, so just nudge it every 10s.
+    if (LittleFS.exists(SESSION_PATH_FS) && (millis() - lastRecoveryAttemptMs) >= RECOVERY_RETRY_MS) {
+        lastRecoveryAttemptMs = millis();
+        recoverSessionFromFlash();
     }
 
     // WiFi watchdog — reconnect check every 15s.

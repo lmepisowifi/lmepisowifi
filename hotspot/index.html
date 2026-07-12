@@ -15,7 +15,8 @@
 
   <script>
     (function() {
-      var savedTheme = localStorage.getItem('theme');
+      var savedTheme = null;
+      try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
       if (savedTheme === 'light' || savedTheme === 'dark') {
         document.documentElement.setAttribute('data-theme', savedTheme);
       } else {
@@ -399,6 +400,14 @@
       transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
       text-transform: uppercase;
       letter-spacing: 0.06em;
+    }
+
+    /* iOS Safari auto-zooms into any input with font-size < 16px on focus.
+       16px is the minimum that stops the zoom; height/padding stay the same. */
+    @media (max-width: 768px), (pointer: coarse) {
+      .form-control {
+        font-size: 16px !important;
+      }
     }
 
     .form-control::placeholder {
@@ -1071,7 +1080,7 @@ document.addEventListener('DOMContentLoaded', function() {
       var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
       var newTheme = (currentTheme === 'dark') ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', newTheme);
-      localStorage.setItem('theme', newTheme);
+      try { localStorage.setItem('theme', newTheme); } catch (e) {}
     });
   }
 });
@@ -1079,23 +1088,42 @@ document.addEventListener('DOMContentLoaded', function() {
 /* ────────────────────────────────────────────────────────────────
    Audio Engine (Web Audio API - Flawless Gapless Looping)
 ──────────────────────────────────────────────────────────────── */
-var _audioMuted = localStorage.getItem('audioMuted') === '1';
-var _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-var _masterGain = _audioCtx.createGain();
-_masterGain.connect(_audioCtx.destination);
-_masterGain.gain.value = _audioMuted ? 0 : 1; // 0 = Muted, 1 = Full Volume
-
-// Dedicated gain stage for the portal background music only, so it can
-// fade in from silence (avoids startling users with volume maxed out).
-// Insert-coin music and the coin sound stay on _masterGain, unaffected.
+// localStorage throws in Apple's Captive Network Assistant webview
+// (captive.apple.com) too - same failure mode as AudioContext just below.
+// This line used to be unguarded and was the actual cause of views staying
+// display:none forever: an uncaught exception here aborts the rest of this
+// script block before show()/the config fetch ever run.
+var _audioMuted = false;
+try {
+  _audioMuted = localStorage.getItem('audioMuted') === '1';
+} catch (e) {
+  console.warn('[Storage] localStorage unavailable (captive portal webview?):', e);
+}
+// AudioContext is unavailable in Apple's Captive Network Assistant webview
+// (captive.apple.com). An uncaught constructor failure here halts the entire
+// script block, leaving all views display:none forever. Guard with try/catch
+// so the portal renders even when the audio engine can't initialise.
+var _audioCtx    = null;
+var _masterGain  = null;
 var PORTAL_BG_FADE_IN_SECONDS = 5;
-var _portalBgGain = _audioCtx.createGain();
-_portalBgGain.connect(_masterGain);
-
-// Some browsers (esp. captive-portal webviews) already grant playback
-// permission from the page-open action itself. Try immediately; if blocked,
-// the click/touch/key unlock listeners below act as the fallback.
-_audioCtx.resume().catch(function(){});
+var _portalBgGain = null;
+try {
+  _audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+  _masterGain = _audioCtx.createGain();
+  _masterGain.connect(_audioCtx.destination);
+  _masterGain.gain.value = _audioMuted ? 0 : 1; // 0 = Muted, 1 = Full Volume
+  // Dedicated gain stage for portal background music only, so it can
+  // fade in from silence (avoids startling users with volume maxed out).
+  // Insert-coin music and the coin sound stay on _masterGain, unaffected.
+  _portalBgGain = _audioCtx.createGain();
+  _portalBgGain.connect(_masterGain);
+  // Some browsers (esp. captive-portal webviews) already grant playback
+  // permission from the page-open action itself. Try immediately; if blocked,
+  // the click/touch/key unlock listeners below act as the fallback.
+  _audioCtx.resume().catch(function(){});
+} catch(e) {
+  console.warn('[Audio] AudioContext unavailable (captive portal webview?):', e);
+}
 
 // Audio Buffers (Memory)
 var _portalBgBuffer = null;
@@ -1129,7 +1157,7 @@ function _applyMute(muted) {
 }
 
 function _loadAudio(url, type) {
-  if (!url) return;
+  if (!url || !_audioCtx) return;
   fetch(url)
     .then(function(res) { return res.arrayBuffer(); })
     .then(function(data) { return _audioCtx.decodeAudioData(data); })
@@ -1148,7 +1176,7 @@ function _loadAudio(url, type) {
 
 function _tryPlayBg() {
   try {
-    if (!_portalBgBuffer) return; // Buffer not loaded yet; _loadAudio() will call this again once it is
+    if (!_audioCtx || !_portalBgBuffer) return; // No audio engine or buffer not loaded yet
     var overlay = document.getElementById('coin-modal-overlay');
     var isCoinWindowOpen = overlay && overlay.classList.contains('open');
     if (isCoinWindowOpen && _insertBgBuffer) return; // Wait if coin window is active
@@ -1169,6 +1197,7 @@ function _tryPlayBg() {
    mobile, and firing before any scroll begins. */
 
 function _unlockAudioCtx() {
+  if (!_audioCtx) return;
   _audioCtx.resume().then(function() {
     if (_audioCtx.state === 'running') {
       document.removeEventListener('click', _unlockAudioCtx);
@@ -1190,7 +1219,7 @@ document.addEventListener('visibilitychange', function() {
 });
 
 function _playPortalBgMusic() {
-  if (!_portalBgBuffer || _portalBgSource) return;
+  if (!_audioCtx || !_portalBgGain || !_portalBgBuffer || _portalBgSource) return;
   try {
     _portalBgSource = _audioCtx.createBufferSource();
     _portalBgSource.buffer = _portalBgBuffer;
@@ -1216,7 +1245,7 @@ function _stopPortalBgMusic() {
 }
 
 function playCoinSound() {
-  if (!_coinSoundBuffer) return;
+  if (!_audioCtx || !_coinSoundBuffer) return;
   try {
     // Generate a fresh source for overlap capability (fast coin drops)
     var source = _audioCtx.createBufferSource();
@@ -1227,7 +1256,7 @@ function playCoinSound() {
 }
 
 function _playCoinBgMusic() {
-  if (!_insertBgBuffer) return;
+  if (!_audioCtx || !_insertBgBuffer) return;
   try {
     _stopPortalBgMusic(); // Silence portal music
 
@@ -1254,7 +1283,7 @@ function _playCoinBgMusic() {
 }
 
 function _pauseCoinBgMusic() {
-  if (!_insertBgBuffer) return;
+  if (!_audioCtx || !_insertBgBuffer) return;
   try {
     // Kill the insert coin music
     if (_insertBgSource) {
