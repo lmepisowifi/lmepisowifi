@@ -318,6 +318,9 @@
     .promo-slide.loaded {
       opacity: 1;
     }
+    .promo-slide-wrapper.img-loaded::before {
+      display: none;
+    }
     .promo-indicators {
       position: absolute;
       bottom: 8px;
@@ -796,7 +799,9 @@
 
     <div class="portal-header" style="justify-content: space-between;">
       <div style="display: flex; align-items: center; gap: 10px;">
-        <img class="portal-signal" src="/img/favicon.ico?v=1.0.0" alt="icon">
+        <img class="portal-signal" src="/img/favicon.ico?v=1.0.0" alt="icon"
+          onerror="this.style.display='none';var _f=document.getElementById('fav');if(_f)_f.removeAttribute('href');"
+          onload="this.style.display='';var _f=document.getElementById('fav');if(_f)_f.href=this.src;">
         <div>
           <div class="portal-brand">...</div>
           <div class="portal-title">...</div>
@@ -2414,7 +2419,7 @@ checkCoinEnabled();
         img.className = 'promo-slide';
         img.src = src;
         img.alt = '';
-        img.onload = function() { img.classList.add('loaded'); };
+        img.onload = function() { img.classList.add('loaded'); wrapper.classList.add('img-loaded'); };
         img.onclick = function() { openImgModal(src); };
         
         wrapper.appendChild(img);

@@ -246,7 +246,26 @@ do_apply() {
     for rel in $PRESERVE; do
         if [ -e "$ROOT/$rel" ]; then
             mkdir -p "$STAGE/$(dirname "$rel")"
-            cp -a "$ROOT/$rel" "$STAGE/$(dirname "$rel")/" 2>/dev/null
+            # Audio needs slot-aware copying: the bundle ships coin_sound.mp3 and
+            # insert_bg_music.mp3 as defaults. A plain cp -a merge leaves the
+            # bundle's .mp3 alongside a user-uploaded .ogg, and portal_config.sh
+            # checks mp3 first — so the user's custom audio is silently ignored.
+            # Fix: for each audio file the user has, remove any same-slot file
+            # (regardless of extension) that the bundle already placed in the stage
+            # before copying, so only the user's version survives.
+            if [ "$rel" = "hotspot/audio" ]; then
+                mkdir -p "$STAGE/hotspot/audio"
+                for _af in "$ROOT/hotspot/audio"/*; do
+                    [ -e "$_af" ] || continue
+                    _abase=$(basename "$_af")
+                    _aslot="${_abase%.*}"
+                    rm -f "$STAGE/hotspot/audio/${_aslot}".* 2>/dev/null
+                    cp -a "$_af" "$STAGE/hotspot/audio/" 2>/dev/null
+                    log "  preserving audio $_abase"
+                done
+            else
+                cp -a "$ROOT/$rel" "$STAGE/$(dirname "$rel")/" 2>/dev/null
+            fi
         fi
     done
     # Portal carousel images (promo1..5.<ext>) and the portal logo
@@ -255,9 +274,11 @@ do_apply() {
     # than by fixed filename — a fixed "promo1.jpg" entry misses a
     # "promo1.png" upload entirely and it gets replaced by whatever (or
     # nothing) the new release ships in hotspot/img/.
+    # favicon.ico is the default PORTAL_LOGO target; include it explicitly
+    # so a user-customised favicon survives the hotspot component swap.
     if [ -d "$ROOT/hotspot/img" ]; then
         mkdir -p "$STAGE/hotspot/img"
-        for f in "$ROOT"/hotspot/img/promo[1-5].* "$ROOT"/hotspot/img/portal_logo.*; do
+        for f in "$ROOT"/hotspot/img/promo[1-5].* "$ROOT"/hotspot/img/portal_logo.* "$ROOT/hotspot/img/favicon.ico"; do
             [ -e "$f" ] || continue
             cp -a "$f" "$STAGE/hotspot/img/" 2>/dev/null
             log "  preserving portal image $(basename "$f")"
@@ -428,7 +449,10 @@ self_heal() {
     _SH_OLD_IMG="$ROOT/hotspot$BAK_SUFFIX/img"
     if [ -d "$_SH_OLD_IMG" ]; then
         mkdir -p "$ROOT/hotspot/img"
-        for f in "$_SH_OLD_IMG"/promo[1-5].* "$_SH_OLD_IMG"/portal_logo.*; do
+        # favicon.ico is the default PORTAL_LOGO target; include it alongside
+        # promo images and portal_logo so devices broken by a pre-fix OTA run
+        # get their user-customised favicon rescued on the next cron tick.
+        for f in "$_SH_OLD_IMG"/promo[1-5].* "$_SH_OLD_IMG"/portal_logo.* "$_SH_OLD_IMG/favicon.ico"; do
             [ -e "$f" ] || continue
             _SH_BASE=$(basename "$f")
             # Only rescue if that exact filename isn't already sitting live —
@@ -437,6 +461,35 @@ self_heal() {
                 cp -a "$f" "$ROOT/hotspot/img/" 2>/dev/null
                 log "self-heal: recovered hotspot/img/$_SH_BASE from hotspot.ota_old"
                 notify "OTA: recovered portal image $_SH_BASE that a previous update had removed"
+            fi
+        done
+    fi
+
+    # Audio rescue: recover user-uploaded audio stranded in hotspot.ota_old/audio/
+    # by a pre-fix OTA run that either lacked hotspot/audio in PRESERVE or had the
+    # same-extension-conflict bug. Uses slot-aware logic: a slot (e.g. coin_sound)
+    # is only rescued when NO live file for that slot (any extension) currently
+    # exists — this safely skips bundle-shipped defaults (coin_sound.mp3,
+    # insert_bg_music.mp3) which the swap always places back in hotspot/audio/,
+    # while still rescuing user-only slots (e.g. bg_music.*) that the bundle never
+    # ships. For bundle-shipped slots the do_apply PRESERVE fix (slot-aware copy)
+    # handles future runs correctly; self-heal covers the gap for the transition.
+    _SH_OLD_AUD="$ROOT/hotspot$BAK_SUFFIX/audio"
+    if [ -d "$_SH_OLD_AUD" ]; then
+        mkdir -p "$ROOT/hotspot/audio"
+        for f in "$_SH_OLD_AUD"/*; do
+            [ -e "$f" ] || continue
+            _SH_AUD_BASE=$(basename "$f")
+            _SH_AUD_SLOT="${_SH_AUD_BASE%.*}"
+            # Check whether any live file for this slot (any extension) exists
+            _SH_AUD_LIVE=0
+            for _l in "$ROOT/hotspot/audio/${_SH_AUD_SLOT}".*; do
+                [ -e "$_l" ] && _SH_AUD_LIVE=1 && break
+            done
+            if [ "$_SH_AUD_LIVE" -eq 0 ]; then
+                cp -a "$f" "$ROOT/hotspot/audio/" 2>/dev/null
+                log "self-heal: recovered hotspot/audio/$_SH_AUD_BASE from hotspot.ota_old"
+                notify "OTA: recovered portal audio $_SH_AUD_BASE that a previous update had removed"
             fi
         done
     fi
