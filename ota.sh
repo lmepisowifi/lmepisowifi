@@ -309,6 +309,13 @@ do_apply() {
     # into the freshly-swapped www2/sh/startup.sh (see function comment).
     case "$_swapped" in *www2*) merge_startup_markers ;; esac
 
+    # TEMPORARY MIGRATION FIX: force the WAN-repurpose interface back to
+    # eth0.3.0 if a pre-fix release left it pinned to wlan1-vxd (see the
+    # force_wan_repurpose_iface() comment for the full history). Runs on every
+    # apply that touched www2, right after the marker merge above so it also
+    # corrects a wrong value that merge_startup_markers just carried forward.
+    case "$_swapped" in *www2*) force_wan_repurpose_iface ;; esac
+
     # record new version early so health-checked processes see it
     # (back up the old VERSION so a failed health check can restore it)
     cp -a "$VERSION_FILE" "$ROOT/VERSION$BAK_SUFFIX" 2>/dev/null
@@ -492,6 +499,81 @@ self_heal() {
                 notify "OTA: recovered portal audio $_SH_AUD_BASE that a previous update had removed"
             fi
         done
+    fi
+
+    # TEMPORARY MIGRATION FIX: also correct a wlan1-vxd WAN-repurpose interface
+    # here (not just in do_apply), so devices that never get another release —
+    # but do run the 6-hourly cron — still self-correct within one cron tick.
+    force_wan_repurpose_iface
+}
+
+# ---------------------------------------------------------------------------
+# TEMPORARY MIGRATION FIX — force the WAN-repurpose interface wlan1-vxd
+# back to the correct eth0.3.0 in the live www2/sh/startup.sh.
+#
+# History: an older (pre-fix) release shipped www2/sh/startup.sh with the
+# WAN-repurpose line hard-coded to
+#     ( sh /lmepisowifi/www2/sh/repurposeaswan.sh wlan1-vxd ) &
+# and older ota.sh runs swapped www2 wholesale, so that GitHub default
+# overwrote whatever the admin had actually set. eth0.3.0 (LAN2) is the
+# correct WAN-repurpose interface for these devices, not the 2.4GHz virtual
+# AP wlan1-vxd. Because merge_startup_markers()/self_heal() only preserve the
+# *previous* file's value verbatim, once a device was clobbered to wlan1-vxd
+# that wrong value just kept getting carried forward across updates.
+#
+# This rewrites "repurposeaswan.sh wlan1-vxd" -> "repurposeaswan.sh eth0.3.0"
+# but ONLY inside the BEGIN_WAN_REPURPOSE/END_WAN_REPURPOSE marker block, and
+# ONLY when that block actually names wlan1-vxd — so it never disturbs a
+# device the admin has legitimately set to some other interface, and it is a
+# no-op (and safe to run repeatedly) on already-correct devices. When it does
+# rewrite, it also stops any repurpose daemon still running on wlan1-vxd and
+# relaunches on eth0.3.0 so the fix takes effect without waiting for a reboot.
+#
+# Called from do_apply (after the marker merge) and from self_heal (so cron
+# heals unattended devices). REMOVE this function and its two call sites once
+# all deployed devices are confirmed off wlan1-vxd.
+# ---------------------------------------------------------------------------
+force_wan_repurpose_iface() {
+    _FWR_SH="$ROOT/www2/sh/startup.sh"
+    [ -f "$_FWR_SH" ] || return 0
+
+    # Detect wlan1-vxd, but only inside the WAN_REPURPOSE marker block.
+    _FWR_HIT=$(awk '
+        $0=="# --- BEGIN_WAN_REPURPOSE ---" { s=1; next }
+        $0=="# --- END_WAN_REPURPOSE ---"   { s=0; next }
+        s && /repurposeaswan\.sh[ \t]+wlan1-vxd/ { print; exit }
+    ' "$_FWR_SH")
+    [ -n "$_FWR_HIT" ] || return 0
+
+    _FWR_TMP="/tmp/ota_force_wan.$$"
+    awk '
+        $0=="# --- BEGIN_WAN_REPURPOSE ---" { print; s=1; next }
+        $0=="# --- END_WAN_REPURPOSE ---"   { print; s=0; next }
+        s { gsub(/repurposeaswan\.sh[ \t]+wlan1-vxd/, "repurposeaswan.sh eth0.3.0") }
+        { print }
+    ' "$_FWR_SH" > "$_FWR_TMP" && mv "$_FWR_TMP" "$_FWR_SH"
+    rm -f "$_FWR_TMP"
+    chmod 755 "$_FWR_SH" 2>/dev/null
+    log "wan-repurpose: forced interface wlan1-vxd -> eth0.3.0 in startup.sh (temporary migration fix)"
+    notify "OTA: corrected WAN-repurpose interface (wlan1-vxd -> eth0.3.0) — please double-check it"
+
+    # Take effect immediately, no reboot needed. Stop a stale daemon still
+    # bound to wlan1-vxd (starting eth0.3.0 also rewrites /tmp/repurpose_active,
+    # which makes the old instance self-exit, but we kill it explicitly too).
+    _FWR_WRONG_PID="/tmp/repurpose_wlan1-vxd.pid"
+    if [ -f "$_FWR_WRONG_PID" ]; then
+        _FWR_PID=$(busybox tr -d '\r\n' < "$_FWR_WRONG_PID" 2>/dev/null)
+        if [ -n "$_FWR_PID" ] && kill -0 "$_FWR_PID" 2>/dev/null; then
+            kill "$_FWR_PID" 2>/dev/null
+            log "wan-repurpose: stopped stale repurposeaswan.sh wlan1-vxd (pid $_FWR_PID)"
+        fi
+        rm -f "$_FWR_WRONG_PID"
+    fi
+    # Launch eth0.3.0 unless it's already running.
+    if [ ! -f "/tmp/repurpose_eth0.3.0.pid" ] || \
+       ! kill -0 "$(busybox tr -d '\r\n' < /tmp/repurpose_eth0.3.0.pid 2>/dev/null)" 2>/dev/null; then
+        ( sh "$ROOT/www2/sh/repurposeaswan.sh" eth0.3.0 ) &
+        log "wan-repurpose: launched repurposeaswan.sh eth0.3.0 immediately"
     fi
 }
 
