@@ -68,7 +68,15 @@ update_startup_repurpose() {
          /^# --- BEGIN_WAN_REPURPOSE ---/ { print; in_sec=1; next }
          /^# --- END_WAN_REPURPOSE ---/ {
              if (iface != "") {
-                 print "( wait_for_iface " iface " && sh " repurpose_sh " " iface " ) &"
+                 # No wait_for_iface gate here: repurposeaswan.sh already waits
+                 # for the interface to appear in sysfs and for monitord (vendor
+                 # hardware bring-up signal) internally, with a longer timeout
+                 # and its own logging. Gating on wait_for_iface (60s, ifconfig-
+                 # based) too was a second, stricter, unlogged point of failure —
+                 # if it timed out first on a slow boot, the && short-circuited
+                 # and repurposeaswan.sh never launched at all for that boot,
+                 # silently leaving the admin UI showing "select interface".
+                 print "( sh " repurpose_sh " " iface " ) &"
              }
              in_sec=0; print; next
          }

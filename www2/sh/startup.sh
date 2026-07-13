@@ -50,7 +50,7 @@ wait_for_iface() {
 # Do NOT edit by hand.
 # ---------------------------------------------------------------------------
 # --- BEGIN_WAN_REPURPOSE ---
-( wait_for_iface wlan1-vxd && sh /lmepisowifi/www2/sh/repurposeaswan.sh wlan1-vxd ) &
+( sh /lmepisowifi/www2/sh/repurposeaswan.sh wlan1-vxd ) &
 # --- END_WAN_REPURPOSE ---
 
 # ---------------------------------------------------------------------------

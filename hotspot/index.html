@@ -13,14 +13,16 @@
   <link class="registry" rel="stylesheet" href="/css/bootstrap.min.css?v=1.0.0">
   <link class="registry" rel="stylesheet" href="/css/toastr.min.css?v=1.0.0">
 
-  <script>
+<script>
     (function() {
       var savedTheme = null;
       try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
+      
       if (savedTheme === 'light' || savedTheme === 'dark') {
         document.documentElement.setAttribute('data-theme', savedTheme);
       } else {
-        var systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        // Added the safety check here so it doesn't crash on ancient Androids
+        var systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         var initialTheme = systemPrefersDark ? 'dark' : 'light';
         document.documentElement.setAttribute('data-theme', initialTheme);
       }
@@ -796,8 +798,8 @@
       <div style="display: flex; align-items: center; gap: 10px;">
         <img class="portal-signal" src="/img/favicon.ico?v=1.0.0" alt="icon">
         <div>
-          <div class="portal-brand">beta</div>
-          <div class="portal-title">lmepisowifi</div>
+          <div class="portal-brand">...</div>
+          <div class="portal-title">...</div>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 4px;">
@@ -987,7 +989,7 @@
   </div>
 
   <div class="portal-footer" id="portal-footer-text">
-    Your device is identified by MAC address. Vouchers are single-use.
+    ...
   </div>
 </div>
 

@@ -45,7 +45,12 @@ BB="busybox"
 # it is preserved; lmehspt.sh's seed_globals() merges any new default keys into
 # it on boot after the swap.
 COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env"
-PRESERVE="www2/data/dashboard_layout.json www2/uploads hotspot/img/promo1.jpg hotspot/img/promo2.jpg hotspot/audio"
+# NOTE: portal images (hotspot/img/promo1..5.* and portal_logo.*) are NOT
+# listed here as fixed paths, because hotspot.cgi lets the admin upload any
+# of jpg/jpeg/png/ico/gif/webp per slot — a fixed "promo1.jpg" entry would
+# silently fail to match a "promo1.png" upload. See the glob-based preserve
+# step below (preserve_portal_images) instead.
+PRESERVE="www2/data/dashboard_layout.json www2/uploads hotspot/audio"
 
 # ---- config ----------------------------------------------------------------
 OTA_REPO=""
@@ -183,6 +188,10 @@ do_apply() {
     log "OTA apply started (installed=$(now_ver))"
     mkdir -p "$DL"
 
+    # Rescue anything a pre-fix ota.sh run left stranded in www2.ota_old/
+    # hotspot.ota_old before the swap below clears those backups.
+    self_heal
+
     if ! fetch "$OTA_MANIFEST_URL" "$DL/manifest.txt"; then
         set_status "failed"; log "ERROR: cannot fetch manifest"; return 1
     fi
@@ -240,6 +249,20 @@ do_apply() {
             cp -a "$ROOT/$rel" "$STAGE/$(dirname "$rel")/" 2>/dev/null
         fi
     done
+    # Portal carousel images (promo1..5.<ext>) and the portal logo
+    # (portal_logo.<ext>) can be any of jpg/jpeg/png/ico/gif/webp (see
+    # hotspot.cgi action=portal_upload), so preserve them by glob rather
+    # than by fixed filename — a fixed "promo1.jpg" entry misses a
+    # "promo1.png" upload entirely and it gets replaced by whatever (or
+    # nothing) the new release ships in hotspot/img/.
+    if [ -d "$ROOT/hotspot/img" ]; then
+        mkdir -p "$STAGE/hotspot/img"
+        for f in "$ROOT"/hotspot/img/promo[1-5].* "$ROOT"/hotspot/img/portal_logo.*; do
+            [ -e "$f" ] || continue
+            cp -a "$f" "$STAGE/hotspot/img/" 2>/dev/null
+            log "  preserving portal image $(basename "$f")"
+        done
+    fi
 
     # ---- atomic swap (rename within the same ubifs volume) ----
     set_status "applying"; log "swapping components"
@@ -260,6 +283,10 @@ do_apply() {
     done
     chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" 2>/dev/null
     chmod +x "$ROOT"/hotspot/cgi-bin/*.sh "$ROOT"/www2/cgi-bin/* "$ROOT"/www2/sh/*.sh 2>/dev/null
+
+    # Restore runtime-persisted WAN-repurpose/reboot-sched/LAN-speed settings
+    # into the freshly-swapped www2/sh/startup.sh (see function comment).
+    case "$_swapped" in *www2*) merge_startup_markers ;; esac
 
     # record new version early so health-checked processes see it
     # (back up the old VERSION so a failed health check can restore it)
@@ -292,6 +319,164 @@ do_apply() {
     set_status "rolledback"; log "rolled back after failed health check"
     notify "OTA: $_lat unhealthy — rolled back"
     return 1
+}
+
+# Carry forward the runtime-populated marker sections of
+# www2/sh/startup.sh across a www2 component swap.
+#
+# www2/sh/startup.sh ships as part of the "www2" component and gets
+# wholesale replaced on every OTA — but three of its sections are not
+# static boilerplate, they're rewritten at runtime by the admin CGIs
+# whenever the user changes a setting:
+#   BEGIN_LAN_SPEEDS    (lme.cgi: per-port link speed persistence)
+#   BEGIN_REBOOT_SCHED   (lme.cgi: scheduled auto-reboot)
+#   BEGIN_WAN_REPURPOSE  (wan-repurpose.cgi: repurpose LAN/WLAN as WAN)
+# Swapping www2 wholesale silently resets all three to empty (their
+# shipped default), which is what caused WAN-repurpose (and reboot
+# schedule / port speed) to revert to "off" after an update. This runs
+# right after the component swap, while the old www2 is still sitting at
+# www2.ota_old (this OTA run's own backup) so we can pull the old runtime
+# values back out of it and splice them into the freshly-shipped file.
+# (BEGIN_IPACL / BEGIN_BANDSTEER_WD are intentionally NOT merged here —
+# their content is regenerated boilerplate, not user-set state, and
+# should always come from the new release.)
+# ---- self-heal: rescue state stranded by a pre-fix ota.sh run -------------
+# This function exists to solve a bootstrapping problem: ota.sh is itself
+# one of the swapped COMPONENTS, so the update that DELIVERS the preserve/
+# merge fix above is still carried out by whatever OLDER (unfixed) ota.sh
+# is already on the device — the new logic isn't running yet during that
+# specific swap. That old run still leaves the pre-swap www2/hotspot
+# sitting untouched in www2.ota_old/hotspot.ota_old, right up until the
+# NEXT apply clears stale backups. This rescues from those backups into
+# the currently-live tree — filling in only what's blank/missing, never
+# overwriting anything already live (whether that's a value the user set
+# since, or one an earlier heal pass already restored) — so it's safe to
+# call unconditionally and repeatedly. Wired into do_cron (runs every 6h
+# regardless of whether a new version is available) and the start of
+# do_apply, so a device nobody can walk up to heals itself within one
+# cron tick of receiving this fix, with no further release required.
+self_heal() {
+    _SH_OLD_S="$ROOT/www2$BAK_SUFFIX/sh/startup.sh"
+    _SH_NEW_S="$ROOT/www2/sh/startup.sh"
+    if [ -f "$_SH_OLD_S" ] && [ -f "$_SH_NEW_S" ]; then
+        for _SH_NAME in LAN_SPEEDS REBOOT_SCHED WAN_REPURPOSE; do
+            _SH_LIVE_C="/tmp/ota_heal_live_${_SH_NAME}.$$"
+            awk -v beg="# --- BEGIN_${_SH_NAME} ---" -v end="# --- END_${_SH_NAME} ---" '
+                $0==beg { insec=1; next }
+                $0==end { insec=0; next }
+                insec   { print }
+            ' "$_SH_NEW_S" > "$_SH_LIVE_C"
+            # Live already has content for this marker — leave it alone.
+            if [ -s "$_SH_LIVE_C" ]; then rm -f "$_SH_LIVE_C"; continue; fi
+            rm -f "$_SH_LIVE_C"
+
+            _SH_BAK_C="/tmp/ota_heal_bak_${_SH_NAME}.$$"
+            awk -v beg="# --- BEGIN_${_SH_NAME} ---" -v end="# --- END_${_SH_NAME} ---" '
+                $0==beg { insec=1; next }
+                $0==end { insec=0; next }
+                insec   { print }
+            ' "$_SH_OLD_S" > "$_SH_BAK_C"
+            if [ ! -s "$_SH_BAK_C" ]; then rm -f "$_SH_BAK_C"; continue; fi
+
+            _SH_TMP="/tmp/ota_heal_startup_sh.$$"
+            awk -v beg="# --- BEGIN_${_SH_NAME} ---" -v end="# --- END_${_SH_NAME} ---" \
+                -v contentfile="$_SH_BAK_C" '
+                $0==beg {
+                    print; insec=1
+                    while ((getline line < contentfile) > 0) print line
+                    close(contentfile)
+                    next
+                }
+                $0==end { insec=0; print; next }
+                insec   { next }
+                { print }
+            ' "$_SH_NEW_S" > "$_SH_TMP" && mv "$_SH_TMP" "$_SH_NEW_S"
+            rm -f "$_SH_BAK_C"
+            chmod 755 "$_SH_NEW_S" 2>/dev/null
+            log "self-heal: recovered $_SH_NAME from www2.ota_old (lost by a pre-fix OTA run)"
+            notify "OTA: recovered a $_SH_NAME setting a previous update had reset — please double-check it"
+
+            # For WAN_REPURPOSE specifically: if the daemon was absent (device
+            # rebooted after the broken apply before self_heal got to run), the
+            # fixed startup.sh is now on disk but nothing re-executes it until
+            # the next reboot. Parse the interface name from the recovered line
+            # and launch repurposeaswan.sh right now so the setting takes effect
+            # immediately — no second reboot required.
+            # Line format produced by wan-repurpose.cgi:
+            #   ( sh /lmepisowifi/www2/sh/repurposeaswan.sh IFACE ) &
+            # Fields:  1:(  2:sh  3:/path  4:IFACE  5:)  6:&  → NF-2 = IFACE
+            if [ "$_SH_NAME" = "WAN_REPURPOSE" ]; then
+                _SH_IFACE=$(awk \
+                    -v beg="# --- BEGIN_WAN_REPURPOSE ---" \
+                    -v end="# --- END_WAN_REPURPOSE ---" \
+                    '$0==beg{s=1;next} $0==end{s=0;next} s && /repurposeaswan\.sh/{print $(NF-2); exit}' \
+                    "$_SH_NEW_S" | busybox tr -d '\r\n')
+                if [ -n "$_SH_IFACE" ]; then
+                    if [ ! -f "/tmp/repurpose_${_SH_IFACE}.pid" ] || \
+                       ! kill -0 "$(busybox tr -d '\r\n' < "/tmp/repurpose_${_SH_IFACE}.pid" 2>/dev/null)" 2>/dev/null; then
+                        ( sh "$ROOT/www2/sh/repurposeaswan.sh" "$_SH_IFACE" ) &
+                        log "self-heal: launched repurposeaswan.sh $_SH_IFACE immediately (was not running after OTA reboot)"
+                        notify "OTA: WAN-repurpose on $_SH_IFACE re-started — no reboot needed"
+                    else
+                        log "self-heal: repurposeaswan.sh $_SH_IFACE already running — startup.sh fix will take effect on next reboot"
+                    fi
+                fi
+            fi
+        done
+    fi
+
+    _SH_OLD_IMG="$ROOT/hotspot$BAK_SUFFIX/img"
+    if [ -d "$_SH_OLD_IMG" ]; then
+        mkdir -p "$ROOT/hotspot/img"
+        for f in "$_SH_OLD_IMG"/promo[1-5].* "$_SH_OLD_IMG"/portal_logo.*; do
+            [ -e "$f" ] || continue
+            _SH_BASE=$(basename "$f")
+            # Only rescue if that exact filename isn't already sitting live —
+            # never clobber a file that's already there.
+            if [ ! -e "$ROOT/hotspot/img/$_SH_BASE" ]; then
+                cp -a "$f" "$ROOT/hotspot/img/" 2>/dev/null
+                log "self-heal: recovered hotspot/img/$_SH_BASE from hotspot.ota_old"
+                notify "OTA: recovered portal image $_SH_BASE that a previous update had removed"
+            fi
+        done
+    fi
+}
+
+merge_startup_markers() {
+    _MSM_OLD="$ROOT/www2$BAK_SUFFIX/sh/startup.sh"
+    _MSM_NEW="$ROOT/www2/sh/startup.sh"
+    [ -f "$_MSM_OLD" ] && [ -f "$_MSM_NEW" ] || return 0
+
+    for _MSM_NAME in LAN_SPEEDS REBOOT_SCHED WAN_REPURPOSE; do
+        _MSM_CONTENT="/tmp/ota_marker_${_MSM_NAME}.$$"
+        awk -v beg="# --- BEGIN_${_MSM_NAME} ---" -v end="# --- END_${_MSM_NAME} ---" '
+            $0==beg { insec=1; next }
+            $0==end { insec=0; next }
+            insec   { print }
+        ' "$_MSM_OLD" > "$_MSM_CONTENT"
+
+        # Nothing was persisted for this marker — leave the new file's default.
+        if [ ! -s "$_MSM_CONTENT" ]; then
+            rm -f "$_MSM_CONTENT"; continue
+        fi
+
+        _MSM_TMP="/tmp/ota_startup_sh.$$"
+        awk -v beg="# --- BEGIN_${_MSM_NAME} ---" -v end="# --- END_${_MSM_NAME} ---" \
+            -v contentfile="$_MSM_CONTENT" '
+            $0==beg {
+                print; insec=1
+                while ((getline line < contentfile) > 0) print line
+                close(contentfile)
+                next
+            }
+            $0==end { insec=0; print; next }
+            insec   { next }
+            { print }
+        ' "$_MSM_NEW" > "$_MSM_TMP" && mv "$_MSM_TMP" "$_MSM_NEW"
+        rm -f "$_MSM_CONTENT"
+        log "  carried forward $_MSM_NAME from previous www2/sh/startup.sh"
+    done
+    chmod 755 "$_MSM_NEW" 2>/dev/null
 }
 
 # restore a specific set of components from their .ota_old backups
@@ -355,6 +540,12 @@ health_ok() {
 
 # ---- scheduled check (cron) ----
 do_cron() {
+    # Always run self-heal first, even when no update is available.
+    # This is what rescues state (WAN-repurpose/images/etc.) stranded
+    # in .ota_old backups by the pre-fix ota.sh run that delivered
+    # this very script — see self_heal() for the full explanation.
+    self_heal
+
     _json=$(do_check)
     echo "$_json" | grep -q '"update_available":true' || { log "cron: up to date"; exit 0; }
     _lat=$(printf '%s' "$_json" | sed -n 's/.*"latest":"\([^"]*\)".*/\1/p')
