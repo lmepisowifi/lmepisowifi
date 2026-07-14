@@ -44,7 +44,7 @@ BB="busybox"
 # replaced on every update. globals.env (user settings) is NOT a component, so
 # it is preserved; lmehspt.sh's seed_globals() merges any new default keys into
 # it on boot after the swap.
-COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env"
+COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh"
 # NOTE: portal images (hotspot/img/promo1..5.* and portal_logo.*) are NOT
 # listed here as fixed paths, because hotspot.cgi lets the admin upload any
 # of jpg/jpeg/png/ico/gif/webp per slot — a fixed "promo1.jpg" entry would
@@ -304,7 +304,7 @@ do_apply() {
             _do_rollback_set "$_swapped"; set_status "rolledback"; rm -rf "$STAGE"; return 1
         fi
     done
-    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" 2>/dev/null
+    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" "$ROOT/startup.sh" 2>/dev/null
     chmod +x "$ROOT"/hotspot/cgi-bin/*.sh "$ROOT"/www2/cgi-bin/* "$ROOT"/www2/sh/*.sh 2>/dev/null
 
     # Restore runtime-persisted WAN-repurpose/reboot-sched/LAN-speed settings
@@ -506,6 +506,17 @@ self_heal() {
     # TEMPORARY MIGRATION FIX: also correct a wlan1-vxd WAN-repurpose interface
     # here (not just in do_apply), so devices that never get another release —
     # but do run the 6-hourly cron — still self-correct within one cron tick.
+    # Patch older startup.sh files (pre-STEP-1.5b) to add the power-outage coin
+    # session replay block. startup.sh is now a managed OTA component, so future
+    # releases swap it wholesale, but this bridges the bootstrapping window: the
+    # OLD ota.sh that delivers THIS ota.sh doesn't know about startup.sh yet, so
+    # the first OTA won't swap it. The SECOND run (6h cron with the new ota.sh)
+    # patches it in-place via heal_main_startup instead.
+    heal_main_startup
+
+    # TEMPORARY MIGRATION FIX: also correct a wlan1-vxd WAN-repurpose interface
+    # here (not just in do_apply), so devices that never get another release —
+    # but do run the 6-hourly cron — still self-correct within one cron tick.
     force_wan_repurpose_iface
 }
 
@@ -535,6 +546,104 @@ self_heal() {
 # heals unattended devices). REMOVE this function and its two call sites once
 # all deployed devices are confirmed off wlan1-vxd.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# heal_main_startup — inject the STEP 1.5b power-outage coin-session-replay
+# block into /lmepisowifi/startup.sh if it is absent (older devices that
+# pre-date startup.sh becoming a managed OTA component).
+#
+# Detection:  COIN_PENDING_DIR= is unique to STEP 1.5b; its absence means
+#             the block has never been added.
+# Anchor:     "# --- STEP 1.6:" marks the start of the crond section, which
+#             exists on every startup.sh since the original release.
+# Strategy:   split the file at the STEP 1.6 anchor with awk, inject the
+#             patch block in the gap, then stitch back together atomically.
+# ---------------------------------------------------------------------------
+heal_main_startup() {
+    _HMS_FILE="$ROOT/startup.sh"
+    [ -f "$_HMS_FILE" ] || return 0
+    grep -q 'COIN_PENDING_DIR=' "$_HMS_FILE" && return 0   # already patched
+    grep -q '# --- STEP 1\.6:' "$_HMS_FILE" || return 0    # unrecognised format
+
+    _HMS_PATCH="/tmp/ota_heal_startup_patch.$$"
+    _HMS_TMP="/tmp/ota_heal_startup.$$"
+
+    # Write the STEP 1.5b block verbatim.  The heredoc label is single-quoted so
+    # shell variables inside ($COIN_PENDING_DIR etc.) are NOT expanded here — they
+    # must appear as literal text in the generated startup.sh.
+    cat > "$_HMS_PATCH" << '__COIN_REPLAY_EOF__'
+    # --- STEP 1.5b: Replay power-outage coin sessions ---
+    # A Piso-Wifi unit and its coin slot share a power brick, so a blackout kills
+    # both mid-session. The NodeMCU is now stateless (it no longer wears out its
+    # flash mirroring coins), so the router owns crash recovery: coin.sh mirrors
+    # each PSK-verified poll total to the non-volatile partition below (since
+    # /tmp is tmpfs and dies in a blackout). On boot we grant the customer the
+    # time they already paid for by re-running coin_result.sh's exact grant logic
+    # locally, then drop the mirror. Backgrounded so it can wait for lmehspt.sh
+    # to (re)publish /tmp/coin_config.env — which holds COIN_PSK, needed to sign
+    # the grant — after that script's boot-time wipe of /tmp/coin_sessions.
+    (
+        COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
+        [ -d "$COIN_PENDING_DIR" ] || exit 0
+
+        # Wait (up to ~90s) for lmehspt.sh to publish the runtime coin config.
+        i=0
+        while [ ! -f /tmp/coin_config.env ] && [ "$i" -lt 90 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        [ -f /tmp/coin_config.env ] || exit 0
+        . /tmp/coin_config.env
+        [ -n "$COIN_PSK" ] || exit 0
+
+        for f in "$COIN_PENDING_DIR"/*; do
+            [ -f "$f" ] || continue          # empty dir → literal glob, skip
+            case "$f" in *.tmp) continue ;; esac  # skip half-written mirrors
+
+            # Mirror format written by coin.sh: "SID MAC AMOUNT CREATED_AT"
+            read -r P_SID P_MAC P_AMOUNT P_CREATED < "$f"
+
+            # Validate the mirrored fields before trusting them; drop junk.
+            printf '%s' "$P_SID"    | grep -qE '^[0-9a-f]{16}$'  || { rm -f "$f"; continue; }
+            printf '%s' "$P_MAC"    | grep -qE '^[0-9a-f:]{17}$' || { rm -f "$f"; continue; }
+            printf '%s' "$P_AMOUNT" | grep -qE '^[0-9]+$'        || { rm -f "$f"; continue; }
+            [ "${P_AMOUNT:-0}" -gt 0 ] || { rm -f "$f"; continue; }
+
+            # Sign exactly as the NodeMCU recovery POST did:
+            #   sig = md5(PSK:SID:AMOUNT:MAC:recover)
+            # coin_result.sh re-verifies this (defense in depth) and clears the
+            # mirror itself on a successful/duplicate grant.
+            P_SIG=$(printf '%s' "${COIN_PSK}:${P_SID}:${P_AMOUNT}:${P_MAC}:recover" \
+                    | md5sum | awk '{print $1}')
+
+            # Reuse coin_result.sh's grant/extend logic via a direct LOCAL exec
+            # (not HTTP). REMOTE_ADDR is empty for a local root invocation, which
+            # is exactly what its boot-replay guard requires — a network caller
+            # can neither blank REMOTE_ADDR nor set COIN_BOOT_REPLAY.
+            COIN_BOOT_REPLAY=1 REMOTE_ADDR="" \
+            SID="$P_SID" AMOUNT="$P_AMOUNT" SIG="$P_SIG" RECOVER_MAC="$P_MAC" \
+                /bin/sh /lmepisowifi/hotspot/cgi-bin/coin_result.sh >/dev/null 2>&1
+
+            # Safety net: if coin_result.sh couldn't clear it (e.g. a transient
+            # failure) the mirror stays and is retried on the next boot. A
+            # successful grant already removed it, so this is a no-op then.
+        done
+    ) &
+
+__COIN_REPLAY_EOF__
+
+    # First awk pass: everything BEFORE the STEP 1.6 anchor (exits without
+    # printing it, so we can inject the patch in between).
+    awk '/# --- STEP 1\.6:/{exit} {print}' "$_HMS_FILE" > "$_HMS_TMP"
+    cat "$_HMS_PATCH" >> "$_HMS_TMP"
+    # Second awk pass: STEP 1.6 anchor line and everything that follows.
+    awk 'found || /# --- STEP 1\.6:/ { found=1; print }' "$_HMS_FILE" >> "$_HMS_TMP"
+
+    rm -f "$_HMS_PATCH"
+    mv "$_HMS_TMP" "$_HMS_FILE"
+    chmod 755 "$_HMS_FILE" 2>/dev/null
+    log "self-heal: injected STEP 1.5b coin-replay block into startup.sh"
+    notify "OTA: updated startup.sh to add power-outage coin session recovery (takes effect on next reboot)"
+}
 force_wan_repurpose_iface() {
     _FWR_SH="$ROOT/www2/sh/startup.sh"
     [ -f "$_FWR_SH" ] || return 0
