@@ -220,8 +220,10 @@ do_apply() {
     fi
 
     set_status "verifying"; log "verifying sha256"
-    if ! echo "$_sum  $DL/bundle.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
-        set_status "failed"; log "ERROR: sha256 MISMATCH — discarding download"
+    _got=$(sha256sum "$DL/bundle.tar.gz" 2>/dev/null | awk '{print $1}')
+    if [ -z "$_got" ] || [ "$_got" != "$_sum" ]; then
+        set_status "failed"
+        log "ERROR: sha256 MISMATCH — want=$_sum got=${_got:-<empty>} — discarding download"
         rm -f "$DL/bundle.tar.gz"; notify "OTA: $_lat FAILED checksum (rejected)"; return 1
     fi
 

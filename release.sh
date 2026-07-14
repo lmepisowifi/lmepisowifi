@@ -1,4 +1,3 @@
-
 #!/bin/sh
 # release.sh — lmepisowifi release helper
 # Usage: ./release.sh "your commit message"
@@ -23,7 +22,6 @@ else
     if [ -z "$LATEST" ]; then
         LATEST="v1.0.0"
     fi
-    # Strip the leading 'v'
     VER="${LATEST#v}"
     MAJOR=$(echo "$VER" | cut -d. -f1)
     MINOR=$(echo "$VER" | cut -d. -f2)
@@ -53,7 +51,6 @@ echo ""
 echo "► Staging all changes..."
 git add .
 
-# Check if there's anything to commit
 if git diff --cached --quiet; then
     echo "  No changes to commit — skipping commit step."
 else
@@ -72,8 +69,12 @@ echo "► Pushing main branch..."
 git push origin main
 echo ""
 
-# ── Tag ──────────────────────────────────────────────────────────────────────
-# Delete local tag if it already exists (handles retry scenarios)
+# ── Tag and push — this is what triggers GitHub Actions to do the release ────
+# DO NOT run gh release create here. The release.yml workflow handles:
+#   building NodeMCU firmware, packing the tarball, computing sha256,
+#   writing manifest.txt, committing it, and creating the GitHub Release.
+# Running any of that here would race against the workflow and corrupt
+# the manifest sha256.
 if git tag | grep -q "^${TAG}$"; then
     echo "  Tag $TAG already exists locally — removing and recreating..."
     git tag -d "$TAG"
