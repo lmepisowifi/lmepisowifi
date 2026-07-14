@@ -537,18 +537,45 @@ add_user_qos() {
 
     iptables -t mangle -I FORWARD 1 -i $HOTSPOT_BR -m mac --mac-source "$mac" -j MARK --set-mark $cid 2>/dev/null
     
-    # Upload (WAN) Leaf QoS
-    # Precise quantum 1500 forces fair packet sharing at the HTB scheduler level
+    # ============================================================
+    # UPLOAD (WAN) Leaf QoS - Gaming Prioritization
+    # ============================================================
     tc class add dev $WAN_INT parent 1:1 classid 1:$cid htb rate $PER_USER_RATE ceil $GLOBAL_RATE burst $PER_USER_BURST quantum 1500 2>/dev/null
-    # Compact SFQ limit (24) drops excess packets early, keeping latency low (~57ms max queue delay)
-    tc qdisc add dev $WAN_INT parent 1:$cid handle ${cid}: sfq perturb 10 limit 24 2>/dev/null
+    
+    # Create 2 priority bands (Band 1 = Gaming/VIP, Band 2 = Bulk). Priomap defaults everything to Band 2.
+    tc qdisc add dev $WAN_INT parent 1:$cid handle ${cid}: prio bands 2 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2>/dev/null
+    
+    # Attach SFQ to both bands with a larger limit (128) to stop packet loss during bursts
+    tc qdisc add dev $WAN_INT parent ${cid}:1 handle $((cid+1000)): sfq perturb 10 limit 128 2>/dev/null
+    tc qdisc add dev $WAN_INT parent ${cid}:2 handle $((cid+2000)): sfq perturb 10 limit 128 2>/dev/null
+    
     tc filter add dev $WAN_INT parent 1:0 prio $cid handle $cid fw flowid 1:$cid 2>/dev/null
     
-    # Download (LAN Bridge) Leaf QoS
+    # Band 1 Filters: Route Games (UDP < 512B), Ping (ICMP), and small TCP ACKs (< 128B) into the VIP Lane
+    tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 1 u32 match ip protocol 17 0xff match u16 0x0000 0xfe00 at 2 flowid ${cid}:1 2>/dev/null
+    tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 2 u32 match ip protocol 1 0xff flowid ${cid}:1 2>/dev/null
+    tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 3 u32 match ip protocol 6 0xff match u16 0x0000 0xff80 at 2 flowid ${cid}:1 2>/dev/null
+
+    # ============================================================
+    # DOWNLOAD (LAN Bridge) Leaf QoS - Gaming Prioritization
+    # ============================================================
     tc class add dev $HOTSPOT_BR parent 2:1 classid 2:$cid htb rate $PER_USER_RATE ceil $GLOBAL_RATE burst $PER_USER_BURST quantum 1500 2>/dev/null
-    tc qdisc add dev $HOTSPOT_BR parent 2:$cid handle $((cid+500)): sfq perturb 10 limit 24 2>/dev/null
+    
+    tc qdisc add dev $HOTSPOT_BR parent 2:$cid handle $((cid+500)): prio bands 2 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2>/dev/null
+    
+    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):1 handle $((cid+3000)): sfq perturb 10 limit 128 2>/dev/null
+    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):2 handle $((cid+4000)): sfq perturb 10 limit 128 2>/dev/null
+
     tc filter add dev $HOTSPOT_BR protocol ip parent 2:0 prio $cid u32 match ip dst $ip/32 flowid 2:$cid 2>/dev/null
+    
+    # Band 1 Filters for Download
+    tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 1 u32 match ip protocol 17 0xff match u16 0x0000 0xfe00 at 2 flowid $((cid+500)):1 2>/dev/null
+    tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 2 u32 match ip protocol 1 0xff flowid $((cid+500)):1 2>/dev/null
+    tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 3 u32 match ip protocol 6 0xff match u16 0x0000 0xff80 at 2 flowid $((cid+500)):1 2>/dev/null
 }
+
+
+
 
 del_user_qos() {
     local mac=$1 ip cid

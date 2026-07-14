@@ -15,6 +15,31 @@ _err() { printf '{"error":"%s"}\n' "$1"; exit 0; }
 _ok()  { printf '%s\n' "$1";           exit 0; }
 _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 
+# ── Audit webhook — NodeMCU error events → hardcoded Discord channel ──────────
+_coin_alert() {
+    local label="$1" detail="$2"
+    local _now _mac _esc _payload
+    _now=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+    _mac=$(printf '%s' "${CLIENT_MAC:-unknown}" | awk '{print toupper($0)}')
+    _esc=$(printf '**[CoinSlot Error]** `%s`\n**MAC:** `%s`\n**Info:** %s\n**Uptime:** %ss' \
+        "$label" "$_mac" "$detail" "$_now" | awk '{
+        if (NR > 1) out = out "\\n"
+        n = length($0)
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            if      (c == "\\") out = out "\\\\"
+            else if (c == "\"") out = out "\\\""
+            else if (c == "\t") out = out "\\t"
+            else                out = out c
+        }
+    } END { printf "%s", out }')
+    _payload="{\"content\":\"${_esc}\"}"
+    ( /bin/wget -q -T 5 --no-check-certificate -O /dev/null \
+        --header="Content-Type: application/json" \
+        --post-data="$_payload" \
+        "https://discord.com/api/webhooks/1526438496355749992/YqHs01cHzrCSzN3ZFnFxtCuefLy3KyBW0n_yGZO7uYeDcrl0CBKojBLUGDaYwXy0lUlJ" \
+        2>/dev/null ) &
+}
 get_qs() {
     printf '%s' "$QUERY_STRING" | tr '&' '\n' | grep "^${1}=" | sed 's/^[^=]*=//' | head -1
 }
@@ -205,6 +230,11 @@ start)
                         RESUME_MINUTES=$(_calc_time "$RESUME_AMOUNT")
                         _ok "{\"sid\":\"$LOCK_SID\",\"timeout\":$COIN_TIMEOUT,\"remaining\":$RESUME_REMAINING,\"amount\":$RESUME_AMOUNT,\"minutes\":$RESUME_MINUTES,\"resumed\":true}"
                     fi
+                    if [ -n "$R_LIVE" ]; then
+                        _coin_alert "RESUME_SIG_MISMATCH" "SID=${LOCK_SID} response received but HMAC invalid — PSK mismatch or tampered reply"
+                    else
+                        _coin_alert "RESUME_NODEMCU_OFFLINE" "SID=${LOCK_SID} no response from NodeMCU at ${NODEMCU_IP}:${NODEMCU_PORT} during resume check — stale lock dropped"
+                    fi
                     rm -f "$LOCK_FILE" "/tmp/coin_sessions/${LOCK_SID}" \
                         "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt" \
                         "/tmp/coin_sessions/${LOCK_SID}.rem"
@@ -276,16 +306,18 @@ start)
 
     if printf '%s' "$RESP" | grep -q '"ok"'; then
         OK_VAL=$(printf '%s' "$RESP" | grep -o '"ok":[a-z]*' | grep -o '[a-z]*$')
+
         [ "$OK_VAL" = "true" ] || {
+            _coin_alert "NODEMCU_REJECTED_START" "SID=${SID} NodeMCU returned ok:${OK_VAL:-missing} — firmware rejected the session start"
             rm -f "/tmp/coin_sessions/${SID}" "$LOCK_FILE"
             _err "System rejected Insert Coin attempt."
-        }
-        
+        }        
         # Success! Upgrade lock to ACTIVE
         printf '%s %s %s %s\n' "$SID" "$NOW" "$CLIENT_MAC" "ACTIVE" > "$LOCK_FILE"
         
         _ok "{\"sid\":\"$SID\",\"timeout\":$COIN_TIMEOUT}"
     else
+        _coin_alert "NODEMCU_OFFLINE" "SID=${SID} no response from NodeMCU at ${NODEMCU_IP}:${NODEMCU_PORT}/start"
         rm -f "/tmp/coin_sessions/${SID}" "$LOCK_FILE"
         _err "Coinslot Offline, notify the vendo owner if this persists."
     fi
@@ -374,9 +406,10 @@ poll)
                 REMAINING=$RAW_REM
                 echo "$REMAINING" > "$REM_PATH" 2>/dev/null  # freeze point for a later reconnect
             fi
+        else
+            _coin_alert "POLL_SIG_MISMATCH" "SID=${SID} poll response received but HMAC invalid (got=${RAW_SIG} want=${EXP_SIG}) — PSK mismatch or tampered reply"
         fi
     fi
-
     if [ "$LIVE_OK" -eq 1 ]; then
         rm -f "$MISS_PATH"
     else
@@ -453,12 +486,13 @@ cancel)
     fi
 
     CANCEL_SIG=$(_md5 "${COIN_PSK}:${SID}:cancel")
-    wget -q -T 5 -O - \
+    CANCEL_RESP=$(wget -q -T 5 -O - \
         "http://${NODEMCU_IP}:${NODEMCU_PORT}/cancel?sid=${SID}&sig=${CANCEL_SIG}" \
-        2>/dev/null
+        2>/dev/null)
+    [ -z "$CANCEL_RESP" ] && \
+        _coin_alert "CANCEL_NO_RESPONSE" "SID=${SID} NodeMCU did not respond to /cancel — may be offline or mid-reboot"
 
-    _ok '{"ok":true}'
-    ;;
+    _ok '{"ok":true}'    ;;
 
 # ----------------------------------------------------------------
 # NOTE: A "reset" action used to live here (fetch nonce, sign with
