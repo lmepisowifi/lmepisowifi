@@ -44,7 +44,7 @@ const int COIN_ENABLE_ACTIVE = HIGH;
 // ota.sh compares it against the release manifest's nodemcu_version and pushes a
 // self-flash ONLY when they differ, so a portal-only update (www2/hotspot files)
 // never needlessly reflashes the coin slot.
-#define FW_VERSION          "1.0.9"
+#define FW_VERSION          "1.1.4"
 // No AP password — open so owner can connect immediately on first setup
 
 // ── CONFIG STRUCT ─────────────────────────────────────────────────────
@@ -76,7 +76,6 @@ String                 activeClientMac  = "";      // MAC of the paying client (
 volatile unsigned long sessionStartMs   = 0;      
 unsigned long          sessionTimeoutMs = 30000UL;
 volatile bool          cancelRequested  = false;  
-volatile bool          coinDirty        = false;   // set by ISR when a coin was counted → loop persists it
 
 // For anti-tamper / pulse limiting
 volatile unsigned long lastPulseMs      = 0;
@@ -99,14 +98,12 @@ const unsigned long    MAX_PAUSE_MS     = 5UL*60UL*1000UL; // after 5 min stalle
 
 // ── CRASH / POWER-OUTAGE COIN PRESERVATION ────────────────────────────
 // A Piso-Wifi unit and its coin slot usually share one power brick, so a power
-// outage kills both mid-session. Coins counted so far live only in RAM
-// (coinPesos), so without help they vanish on the blackout. We therefore mirror
-// the live session (sid + client MAC + running peso total) to LittleFS every
-// time the total changes. On the next boot we read it back and POST a signed
-// "recovery" result to the portal, which grants the customer the time they paid
-// for — even though the portal's own /tmp bookkeeping was wiped by the same
-// outage (coin_result.sh rebuilds it from the MAC we send).
-#define SESSION_PATH_FS   "/coin_session.txt"
+// outage kills both mid-session. This used to be handled on the NodeMCU by
+// mirroring the live session to LittleFS on every coin, but those constant
+// flash writes wore out the ESP8266 and fragmented its heap. Preservation now
+// lives entirely on the router: coin.sh mirrors each PSK-verified poll total to
+// its non-volatile partition and startup.sh replays any unfinished session on
+// boot. The NodeMCU keeps coins in RAM only (coinPesos) and is stateless.
 
 // Piezo igniter ("BBQ lighter") fraud: a spark touched to the pulse wire
 // induces a clean FALLING edge that looks identical to a real coin pulse to
@@ -126,14 +123,7 @@ volatile unsigned long lastEdgeMs = 0;
 volatile int           activeState = LOW; // Assumes NO by default
 bool   pendingResult  = false;
 String pendingBody    = "";
-String pendingSid     = "";   // SID pendingBody belongs to — only clear that
-                               // session's flash mirror once the portal confirms it
 int    pendingRetries = 0;
-
-// Boot-time power-outage recovery must be retried periodically, not attempted
-// only once — see the recovery-retry block in loop().
-unsigned long lastRecoveryAttemptMs = 0;
-const unsigned long RECOVERY_RETRY_MS = 10000UL;
 
 // One-time, short-lived nonce backing the signed /reset flow (see coin.sh).
 String        resetNonce    = "";
@@ -171,6 +161,21 @@ const unsigned long HEAP_LOW_BYTES   = 8000UL;   // ~8 KB danger floor
 const unsigned long HEAP_CHECK_MS    = 10000UL;  // sample free heap every 10s
 const uint8_t       HEAP_LOW_CONFIRM = 3;        // 3 low reads in a row (~30s) → reboot
 
+// FRAGMENTATION safety net — the real killer of this firmware.
+// getFreeHeap() alone is NOT enough: heavy String concatenation + HTTPClient
+// chops the heap into small pieces, so TOTAL free heap can still look healthy
+// (well above HEAP_LOW_BYTES) while the LARGEST CONTIGUOUS block shrinks to a
+// few hundred bytes. Once that happens, the String/MD5Builder allocations
+// inside md5_hex()/sig_ok() silently fail and return empty — so the signature
+// check computes the wrong hash and EVERY /start is rejected with 403
+// "bad_sig" even though the PSK is perfectly correct. The unit then appears to
+// "destroy itself" and never recovers until a manual power cycle, because the
+// old free-heap-only watchdog never sees a problem. We therefore also watch
+// the largest free block (getMaxFreeBlockSize) and the fragmentation percent
+// (getHeapFragmentation) and reboot to defragment before signing breaks.
+const unsigned long HEAP_BLOCK_LOW_BYTES = 6000UL;  // largest contiguous block floor
+const uint8_t       HEAP_FRAG_HIGH_PCT   = 75;      // % fragmentation ceiling
+
 // Set true once a reboot is queued (by the schedule or the heap watchdog).
 // The actual ESP.restart() is deferred until the machine is idle — see
 // serviceReboot() in loop(). rebootReason is kept for optional debugging.
@@ -178,17 +183,94 @@ bool          rebootPending    = false;
 const char*   rebootReason     = "";
 unsigned long lastSessionEndMs = 0;       // millis() when the last coin session ended
 
+// ══════════════════════════════════════════════════════════════════════
+// SERIAL DEBUG — open the Arduino IDE Serial Monitor @ 115200 baud.
+// Set DEBUG_SERIAL to 0 to silence all logging for a production flash.
+// These logs are how you confirm WHY /start returns 403 even after a reboot:
+// they print the heap/fragmentation state, the exact PSK that is loaded from
+// flash (length + a masked preview so you can spot a corrupted/blank PSK
+// without leaking the secret over serial), and, on every signature failure,
+// the expected vs received MD5 so you can see if it is an allocation failure
+// (empty/short hash) or a genuine PSK mismatch (correct-length but different
+// hash → the stored PSK does not match what the portal is signing with).
+// ══════════════════════════════════════════════════════════════════════
+#define DEBUG_SERIAL 1
+
+#if DEBUG_SERIAL
+  #define DBG(...)   Serial.printf(__VA_ARGS__)
+  #define DBGLN(x)   Serial.println(x)
+#else
+  #define DBG(...)   do {} while (0)
+  #define DBGLN(x)   do {} while (0)
+#endif
+
+// One-line snapshot of heap health — free bytes, largest contiguous block,
+// and fragmentation %. When /start starts 403-ing, watch maxBlock/frag here:
+// if maxBlock is small or frag is high, the signature String allocations are
+// failing (the fragmentation bug). If heap looks fine, suspect the PSK.
+void dbgHeap(const char* tag) {
+#if DEBUG_SERIAL
+    Serial.printf("[HEAP] %-14s free=%u maxBlock=%u frag=%u%%\n",
+                  tag, ESP.getFreeHeap(), ESP.getMaxFreeBlockSize(),
+                  ESP.getHeapFragmentation());
+#endif
+}
+
+// Masked preview of a secret so we can verify the PSK loaded from flash is
+// intact without printing it in full. e.g. "ab****yz (len=8)".
+String dbgMask(const char* s) {
+    String in = String(s);
+    size_t n = in.length();
+    if (n == 0) return String("<EMPTY!> (len=0)");
+    if (n <= 4) return String("**** (len=") + n + ")";
+    return in.substring(0, 2) + "****" + in.substring(n - 2) + " (len=" + n + ")";
+}
+
+// Byte-for-byte hex dump of the stored PSK. This is the definitive check for a
+// reboot-proof 403: run it and compare the length + bytes against your portal's
+// PSK. Any invisible passenger — a trailing 0x20 (space), 0x0D (CR), 0x0A
+// (newline), 0xC2A0 (non-breaking space) or a smart-quote — shows up here as an
+// extra/unexpected byte even though the PSK "looks" correct on screen.
+void dbgHexPsk() {
+#if DEBUG_SERIAL
+    size_t n = strlen(cfg.psk);
+    Serial.printf("[PSK] stored length = %u byte(s)\n", n);
+    Serial.print("[PSK] hex =");
+    for (size_t i = 0; i < n; i++) Serial.printf(" %02X", (uint8_t)cfg.psk[i]);
+    Serial.println();
+    // Flag the usual invisible offenders explicitly.
+    if (n > 0) {
+        uint8_t last = (uint8_t)cfg.psk[n - 1];
+        if (last == 0x20 || last == 0x0D || last == 0x0A)
+            Serial.printf("[PSK] WARNING: trailing byte 0x%02X (whitespace/CR/LF) — likely bad!\n", last);
+    }
+#endif
+}
+
 
 // ══════════════════════════════════════════════════════════════════════
 // UTILITIES
 // ══════════════════════════════════════════════════════════════════════
 
 String md5_hex(const String& s) {
+    // Guard against a silent OOM: if the input String itself came back empty
+    // while the caller expected data, or the heap can't fit the working
+    // buffers, the resulting hash is meaningless. We log it so a 403 caused by
+    // allocation failure is distinguishable from a real PSK mismatch.
+    if (ESP.getMaxFreeBlockSize() < 512) {
+        DBG("[SIG] md5_hex: LOW heap block=%u — hash may be corrupt!\n",
+            ESP.getMaxFreeBlockSize());
+    }
     MD5Builder b;
     b.begin();
     b.add((uint8_t*)s.c_str(), s.length());
     b.calculate();
-    return b.toString();
+    String out = b.toString();
+    if (out.length() != 32) {
+        DBG("[SIG] md5_hex: BAD hash length=%u (expected 32) — allocation failed\n",
+            out.length());
+    }
+    return out;
 }
 
 // Constant-time signature compare — avoids leaking the expected MAC byte by
@@ -196,10 +278,28 @@ String md5_hex(const String& s) {
 // mismatch). Cheap and behaviour-preserving for valid signatures.
 bool sig_ok(const String& sig, const String& plain) {
     String expected = md5_hex(plain);
-    if (sig.length() != expected.length()) return false;
+    if (sig.length() != expected.length()) {
+        // Length mismatch is almost always an OOM/fragmentation failure
+        // (expected hash truncated) rather than a real bad signature.
+        DBG("[SIG] LEN MISMATCH recv_len=%u exp_len=%u\n",
+            sig.length(), expected.length());
+        DBG("[SIG]   recv=%s\n", sig.c_str());
+        DBG("[SIG]   exp =%s\n", expected.c_str());
+        dbgHeap("sig_len_fail");
+        return false;
+    }
     uint8_t diff = 0;
     for (size_t i = 0; i < expected.length(); i++)
         diff |= (uint8_t)sig[i] ^ (uint8_t)expected[i];
+    if (diff != 0) {
+        // Correct length but different hash → the PSK stored on this unit does
+        // NOT match what the portal signed with. This is the failure that
+        // SURVIVES a reboot: check the [BOOT] PSK line against the portal.
+        DBG("[SIG] HASH MISMATCH — stored PSK likely differs from portal PSK\n");
+        DBG("[SIG]   recv=%s\n", sig.c_str());
+        DBG("[SIG]   exp =%s\n", expected.c_str());
+        DBG("[SIG]   psk =%s\n", dbgMask(cfg.psk).c_str());
+    }
     return diff == 0;
 }
 
@@ -247,7 +347,6 @@ void IRAM_ATTR onCoinPulse() {
         lastPulseMs    = nowMs;
         coinPesos     += cfg.coin_value;
         sessionStartMs = nowMs;   // each valid coin extends the timeout window
-        coinDirty      = true;    // loop() will mirror the new total to flash
     }
 }
 
@@ -325,49 +424,14 @@ void wipeConfig() {
 }
 
 
-// ══════════════════════════════════════════════════════════════════��═��═
-// LIVE-SESSION MIRROR — LittleFS, survives power loss
+RAM only; power-outage recovery now lives on the router
 // ══════════════════════════════════════════════════════════════════════
-// One line: SID CLIENT_MAC PESOS
-// Written every time the peso total changes during an active session, cleared
-// once the session finalizes cleanly (endSession) or is recovered on boot.
-
-void persistSession() {
-    // Snapshot the volatile total once so an ISR mid-write can't tear it.
-    int amt = coinPesos;
-    File f = LittleFS.open(SESSION_PATH_FS, "w");
-    if (!f) return;
-    f.print(activeSid);
-    f.print(' ');
-    f.print(activeClientMac.length() ? activeClientMac : String("-"));
-    f.print(' ');
-    f.println(amt);
-    f.close();
-}
-
-void clearPersistedSession() {
-    LittleFS.remove(SESSION_PATH_FS);
-}
-
-// Only clears the mirror if it still belongs to the given SID. Needed because
-// a new session can legitimately start (and overwrite the mirror with its own
-// zero-peso entry) before a *previous* session's delayed/retried result POST
-// finally gets confirmed — a blind clear at that point would wipe the new,
-// still-live session's crash protection instead of the old one's.
-void clearPersistedSessionIfMatches(const String &sid) {
-    if (sid.length() == 0 || !LittleFS.exists(SESSION_PATH_FS)) return;
-    File f = LittleFS.open(SESSION_PATH_FS, "r");
-    if (!f) return;
-    String line = f.readStringUntil('\n');
-    f.close();
-    int sp = line.indexOf(' ');
-    String fileSid = (sp >= 0) ? line.substring(0, sp) : line;
-    fileSid.trim();
-    if (fileSid == sid) clearPersistedSession();
-}
-
-// Forward decl — defined in NORMAL MODE section below.
-void recoverSessionFromFlash();
+// Coins are kept only in RAM (coinPesos). We no longer mirror the session to
+// LittleFS — that per-coin flash write was the root cause of the ESP8266 flash
+// wear and heap fragmentation (which silently broke md5/sig and produced the
+// reboot-proof /start 403s). The router (coin.sh + startup.sh) now persists
+// each PSK-verified poll total to non-volatile storage and replays any
+// unfinished session across a blackout instead.
 
 
 // ══════════════════════════════════════════════════════════════════════
@@ -552,6 +616,15 @@ void handle_save() {
     String coinval = setupServer.arg("coinval");
     String timeout = setupServer.arg("timeout");
 
+    // Strip stray whitespace/CR/newline that commonly rides along when a PSK is
+    // copy-pasted from a portal page, chat, or spreadsheet. An invisible
+    // trailing byte here is a classic cause of a PERMANENT 403 "bad_sig": the
+    // portal signs with the clean PSK, but the unit would store one extra byte,
+    // so md5(psk:sid:start) never matches — and a reboot can't fix a bad byte
+    // that's already been written to flash. Trim before storing.
+    psk.trim();
+    ip.trim();
+
     if (ssid.length() == 0 || ssid.length() > 63) {
         setupServer.send(200, "application/json", "{\"ok\":false,\"error\":\"Invalid SSID\"}");
         return;
@@ -615,79 +688,9 @@ void post_result() {
             pendingResult  = false;
             pendingBody    = "";
             pendingRetries = 0;
-            // Portal has now definitively credited these coins — safe to drop
-            // the crash-recovery mirror for this session.
-            clearPersistedSessionIfMatches(pendingSid);
-            pendingSid     = "";
         }
     }
     http.end();
-}
-
-// ── POWER-OUTAGE RECOVERY ──────────────────────────────────────────────────
-// Called once right after connectWiFi() in startNormalMode(), and then again
-// every RECOVERY_RETRY_MS from loop() for as long as the mirror file exists.
-// The repeat calls matter because the ONT/router often hasn't finished
-// booting yet when this device comes up after a shared power outage, so the
-// very first attempt frequently finds WiFi not connected and simply returns.
-// If a session mirror survived on flash, the previous run died mid-session —
-// almost always a power cut that took the portal down too. We POST the
-// preserved amount to the portal's coin_result.sh in RECOVERY mode: it
-// carries the client MAC and is signed with it, so coin_result.sh can
-// grant/extend that device's time even though its own /tmp session
-// bookkeeping was wiped by the same outage. The mirror is cleared only after
-// the portal confirms "ok" AND it still belongs to this SID, so a
-// failed/limited reconnect just retries on the next pass instead of losing
-// the coins.
-void recoverSessionFromFlash() {
-    if (!LittleFS.exists(SESSION_PATH_FS)) return;
-
-    File f = LittleFS.open(SESSION_PATH_FS, "r");
-    if (!f) return;
-    String line = f.readStringUntil('\n');
-    f.close();
-    line.trim();
-    if (line.length() == 0) { clearPersistedSession(); return; }
-
-    // Parse "SID MAC PESOS"
-    int s1 = line.indexOf(' ');
-    int s2 = (s1 >= 0) ? line.indexOf(' ', s1 + 1) : -1;
-    if (s1 < 0 || s2 < 0) { clearPersistedSession(); return; }
-    String rSid = line.substring(0, s1);
-    String rMac = line.substring(s1 + 1, s2);
-    String rAmtS = line.substring(s2 + 1);
-    rSid.trim(); rMac.trim(); rAmtS.trim();
-    int rAmt = rAmtS.toInt();
-
-    // Nothing was actually paid, or we never learned the MAC → nothing to
-    // recover; just drop the stale mirror.
-    if (rAmt <= 0 || rMac.length() == 0 || rMac == "-") {
-        clearPersistedSession();
-        return;
-    }
-
-    if (WiFi.status() != WL_CONNECTED) return;   // try again next boot
-
-    // token = md5(PSK:SID:AMOUNT:MAC:recover)
-    String plain = String(cfg.psk) + ":" + rSid + ":" + String(rAmt)
-                   + ":" + rMac + ":recover";
-    String body  = "sid=" + rSid + "&amount=" + String(rAmt)
-                   + "&mac=" + rMac + "&recover=1&sig=" + md5_hex(plain);
-
-    HTTPClient http;
-    String url = String("http://") + cfg.portal_ip + ":"
-                 + cfg.portal_port + "/cgi-bin/coin_result.sh";
-    http.begin(wifiClient, url);
-    http.setTimeout(5000);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    int code = http.POST(body);
-    bool ok = (code > 0 && http.getString().indexOf("\"ok\":true") >= 0);
-    http.end();
-
-    // Only forget the coins once the portal has definitively credited them —
-    // and only if the mirror still holds this session (a new session may have
-    // already started and overwritten it while this POST was in flight).
-    if (ok) clearPersistedSessionIfMatches(rSid);
 }
 
 void endSession() {
@@ -699,13 +702,6 @@ void endSession() {
 
     int finalAmount = coinPesos;
     coinPesos = 0;
-
-    // NOTE: the flash mirror is deliberately NOT cleared here. It's only
-    // cleared once post_result() gets a confirmed "ok" from the portal. If we
-    // cleared it now, a power cut during the up-to-50s retry window below
-    // would erase the only surviving record of these coins before the portal
-    // ever actually saw them.
-    pendingSid = activeSid;
 
     String plain = String(cfg.psk) + ":" + activeSid + ":"
                    + String(finalAmount) + ":end";
@@ -740,13 +736,31 @@ void serviceReboot() {
         rebootReason  = "scheduled";
     }
 
-    // 1b) Heap watchdog — sample periodically, require consecutive low reads
+    // 1b) Heap watchdog — sample periodically, require consecutive bad reads.
+    // Trip on ANY of: low total free heap, a too-small largest contiguous
+    // block, or high fragmentation. The block/fragmentation checks are what
+    // actually catch the "signing silently breaks → 403 on /start" failure:
+    // total free heap can look fine while the largest allocatable block is too
+    // small for md5_hex()/sig_ok() to build their Strings.
     if (millis() - lastHeapChk >= HEAP_CHECK_MS) {
         lastHeapChk = millis();
-        if (ESP.getFreeHeap() < HEAP_LOW_BYTES) {
+        uint32_t freeHeap  = ESP.getFreeHeap();
+        uint32_t maxBlock  = ESP.getMaxFreeBlockSize();
+        uint8_t  fragPct   = ESP.getHeapFragmentation();
+        bool starved   = freeHeap < HEAP_LOW_BYTES;
+        bool blockLow  = maxBlock < HEAP_BLOCK_LOW_BYTES;
+        bool tooFrag   = fragPct  > HEAP_FRAG_HIGH_PCT;
+        // Periodic heartbeat so you can watch the heap slowly fragment over
+        // hours/days in the Serial Monitor and correlate it with /start 403s.
+        DBG("[WDOG] free=%u maxBlock=%u frag=%u%% strikes=%u\n",
+            freeHeap, maxBlock, fragPct, heapStrikes);
+        if (starved || blockLow || tooFrag) {
             if (++heapStrikes >= HEAP_LOW_CONFIRM && !rebootPending) {
                 rebootPending = true;
-                rebootReason  = "low_heap";
+                rebootReason  = starved ? "low_heap"
+                                        : (blockLow ? "heap_block_low" : "heap_frag");
+                DBG("[WDOG] reboot QUEUED reason=%s (free=%u maxBlock=%u frag=%u%%)\n",
+                    rebootReason, freeHeap, maxBlock, fragPct);
             }
         } else {
             heapStrikes = 0;   // recovered — reset the strike counter
@@ -760,6 +774,7 @@ void serviceReboot() {
     if ((millis() - lastSessionEndMs) < POST_SESSION_WAIT_MS) return; // grace minute not up, or a new session just started
 
     // Idle, grace minute elapsed, no new session → safe to reboot now.
+    DBG("[WDOG] rebooting now, reason=%s\n", rebootReason);
     setCoinAcceptor(false);   // make sure the slot is blocked across the reboot
     delay(50);
     ESP.restart();
@@ -780,14 +795,37 @@ void handle_coin_start() {
     String to  = coinServer.arg("timeout");
     String mac = coinServer.arg("mac");   // paying client's MAC, for power-outage recovery
 
+    DBG("[START] sid=%s sig=%s\n", sid.c_str(), sig.c_str());
+    dbgHeap("start_req");
+
     if (sid.length() != 16) {
+        DBG("[START] REJECT 400 bad_sid (len=%u)\n", sid.length());
         coinServer.send(400, "application/json", "{\"ok\":false,\"error\":\"bad_sid\"}");
         return;
     }
+
+    // OOM GUARD — the difference between a self-healing unit and a "dead" one.
+    // If the largest free heap block is too small to reliably build the
+    // signature String + MD5 buffers, DON'T compute a corrupt hash and reject
+    // with a permanent-looking 403. Instead return a RETRYABLE 503 and queue a
+    // reboot to defragment. The portal can retry, and after the idle reboot the
+    // unit comes back healthy — no manual power cycle, no "destroys itself".
+    if (ESP.getMaxFreeBlockSize() < HEAP_BLOCK_LOW_BYTES) {
+        DBG("[START] REJECT 503 low_heap maxBlock=%u — queuing reboot\n",
+            ESP.getMaxFreeBlockSize());
+        if (!rebootPending) { rebootPending = true; rebootReason = "heap_block_low"; }
+        coinServer.send(503, "application/json",
+                        "{\"ok\":false,\"error\":\"busy_retry\"}");
+        return;
+    }
+
     if (!sig_ok(sig, String(cfg.psk) + ":" + sid + ":start")) {
+        // sig_ok() has already logged WHY (heap/OOM vs PSK mismatch) above.
+        DBGLN("[START] REJECT 403 bad_sig — see [SIG] lines above for cause");
         coinServer.send(403, "application/json", "{\"ok\":false,\"error\":\"bad_sig\"}");
         return;
     }
+    DBGLN("[START] OK — session accepted");
 
 sessionActive    = true;
     finalizing       = false;
@@ -795,7 +833,6 @@ sessionActive    = true;
     activeSid        = sid;
     activeClientMac  = mac;       // remembered so a recovery POST can rebuild the portal session
     coinPesos        = 0;
-    coinDirty        = false;
     sessionStartMs   = millis();
     lastPulseMs      = millis(); // Init
     lastPollMs       = millis(); // the /start request itself counts as fresh contact
@@ -805,7 +842,6 @@ sessionActive    = true;
                        ? (unsigned long)to.toInt() * 1000UL
                        : (unsigned long)cfg.timeout_sec * 1000UL;
     setCoinAcceptor(true);
-    persistSession();            // mirror the (zero-peso) session to flash immediately
     coinServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1170,11 +1206,6 @@ void startNormalMode() {
     // or the signed /reset endpoint — not by self-wiping on a transient miss.
     connectWiFi();
 
-    // If a coin session was mirrored to flash and never cleared, the last run
-    // died mid-session (power cut). Push the preserved coins to the portal now
-    // so the customer still gets the time they paid for.
-    recoverSessionFromFlash();
-
     coinServer.on("/start",   handle_coin_start);
     coinServer.on("/status",  handle_coin_status);
     coinServer.on("/cancel",  handle_coin_cancel);
@@ -1187,11 +1218,22 @@ void startNormalMode() {
 }
 
 
-// ══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════���══════════════════════════════════
 // ARDUINO SETUP & LOOP
 // ══════════════════════════════════════════════════════════════════════
 
 void setup() {
+    // Bring up the hardware serial FIRST so every diagnostic below (and the
+    // OTA prints further down) actually reach the Arduino IDE Serial Monitor.
+    // Open the monitor at 115200 baud. Previously Serial was never started, so
+    // all the Serial.printf() calls in the OTA path were silently discarded.
+    Serial.begin(115200);
+    delay(50);
+    Serial.println();
+    Serial.println("[BOOT] ==== coin acceptor firmware starting ====");
+    Serial.printf("[BOOT] reset reason: %s\n", ESP.getResetReason().c_str());
+    dbgHeap("boot");
+
         pinMode(D0, INPUT_PULLUP);
     pinMode(D2, INPUT_PULLUP);
     pinMode(D3, INPUT_PULLUP); // Has on-board 10k pullup, but software pullup adds stability
@@ -1229,8 +1271,16 @@ void setup() {
     }
 
     if (loadConfig()) {
+        // Print exactly what was loaded from flash. If /start 403s survive a
+        // reboot, this line is the first thing to check: a blank/truncated PSK
+        // here (or one that differs from the portal's) explains a persistent
+        // "bad_sig" that no amount of rebooting can fix.
+        DBG("[BOOT] config loaded: SSID=%s PSK=%s portal=%s:%u\n",
+            cfg.ssid, dbgMask(cfg.psk).c_str(), cfg.portal_ip, cfg.portal_port);
+        dbgHexPsk();   // byte-for-byte dump to catch invisible PSK characters
         startNormalMode();
     } else {
+        DBGLN("[BOOT] no valid config — entering setup AP mode");
         startSetupMode();
     }
 }
@@ -1267,18 +1317,6 @@ void loop() {
         lastHealMs = millis();
         pinMode(COIN_ENABLE_PIN, OUTPUT);
         digitalWrite(COIN_ENABLE_PIN, COIN_ENABLE_ACTIVE);
-    }    // --- CRASH-SAFE COIN MIRROR ---
-    // A coin was counted since we last checked → flush the new running total to
-    // flash so a power cut in the next instant can't erase it. Done here in
-    // loop() (not the ISR) because LittleFS writes must not run inside an
-    // interrupt. The flag is cleared before the write so a coin landing during
-    // the write is caught on the following pass.
-// --- CRASH-SAFE COIN MIRROR ---
-    // FIX: Wait 300ms after the last pulse before saving to flash. 
-    // This prevents locking up the CPU while a multi-pulse coin is still actively sending pulses.
-    if (sessionActive && coinDirty && (millis() - lastPulseMs > 300)) {
-        coinDirty = false;
-        persistSession();
     }
 
     // --- LINK-LOSS COUNTDOWN PAUSE ---
@@ -1341,20 +1379,6 @@ void loop() {
         }
     }
 
-    // Retry the boot-time power-outage recovery POST until the portal
-    // confirms it. A single attempt right after connectWiFi() in
-    // startNormalMode() isn't enough: if the ONT/router hasn't finished
-    // booting yet (common right after a shared power outage), that first
-    // attempt fails and — without this — would never be retried until the
-    // NEXT full reboot, leaving a customer's coins uncredited for hours.
-    // recoverSessionFromFlash() is already a cheap no-op once nothing is left
-    // to recover or WiFi still isn't connected, so just nudge it every 10s.
-// Retry the boot-time power-outage recovery POST until the portal confirms it.
-    // FIX: Only run if there is NO active session and no pending session ending.
-    if (!sessionActive && !pendingResult && LittleFS.exists(SESSION_PATH_FS) && (millis() - lastRecoveryAttemptMs) >= RECOVERY_RETRY_MS) {
-        lastRecoveryAttemptMs = millis();
-        recoverSessionFromFlash();
-    }
     // WiFi watchdog — reconnect check every 15s.
     // wrongGwStrikes: tolerate up to 3 consecutive wrong-gateway readings (45s)
     // before forcing re-DHCP, so a slow br0→br1 bridge transition doesn't cause

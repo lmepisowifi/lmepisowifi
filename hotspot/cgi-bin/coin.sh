@@ -15,6 +15,35 @@ _err() { printf '{"error":"%s"}\n' "$1"; exit 0; }
 _ok()  { printf '%s\n' "$1";           exit 0; }
 _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 
+# ── NON-VOLATILE COIN PERSISTENCE ────────────────────────────────────────────
+# Crash-safe coin protection now lives HERE on the router, not on the NodeMCU.
+# The NodeMCU used to mirror every coin to its own LittleFS flash, but that
+# per-coin write churn fragmented the ESP8266 heap and eventually broke request
+# signing (the reboot-proof 403). The router already receives and PSK-verifies
+# the live coin total on every ~1s poll, so it is the natural place to persist.
+# /tmp is tmpfs (RAM) and dies in a blackout, so we ALSO mirror the verified
+# amount to /lmepisowifi/hotspot_data/ — the same non-volatile partition that
+# income.env/users.txt already use to survive reboots. On boot, startup.sh
+# replays any unfinished pending session so the paying customer still gets
+# their time. Worst case we lose the single coin dropped in the ~1s instant of
+# the power cut, instead of permanently destroying the coin slot over time.
+COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
+
+# Persist the authoritative session snapshot to non-volatile flash. Written on
+# every verified poll (so the amount is at most ~1s stale) and on session start.
+# Format: "SID MAC AMOUNT CREATED_AT" — everything coin_result.sh needs to
+# grant/extend the time on boot replay without any /tmp state.
+_persist_pending() {
+    # $1=SID $2=MAC $3=AMOUNT $4=CREATED_AT
+    [ -d "$COIN_PENDING_DIR" ] || mkdir -p "$COIN_PENDING_DIR" 2>/dev/null
+    printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" \
+        > "${COIN_PENDING_DIR}/${1}.tmp" 2>/dev/null \
+        && mv "${COIN_PENDING_DIR}/${1}.tmp" "${COIN_PENDING_DIR}/${1}" 2>/dev/null
+}
+
+# Drop the non-volatile mirror once a session is finished or abandoned.
+_clear_pending() { rm -f "${COIN_PENDING_DIR}/${1}" "${COIN_PENDING_DIR}/${1}.tmp" 2>/dev/null; }
+
 # ── Audit webhook — NodeMCU error events → hardcoded Discord channel ──────────
 _coin_alert() {
     local label="$1" detail="$2"
@@ -375,6 +404,7 @@ poll)
     if [ "$SINCE_SEEN" -gt $(( COIN_TIMEOUT + 25 + RECONNECT_GRACE )) ]; then
         GIVEUP_AMT=$(cat "$AMT_PATH" 2>/dev/null); GIVEUP_AMT=${GIVEUP_AMT:-0}
         rm -f "$SESSION_PATH" "$MISS_PATH" "$AMT_PATH" "$REM_PATH" "/tmp/coin_lock"
+        _clear_pending "$SID"   # session abandoned → drop the non-volatile mirror
         _ok "{\"status\":\"expired\",\"amount\":${GIVEUP_AMT},\"minutes\":$(_calc_time "$GIVEUP_AMT")}"
     fi
 
@@ -394,8 +424,22 @@ poll)
         # Only trust the amount if NodeMCU signed it with the PSK
         if [ -n "$RAW_SIG" ] && [ "$RAW_SIG" = "$EXP_SIG" ]; then
             LIVE_OK=1
+            PREV_AMOUNT=$LIVE_AMOUNT          # what we had before this poll
             LIVE_AMOUNT=${RAW_AMT:-0}
             echo "$LIVE_AMOUNT" > "$AMT_PATH" 2>/dev/null
+            # Mirror the PSK-verified total to NON-VOLATILE flash so a blackout
+            # in the next instant can't erase it. This is the crash protection
+            # that used to live on the NodeMCU's own flash — moved here to stop
+            # the ESP8266 heap fragmentation that broke request signing.
+            #
+            # Write ONLY when the total actually changed (a new coin dropped),
+            # not on every ~1s poll. Coins arrive infrequently, so this keeps
+            # flash writes proportional to coins inserted instead of to time —
+            # we don't want to just relocate the ESP8266's flash-wear problem
+            # onto the router. A zero total has nothing to recover, so skip it.
+            if [ "${LIVE_AMOUNT:-0}" -gt 0 ] && [ "${LIVE_AMOUNT:-0}" != "${PREV_AMOUNT:-0}" ]; then
+                _persist_pending "$SID" "$SESSION_MAC" "$LIVE_AMOUNT" "$CREATED_AT"
+            fi
             # NodeMCU is alive and confirms this session is still active there
             # — refresh the heartbeat so a long rolling session stays open.
             printf '%s %s %s\n' "$SESSION_MAC" "$CREATED_AT" "$NOW" \

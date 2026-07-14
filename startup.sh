@@ -39,6 +39,64 @@
     /lmepisowifi/lmehspt.sh &
     /lmepisowifi/www2/sh/startup.sh &
 
+    # --- STEP 1.5b: Replay power-outage coin sessions ---
+    # A Piso-Wifi unit and its coin slot share a power brick, so a blackout kills
+    # both mid-session. The NodeMCU is now stateless (it no longer wears out its
+    # flash mirroring coins), so the router owns crash recovery: coin.sh mirrors
+    # each PSK-verified poll total to the non-volatile partition below (since
+    # /tmp is tmpfs and dies in a blackout). On boot we grant the customer the
+    # time they already paid for by re-running coin_result.sh's exact grant logic
+    # locally, then drop the mirror. Backgrounded so it can wait for lmehspt.sh
+    # to (re)publish /tmp/coin_config.env — which holds COIN_PSK, needed to sign
+    # the grant — after that script's boot-time wipe of /tmp/coin_sessions.
+    (
+        COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
+        [ -d "$COIN_PENDING_DIR" ] || exit 0
+
+        # Wait (up to ~90s) for lmehspt.sh to publish the runtime coin config.
+        i=0
+        while [ ! -f /tmp/coin_config.env ] && [ "$i" -lt 90 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        [ -f /tmp/coin_config.env ] || exit 0
+        . /tmp/coin_config.env
+        [ -n "$COIN_PSK" ] || exit 0
+
+        for f in "$COIN_PENDING_DIR"/*; do
+            [ -f "$f" ] || continue          # empty dir → literal glob, skip
+            case "$f" in *.tmp) continue ;; esac  # skip half-written mirrors
+
+            # Mirror format written by coin.sh: "SID MAC AMOUNT CREATED_AT"
+            read -r P_SID P_MAC P_AMOUNT P_CREATED < "$f"
+
+            # Validate the mirrored fields before trusting them; drop junk.
+            printf '%s' "$P_SID"    | grep -qE '^[0-9a-f]{16}$'  || { rm -f "$f"; continue; }
+            printf '%s' "$P_MAC"    | grep -qE '^[0-9a-f:]{17}$' || { rm -f "$f"; continue; }
+            printf '%s' "$P_AMOUNT" | grep -qE '^[0-9]+$'        || { rm -f "$f"; continue; }
+            [ "${P_AMOUNT:-0}" -gt 0 ] || { rm -f "$f"; continue; }
+
+            # Sign exactly as the NodeMCU recovery POST did:
+            #   sig = md5(PSK:SID:AMOUNT:MAC:recover)
+            # coin_result.sh re-verifies this (defense in depth) and clears the
+            # mirror itself on a successful/duplicate grant.
+            P_SIG=$(printf '%s' "${COIN_PSK}:${P_SID}:${P_AMOUNT}:${P_MAC}:recover" \
+                    | md5sum | awk '{print $1}')
+
+            # Reuse coin_result.sh's grant/extend logic via a direct LOCAL exec
+            # (not HTTP). REMOTE_ADDR is empty for a local root invocation, which
+            # is exactly what its boot-replay guard requires — a network caller
+            # can neither blank REMOTE_ADDR nor set COIN_BOOT_REPLAY.
+            COIN_BOOT_REPLAY=1 REMOTE_ADDR="" \
+            SID="$P_SID" AMOUNT="$P_AMOUNT" SIG="$P_SIG" RECOVER_MAC="$P_MAC" \
+                /bin/sh /lmepisowifi/hotspot/cgi-bin/coin_result.sh >/dev/null 2>&1
+
+            # Safety net: if coin_result.sh couldn't clear it (e.g. a transient
+            # failure) the mirror stays and is retried on the next boot. A
+            # successful grant already removed it, so this is a no-op then.
+        done
+    ) &
+
     # --- STEP 1.6: Start crond ---
     # /etc/crontabs is on the read-only squashfs rootfs, so crond is pointed
     # at /config/crontabs instead (writable, persists across reboots).

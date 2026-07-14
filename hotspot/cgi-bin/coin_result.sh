@@ -17,6 +17,12 @@ _err() { printf '{"error":"%s"}\n' "$1"; exit 0; }
 _ok()  { printf '%s\n' "$1";           exit 0; }
 _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 
+# Non-volatile pending-session mirror written by coin.sh's poll handler. Once a
+# session is granted/finalized here, drop its mirror so startup.sh won't replay
+# (and double-grant) it on the next boot.
+COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
+_clear_pending() { rm -f "${COIN_PENDING_DIR}/${1}" "${COIN_PENDING_DIR}/${1}.tmp" 2>/dev/null; }
+
 _unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
@@ -54,40 +60,66 @@ printf 'Content-Type: application/json\r\n'
 printf 'Cache-Control: no-cache, no-store\r\n'
 printf '\r\n'
 
-# --- Guard 1: Only requests from NODEMCU_IP are processed ---
-[ "$REMOTE_ADDR" = "$NODEMCU_IP" ] || _err "Forbidden"
-
-# --- Guard 2: Verify NodeMCU MAC via ARP (fail closed) ---
-EXPECTED_MAC=$(printf '%s' "$NODEMCU_MAC" | tr -d ':' | tr 'A-F' 'a-f' | \
-    sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6/')
-CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
-if [ -z "$CALLER_MAC" ]; then
-    # Cache miss (e.g. stale/expired ARP entry) — force a resolution
-    # attempt before deciding anything. Silently falling through to
-    # Guard 1's source-IP-only check here would make this endpoint
-    # spoofable by anyone on the shared LAN segment; a missing ARP
-    # entry must be treated the same as a mismatched one, not skipped.
-    ping -c 1 -W 1 "$NODEMCU_IP" >/dev/null 2>&1
-    CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
+# ── LOCAL BOOT-REPLAY MODE ───────────────────────────────────────────────────
+# startup.sh replays power-outage sessions from non-volatile flash on boot by
+# execing THIS script directly (not over HTTP) so it can reuse the exact same
+# grant/extend logic below with zero duplication. A direct CLI/exec invocation
+# has an EMPTY $REMOTE_ADDR (boa always sets it for a real network request), so
+# LOCAL_REPLAY can only ever be true for something already running as root on
+# the box — a network attacker can neither set COIN_BOOT_REPLAY nor blank out
+# REMOTE_ADDR. In this mode the params come from the environment and the
+# network guards below are skipped, but the PSK signature is STILL verified
+# (defense in depth) exactly as in the normal recover path.
+LOCAL_REPLAY=0
+if [ "$COIN_BOOT_REPLAY" = "1" ] && [ -z "$REMOTE_ADDR" ]; then
+    LOCAL_REPLAY=1
 fi
-[ -n "$CALLER_MAC" ] && [ "$CALLER_MAC" = "$EXPECTED_MAC" ] || _err "MAC mismatch"
 
-[ "$REQUEST_METHOD" = "POST" ] || _err "POST required"
+if [ "$LOCAL_REPLAY" != "1" ]; then
+    # --- Guard 1: Only requests from NODEMCU_IP are processed ---
+    [ "$REMOTE_ADDR" = "$NODEMCU_IP" ] || _err "Forbidden"
 
-BODY=""
-[ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null && \
-    BODY=$(head -c "$CONTENT_LENGTH")
-[ -n "$BODY" ] || _err "Empty body"
+    # --- Guard 2: Verify NodeMCU MAC via ARP (fail closed) ---
+    EXPECTED_MAC=$(printf '%s' "$NODEMCU_MAC" | tr -d ':' | tr 'A-F' 'a-f' | \
+        sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6/')
+    CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
+    if [ -z "$CALLER_MAC" ]; then
+        # Cache miss (e.g. stale/expired ARP entry) — force a resolution
+        # attempt before deciding anything. Silently falling through to
+        # Guard 1's source-IP-only check here would make this endpoint
+        # spoofable by anyone on the shared LAN segment; a missing ARP
+        # entry must be treated the same as a mismatched one, not skipped.
+        ping -c 1 -W 1 "$NODEMCU_IP" >/dev/null 2>&1
+        CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
+    fi
+    [ -n "$CALLER_MAC" ] && [ "$CALLER_MAC" = "$EXPECTED_MAC" ] || _err "MAC mismatch"
+
+    [ "$REQUEST_METHOD" = "POST" ] || _err "POST required"
+
+    BODY=""
+    [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null && \
+        BODY=$(head -c "$CONTENT_LENGTH")
+    [ -n "$BODY" ] || _err "Empty body"
+fi
 
 _post() {
     printf '%s' "$BODY" | tr '&' '\n' | grep "^${1}=" | sed 's/^[^=]*=//' | head -1
 }
 
-SID=$(_post "sid")
-AMOUNT=$(_post "amount")
-SIG=$(_post "sig")
-RECOVER=$(_post "recover")   # "1" when NodeMCU is replaying a power-outage session on boot
-RECOVER_MAC=$(_post "mac")   # paying client's MAC, only trusted in recovery mode
+if [ "$LOCAL_REPLAY" = "1" ]; then
+    # Params supplied by startup.sh via the environment; always a recovery grant.
+    SID="$SID"
+    AMOUNT="$AMOUNT"
+    SIG="$SIG"
+    RECOVER=1
+    RECOVER_MAC="$RECOVER_MAC"
+else
+    SID=$(_post "sid")
+    AMOUNT=$(_post "amount")
+    SIG=$(_post "sig")
+    RECOVER=$(_post "recover")   # "1" when NodeMCU is replaying a power-outage session on boot
+    RECOVER_MAC=$(_post "mac")   # paying client's MAC, only trusted in recovery mode
+fi
 
 [ -n "$SID" ] && [ -n "$AMOUNT" ] && [ -n "$SIG" ] || _err "Missing params"
 printf '%s' "$SID"    | grep -qE '^[0-9a-f]{16}$' || _err "Invalid sid"
@@ -115,12 +147,13 @@ if [ "$RECOVER" = "1" ]; then
     # retried on a later boot before clearing its flash), don't double-grant.
     if [ -f "$RESULT_PATH" ]; then
         PREV_MIN=$(awk '{print $2}' "$RESULT_PATH")
+        _clear_pending "$SID"   # already credited → mirror no longer needed
         _ok "{\"ok\":true,\"minutes\":${PREV_MIN},\"duplicate\":true,\"recovered\":true}"
     fi
 
     CLIENT_MAC="$RECOVER_MAC"
     # A recovery with no coins is meaningless — nothing to restore.
-    [ "${AMOUNT:-0}" -gt 0 ] || _ok '{"ok":true,"amount":0,"minutes":0,"recovered":true}'
+    [ "${AMOUNT:-0}" -gt 0 ] || { _clear_pending "$SID"; _ok '{"ok":true,"amount":0,"minutes":0,"recovered":true}'; }
 else
     # ── NORMAL END-OF-SESSION PATH ──────────────────────────────────────
     # --- Guard 3: Verify PSK-based signature ---
@@ -131,6 +164,7 @@ else
 
     if [ -f "$RESULT_PATH" ]; then
         PREV_MIN=$(awk '{print $2}' "$RESULT_PATH")
+        _clear_pending "$SID"
         _ok "{\"ok\":true,\"minutes\":${PREV_MIN},\"duplicate\":true}"
     fi
 
@@ -161,6 +195,7 @@ if [ "${AMOUNT:-0}" -eq 0 ]; then
 
     printf '0 0\n' > "$RESULT_PATH"
     rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
+    _clear_pending "$SID"
     _ok '{"ok":true,"amount":0,"minutes":0}'
 fi
 
@@ -292,6 +327,7 @@ fi
 
 printf '%s %s\n' "$AMOUNT" "$MINUTES" > "$RESULT_PATH"
 rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
+_clear_pending "$SID"   # coins credited → drop the non-volatile crash mirror
 
 if [ "$RECOVER" = "1" ]; then
     _ok "{\"ok\":true,\"amount\":${AMOUNT},\"minutes\":${MINUTES},\"recovered\":true}"
