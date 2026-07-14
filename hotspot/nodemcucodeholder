@@ -422,10 +422,6 @@ bool saveConfig() {
 void wipeConfig() {
     LittleFS.remove(CONFIG_PATH);
 }
-
-
-RAM only; power-outage recovery now lives on the router
-// ══════════════════════════════════════════════════════════════════════
 // Coins are kept only in RAM (coinPesos). We no longer mirror the session to
 // LittleFS — that per-coin flash write was the root cause of the ESP8266 flash
 // wear and heap fragmentation (which silently broke md5/sig and produced the
