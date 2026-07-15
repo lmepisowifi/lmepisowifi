@@ -1136,6 +1136,13 @@ try {
 var _portalBgBuffer = null;
 var _insertBgBuffer = null;
 var _coinSoundBuffer = null;
+// Set when _playCoinBgMusic() is called before _insertBgBuffer has finished
+// loading/decoding (e.g. user taps "Insert Coin" right after page load,
+// before the mp3 fetched from portal_config.sh has arrived). Without this,
+// the play request was silently dropped with nothing to retry it once the
+// buffer became available - unlike portal bg music, which already retries
+// via _tryPlayBg() from _loadAudio().
+var _insertBgPending = false;
 
 // Active Playback Sources
 var _portalBgSource = null;
@@ -1174,6 +1181,11 @@ function _loadAudio(url, type) {
         _tryPlayBg();
       } else if (type === 'insert') {
         _insertBgBuffer = buffer;
+        if (_insertBgPending) {
+          _insertBgPending = false;
+          var overlay = document.getElementById('coin-modal-overlay');
+          if (overlay && overlay.classList.contains('open')) _playCoinBgMusic();
+        }
       } else if (type === 'coin') {
         _coinSoundBuffer = buffer;
       }
@@ -1263,7 +1275,9 @@ function playCoinSound() {
 }
 
 function _playCoinBgMusic() {
-  if (!_audioCtx || !_insertBgBuffer) return;
+  if (!_audioCtx) return;
+  if (!_insertBgBuffer) { _insertBgPending = true; return; } // retried by _loadAudio() once decoded
+  _insertBgPending = false;
   try {
     _stopPortalBgMusic(); // Silence portal music
 
@@ -1290,7 +1304,8 @@ function _playCoinBgMusic() {
 }
 
 function _pauseCoinBgMusic() {
-  if (!_audioCtx || !_insertBgBuffer) return;
+  if (!_audioCtx) return;
+  _insertBgPending = false; // modal is closing, don't auto-start insert music once its buffer arrives
   try {
     // Kill the insert coin music
     if (_insertBgSource) {

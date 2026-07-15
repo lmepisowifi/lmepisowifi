@@ -428,6 +428,12 @@ setup_firewall() {
         || iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -j DROP 2>/dev/null
     iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null \
         || iptables -t filter -I INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -j ACCEPT 2>/dev/null
+    # ------------------------------------------------------------
+    # OPTIMIZATION: TCP MSS Clamping to prevent MTU blackholes/packet loss
+    # ------------------------------------------------------------
+    iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+    iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+
     echo 1 > /proc/sys/net/ipv4/ip_forward
     # Apply anti-tethering if enabled
     case "${ANTI_TETHER:-0}" in 1|yes|true) setup_anti_tether ;; esac
@@ -545,16 +551,20 @@ add_user_qos() {
     # Create 2 priority bands (Band 1 = Gaming/VIP, Band 2 = Bulk). Priomap defaults everything to Band 2.
     tc qdisc add dev $WAN_INT parent 1:$cid handle ${cid}: prio bands 2 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2>/dev/null
     
-    # Attach SFQ to both bands with a larger limit (128) to stop packet loss during bursts
-    tc qdisc add dev $WAN_INT parent ${cid}:1 handle $((cid+1000)): sfq perturb 10 limit 128 2>/dev/null
-    tc qdisc add dev $WAN_INT parent ${cid}:2 handle $((cid+2000)): sfq perturb 10 limit 128 2>/dev/null
+    # OPTIMIZATION: Lowered limits enforce early tail-drop (pseudo-AQM) since fq_codel is missing.
+    # Band 1 (Gaming/VIP) gets limit 32 so queued latency never exceeds ~15-20ms.
+    # Band 2 (Bulk) gets limit 64 to prevent TCP starvation while keeping bloat reasonable.
+    tc qdisc add dev $WAN_INT parent ${cid}:1 handle $((cid+1000)): sfq perturb 10 limit 32 2>/dev/null
+    tc qdisc add dev $WAN_INT parent ${cid}:2 handle $((cid+2000)): sfq perturb 10 limit 64 2>/dev/null
     
     tc filter add dev $WAN_INT parent 1:0 prio $cid handle $cid fw flowid 1:$cid 2>/dev/null
     
-    # Band 1 Filters: Route Games (UDP < 512B), Ping (ICMP), and small TCP ACKs (< 128B) into the VIP Lane
+    # Band 1 Filters: Route Games (UDP < 512B), Ping (ICMP), DNS, and small TCP ACKs (< 128B) into the VIP Lane
     tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 1 u32 match ip protocol 17 0xff match u16 0x0000 0xfe00 at 2 flowid ${cid}:1 2>/dev/null
     tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 2 u32 match ip protocol 1 0xff flowid ${cid}:1 2>/dev/null
     tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 3 u32 match ip protocol 6 0xff match u16 0x0000 0xff80 at 2 flowid ${cid}:1 2>/dev/null
+    # OPTIMIZATION: Catch outbound DNS (UDP 53) for fast domain resolution
+    tc filter add dev $WAN_INT parent ${cid}:0 protocol ip prio 4 u32 match ip protocol 17 0xff match ip dport 53 0xffff flowid ${cid}:1 2>/dev/null
 
     # ============================================================
     # DOWNLOAD (LAN Bridge) Leaf QoS - Gaming Prioritization
@@ -563,8 +573,9 @@ add_user_qos() {
     
     tc qdisc add dev $HOTSPOT_BR parent 2:$cid handle $((cid+500)): prio bands 2 priomap 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2>/dev/null
     
-    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):1 handle $((cid+3000)): sfq perturb 10 limit 128 2>/dev/null
-    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):2 handle $((cid+4000)): sfq perturb 10 limit 128 2>/dev/null
+    # OPTIMIZATION: Same strict limits for download (Bridge)
+    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):1 handle $((cid+3000)): sfq perturb 10 limit 32 2>/dev/null
+    tc qdisc add dev $HOTSPOT_BR parent $((cid+500)):2 handle $((cid+4000)): sfq perturb 10 limit 64 2>/dev/null
 
     tc filter add dev $HOTSPOT_BR protocol ip parent 2:0 prio $cid u32 match ip dst $ip/32 flowid 2:$cid 2>/dev/null
     
@@ -572,6 +583,8 @@ add_user_qos() {
     tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 1 u32 match ip protocol 17 0xff match u16 0x0000 0xfe00 at 2 flowid $((cid+500)):1 2>/dev/null
     tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 2 u32 match ip protocol 1 0xff flowid $((cid+500)):1 2>/dev/null
     tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 3 u32 match ip protocol 6 0xff match u16 0x0000 0xff80 at 2 flowid $((cid+500)):1 2>/dev/null
+    # OPTIMIZATION: Catch inbound DNS replies (UDP 53)
+    tc filter add dev $HOTSPOT_BR parent $((cid+500)):0 protocol ip prio 4 u32 match ip protocol 17 0xff match ip sport 53 0xffff flowid $((cid+500)):1 2>/dev/null
 }
 
 
@@ -673,7 +686,8 @@ setup_qos() {
     # ------------------------------------------------------------
     # Root HTB with r2q 1 prevents incorrect automatic quantum calculations at low speeds
     tc qdisc add dev $WAN_INT root handle 1: htb default 99 r2q 1
-    tc class add dev $WAN_INT parent 1:  classid 1:1  htb rate $GLOBAL_RATE  burst 32k
+    # OPTIMIZATION: Lowered root burst from 32k to 15k to prevent dumping too many packets into the modem's hardware queues (reduces ping spikes)
+    tc class add dev $WAN_INT parent 1:  classid 1:1  htb rate $GLOBAL_RATE  burst 15k
     
     # Default unauth class with precise quantum
     tc class add dev $WAN_INT parent 1:1 classid 1:99 htb rate $UNAUTH_RATE  ceil $GLOBAL_RATE burst 4k quantum 1500
@@ -686,7 +700,8 @@ setup_qos() {
     # DOWNLOAD (LAN Bridge) CONFIGURATION
     # ------------------------------------------------------------
     tc qdisc add dev $HOTSPOT_BR root handle 2: htb default 99 r2q 1
-    tc class add dev $HOTSPOT_BR parent 2:  classid 2:1  htb rate $GLOBAL_RATE  burst 32k
+    # OPTIMIZATION: Lowered root burst from 32k to 15k to prevent Wi-Fi MAC layer bufferbloat
+    tc class add dev $HOTSPOT_BR parent 2:  classid 2:1  htb rate $GLOBAL_RATE  burst 15k
     
     # Default unauth class with precise quantum
     tc class add dev $HOTSPOT_BR parent 2:1 classid 2:99 htb rate $UNAUTH_RATE  ceil $GLOBAL_RATE burst 4k quantum 1500

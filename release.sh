@@ -46,7 +46,7 @@ case "$CONFIRM" in
     *) echo "Aborted."; exit 0 ;;
 esac
 echo ""
-
+find ./ -type f \( -name "*.cgi" -o -name "*.sh" \) -exec chmod +x {} +
 # ── Stage and commit ─────────────────────────────────────────────────────────
 echo "► Staging all changes..."
 git add .
