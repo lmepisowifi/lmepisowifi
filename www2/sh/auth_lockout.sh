@@ -69,7 +69,14 @@ lockout_status() {
         echo "locked $((LOCK_UNTIL - _now))"
         return 0
     fi
-    if [ "$LOCK_UNTIL" -gt 0 ] || [ "$FAIL_COUNT" -gt 0 ]; then
+    # Only clear state here when an actual lockout (LOCK_UNTIL set) has
+    # expired. Do NOT reset just because FAIL_COUNT > 0 — this function is
+    # called as the pre-check gate on every auth.cgi request (including the
+    # one currently failing) and by check_lockout.cgi, so resetting on a
+    # bare FAIL_COUNT wiped the counter back to 0 before every increment,
+    # making "remaining" stick at MAX_ATTEMPTS-1 forever and the lockout
+    # unreachable.
+    if [ "$LOCK_UNTIL" -gt 0 ]; then
         lockout_write 0 0
         FAIL_COUNT=0
     fi

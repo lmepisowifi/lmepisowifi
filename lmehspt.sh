@@ -33,9 +33,9 @@ HOTSPOT_ENABLED="1"
 ANTI_TETHER="1"
 COIN_ENABLED="1"
 NODEMCU_IP="10.0.0.2"
-NODEMCU_MAC="e868e7c81814"
+NODEMCU_MAC="ecfabcc8d65a"
 NODEMCU_PORT="8080"
-COIN_PSK="lmepisowifi"
+COIN_PSK="2Au6410y1O15YV9610wHmr52"
 COIN_TIMEOUT="30"
 COIN_RATES="1:15 5:90 10:210 15:360 20:720 25:1080 30:2160 35:2880 40:3600 45:4320 50:5040 55:5760"
 COIN_STRIKE_THRESHOLD="3"
@@ -768,8 +768,8 @@ check_inactivity() {
     [ "$INACTIVITY_TIMEOUT" -le 0 ] 2>/dev/null && return
     [ -f "$SESSION_FILE" ] || return
 
-    local NOW mac expiry total pkts record last_pkts last_active inactive_for
-    local TO_PAUSE entry FWD_DUMP client_ip is_alive
+    local NOW mac expiry total pkts ul_pkts dl_pkts record last_pkts last_active inactive_for
+    local TO_PAUSE entry FWD_DUMP client_ip is_alive cid
     NOW=$($BB awk '{print int($1)}' /proc/uptime)
     FWD_DUMP=$(iptables -t filter -L HOTSPOT_FWD -v -n 2>/dev/null)
     TO_PAUSE=""
@@ -780,8 +780,30 @@ check_inactivity() {
         [ "$expiry" -gt "$NOW" ] || continue
         is_whitelisted "$mac" && continue
 
-        pkts=$(printf '%s' "$FWD_DUMP" | $BB grep -i "MAC $mac" | $BB awk 'NR==1{print $1+0}')
-        [ -z "$pkts" ] && continue
+        # Upload-direction packets: HOTSPOT_FWD only sees traffic entering
+        # FORWARD *from* the hotspot bridge (client -> WAN), so this counts
+        # genuine uploads plus whatever ACKs a download happens to generate
+        # - but a client that's purely downloading (e.g. a one-way UDP
+        # stream, or just a download quiet enough that no ACK lands inside
+        # a given 1s tick) can sit at a constant ul_pkts count while still
+        # very much active. Add the per-client download leaf class's packet
+        # counter too (set up by add_user_qos() on $HOTSPOT_BR, classid
+        # 2:$cid - see the DOWNLOAD Leaf QoS section) so a single inbound
+        # packet moves the total just as visibly as a single outbound one.
+        ul_pkts=$(printf '%s' "$FWD_DUMP" | $BB grep -i "MAC $mac" | $BB awk 'NR==1{print $1+0}')
+        [ -z "$ul_pkts" ] && continue
+
+        client_ip=$(get_ip_for_mac "$mac")
+        dl_pkts=0
+        if [ -n "$client_ip" ]; then
+            cid=$(ip_to_cid "$client_ip")
+            if [ -n "$cid" ]; then
+                dl_pkts=$(tc -s class show dev $HOTSPOT_BR classid 2:$cid 2>/dev/null \
+                    | $BB awk '/^[[:space:]]*Sent/{print $4+0; exit}')
+            fi
+            [ -z "$dl_pkts" ] && dl_pkts=0
+        fi
+        pkts=$(( ul_pkts + dl_pkts ))
 
         record=$($BB grep "^$mac " "$ACTIVITY_FILE" 2>/dev/null)
         last_pkts=$(printf '%s' "$record" | $BB awk '{print $2}')
@@ -791,17 +813,17 @@ check_inactivity() {
             last_active=${last_active:-$NOW}
             inactive_for=$(( NOW - last_active ))
             if [ "$inactive_for" -ge "$INACTIVITY_TIMEOUT" ]; then
-                # No WAN-bound packets for a full timeout window, BUT that
-                # only proves the client isn't running any data-hungry app
-                # right now (phone screen off, doze mode, etc.) — it does
-                # NOT prove the client actually walked away / disconnected.
-                # Before pausing, do a direct LAN-side liveness probe (ARP
-                # reply / ICMP ping) to the client's own IP. This checks the
-                # device's network stack directly, which answers instantly
-                # even when no app is generating traffic, so a device that
-                # is genuinely still connected won't get falsely paused.
+                # No upload OR download packets for a full timeout window,
+                # BUT that only proves the client isn't running any
+                # data-hungry app right now (phone screen off, doze mode,
+                # etc.) — it does NOT prove the client actually walked
+                # away / disconnected. Before pausing, do a direct LAN-side
+                # liveness probe (ARP reply / ICMP ping) to the client's own
+                # IP. This checks the device's network stack directly, which
+                # answers instantly even when no app is generating traffic,
+                # so a device that is genuinely still connected won't get
+                # falsely paused.
                 is_alive=0
-                client_ip=$(get_ip_for_mac "$mac")
                 if [ -n "$client_ip" ]; then
                     if $BB ping -c 1 -W 1 "$client_ip" >/dev/null 2>&1; then
                         is_alive=1

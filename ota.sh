@@ -116,6 +116,43 @@ fetch() { # fetch <url> <outfile>
     wget $_wf -q -O "$2" "$_u"
 }
 
+# Ensure hotspot/img/favicon.ico exists, fetching the repo's default from
+# GitHub (via the same jsDelivr-cdnified raw-file path as the manifest) when
+# it's missing. favicon.ico is the default PORTAL_LOGO target (see
+# hotspot/cgi-bin/portal_config.sh) and is not part of PRESERVE's glob-rescue
+# fallback path, so a device that never had one locally — a fresh install, or
+# one whose hotspot.ota_old backup also lacked it — would otherwise be stuck
+# without a tab icon / card header logo until an admin uploads one manually.
+# Called from self_heal(), so it runs on every apply AND every 6-hour cron
+# tick; safe to call anytime since it's a strict no-op once the file exists,
+# and any download failure just leaves it missing to retry next tick.
+ensure_default_favicon() {
+    [ -e "$ROOT/hotspot/img/favicon.ico" ] && return 0
+    [ -n "$OTA_REPO" ] || return 0
+    _fi_branch="${OTA_BRANCH:-main}"
+    _fi_url="https://raw.githubusercontent.com/$OTA_REPO/$_fi_branch/hotspot/img/favicon.ico"
+    _fi_tmp="$DL/favicon.ico.tmp"
+    mkdir -p "$DL"
+    if fetch "$_fi_url" "$_fi_tmp" && [ -s "$_fi_tmp" ]; then
+        # Guard against a CDN/GitHub error page (HTML) saved with HTTP 200 —
+        # same class of check used for the manifest in do_check(). A real
+        # favicon.ico is binary and won't match this text pattern.
+        if grep -Eqi '<html|rate.limit|Too Many Requests|404: Not Found' "$_fi_tmp" 2>/dev/null; then
+            log "ensure_default_favicon: fetch returned an error page — leaving favicon.ico missing (will retry)"
+            rm -f "$_fi_tmp"
+            return 1
+        fi
+        mkdir -p "$ROOT/hotspot/img"
+        mv "$_fi_tmp" "$ROOT/hotspot/img/favicon.ico"
+        log "ensure_default_favicon: fetched default favicon.ico from GitHub ($OTA_REPO@$_fi_branch)"
+        notify "OTA: restored the default portal favicon from GitHub"
+        return 0
+    fi
+    rm -f "$_fi_tmp"
+    log "ensure_default_favicon: could not fetch default favicon.ico (will retry next cron tick)"
+    return 1
+}
+
 # parse a key=value line from the manifest (strips CR)
 mval() { sed -n "s/^$1=//p" "$DL/manifest.txt" | tr -d '\r' | head -1; }
 
@@ -474,6 +511,12 @@ self_heal() {
         done
     fi
 
+    # Last-resort tier: no local backup existed to rescue favicon.ico from
+    # (fresh install, or hotspot.ota_old itself never had one), so pull the
+    # canonical default straight from the GitHub repo instead of leaving the
+    # portal without a tab icon / PORTAL_LOGO target.
+    ensure_default_favicon
+
     # Audio rescue: recover user-uploaded audio stranded in hotspot.ota_old/audio/
     # by a pre-fix OTA run that either lacked hotspot/audio in PRESERVE or had the
     # same-extension-conflict bug. Uses slot-aware logic: a slot (e.g. coin_sound)
@@ -793,21 +836,47 @@ do_cron() {
     self_heal
 
     _json=$(do_check)
-    echo "$_json" | grep -q '"update_available":true' || { log "cron: up to date"; exit 0; }
-    _lat=$(printf '%s' "$_json" | sed -n 's/.*"latest":"\([^"]*\)".*/\1/p')
-    if [ "$OTA_AUTO" = "1" ]; then
-        log "cron: auto-updating to $_lat"
-        do_apply "$_lat"
-    else
-        # Notify only ONCE per new version so the 6-hour check doesn't spam.
-        _seen_file="$ROOT/hotspot_data/.ota_notified"
-        _seen=$(cat "$_seen_file" 2>/dev/null | tr -d ' \t\r\n')
-        if [ "$_seen" != "$_lat" ]; then
-            log "cron: update $_lat available (auto off) — notifying"
-            notify "OTA: version $_lat is available. Open Admin > System > Software Update to install."
-            printf '%s' "$_lat" > "$_seen_file" 2>/dev/null
+
+    if echo "$_json" | grep -q '"update_available":true'; then
+        _lat=$(printf '%s' "$_json" | sed -n 's/.*"latest":"\([^"]*\)".*/\1/p')
+        if [ "$OTA_AUTO" = "1" ]; then
+            log "cron: auto-updating to $_lat"
+            do_apply "$_lat"
+            # sync_nodemcu is already called inside do_apply on success; skip here.
         else
-            log "cron: update $_lat available (already notified)"
+            # Notify only ONCE per new version so the 6-hour check doesn't spam.
+            _seen_file="$ROOT/hotspot_data/.ota_notified"
+            _seen=$(cat "$_seen_file" 2>/dev/null | tr -d ' \t\r\n')
+            if [ "$_seen" != "$_lat" ]; then
+                log "cron: update $_lat available (auto off) — notifying"
+                notify "OTA: version $_lat is available. Open Admin > System > Software Update to install."
+                printf '%s' "$_lat" > "$_seen_file" 2>/dev/null
+            else
+                log "cron: update $_lat available (already notified)"
+            fi
+            # Portal update is pending manual install; skip NodeMCU push here.
+            # The hotspot/firmware/coin_nodemcu.bin on disk is still the old bundle,
+            # and the manifest's nodemcu_version refers to the not-yet-applied release.
+            # sync_nodemcu() will run after the user hits Apply.
+        fi
+    else
+        log "cron: portal up to date"
+        # Even when no portal update is available, the NodeMCU may have missed its
+        # firmware push because it was offline (or mid-coin-session) when the last
+        # do_apply() called sync_nodemcu(). Re-check every cron tick so a late-coming
+        # device catches up without waiting for the next full portal release.
+        #
+        # do_check() already fetched the manifest into $DL/manifest.txt, so mval()
+        # works here at no extra cost. If the fetch failed, mval returns empty and
+        # we skip gracefully.
+        if [ "$OTA_NODEMCU" = "1" ]; then
+            _cron_nver=$(mval nodemcu_version)
+            if [ -n "$_cron_nver" ]; then
+                log "cron: checking nodemcu firmware (manifest expects $_cron_nver)"
+                sync_nodemcu
+            else
+                log "cron: no nodemcu_version in manifest — skipping nodemcu check"
+            fi
         fi
     fi
 }
