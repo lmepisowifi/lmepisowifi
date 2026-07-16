@@ -2119,7 +2119,7 @@ function tickCoinTimer() {
         if (_coinReconnecting) return; // Server has since confirmed reconnecting — it owns the session now, don't yank the modal out from under it
         stopCoinPoll();
         _pauseCoinBgMusic();
-        _resetCoinButtons();
+        _hideCoinButtons();
         _isFinalizing = false;
         var amt = parseInt((document.getElementById('coin-amount') || {}).textContent, 10) || 0;
         if (amt > 0) {

@@ -652,15 +652,21 @@ EOF
 # ============================================================
 
 setup_anti_tether() {
-    local wan_if
+    local wan_if portal_net
     wan_if=$(resolve_wan_int)
+    # Hotspot subnet only (e.g. 10.0.0.0/24, same /24 assumption start_dhcp
+    # uses). $wan_if is also where br0's own LAN devices egress, so a bare
+    # TTL match here was choking ordinary LAN clients too — restricting the
+    # match to source IPs inside the hotspot subnet keeps br0 unaffected.
+    portal_net="$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$/.0/')/24"
 
     # 1. Add the Choke Class to the active WAN interface (1kbit is essentially 0 speed)
     tc class add dev "$wan_if" parent 1:1 classid 1:666 htb rate 1kbit ceil 1kbit burst 1k 2>/dev/null
 
-    # 2. Redirect TTL=62 and TTL=126 to the choke class at high priority (prio 1)
-    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 62 0xff at 8 flowid 1:666 2>/dev/null
-    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 126 0xff at 8 flowid 1:666 2>/dev/null
+    # 2. Redirect TTL=62 and TTL=126 to the choke class at high priority (prio 1),
+    #    but only for traffic sourced from the hotspot subnet.
+    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match ip src $portal_net match u8 62 0xff at 8 flowid 1:666 2>/dev/null
+    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match ip src $portal_net match u8 126 0xff at 8 flowid 1:666 2>/dev/null
 }
 
 teardown_anti_tether() {
