@@ -2099,14 +2099,24 @@ function tickCoinTimer() {
   if (_coinWinLeft <= 0) {
     clearInterval(_coinWinID);
     _coinWinID = null;
-    // If the server hasn't sent expired/complete within 4s, force-close the modal.
-    // This covers the gap where the NodeMCU session has ended but the last poll
-    // response still said "active". 4s gives ~3 extra poll cycles in case a coin
-    // was inserted in the very last second and resets the server timer.
+    // If the server hasn't sent expired/complete/reconnecting within this window,
+    // force-close the modal. This covers the gap where the NodeMCU session has
+    // ended but the last poll response still said "active".
+    //
+    // This delay must comfortably outlast the server's OWN worst-case time to
+    // classify a drop as "reconnecting": coin.sh waits for 4 consecutive missed
+    // polls before reporting reconnecting, and each miss can take up to the
+    // wget -T 2 timeout (2s) to resolve against a truly unreachable NodeMCU —
+    // so that classification can legitimately take ~8s in the worst case, not
+    // the ~4s a naive "poll runs once a second" estimate suggests. A 4s local
+    // timer was racing ahead of that and force-closing (and discarding the
+    // customer's already-inserted coins from the UI) while the server was
+    // still mid-detection and would have reported "reconnecting" moments later.
     if (!_coinExpireTimeout && _coinSID) {
       _coinExpireTimeout = setTimeout(function() {
         _coinExpireTimeout = null;
         if (!_coinSID) return; // Server poll already handled it
+        if (_coinReconnecting) return; // Server has since confirmed reconnecting — it owns the session now, don't yank the modal out from under it
         stopCoinPoll();
         _pauseCoinBgMusic();
         _resetCoinButtons();
@@ -2118,7 +2128,7 @@ function tickCoinTimer() {
           toastr.warning('Time expired. No coins were inserted.');
         }
         setTimeout(function() { _coinSID = null; closeCoinModalUI(); checkStatus(); }, 2000);
-      }, 4000);
+      }, 10000);
     }
   }
 }

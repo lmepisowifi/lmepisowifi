@@ -231,6 +231,8 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
     PUB="${PER_USER_BURST:-$(read_lmehspt_var PER_USER_BURST)}"
     UAR="${UNAUTH_RATE:-$(read_lmehspt_var UNAUTH_RATE)}"
     IT="${INACTIVITY_TIMEOUT:-$(read_lmehspt_var INACTIVITY_TIMEOUT)}"
+    AP="${AUTO_PAUSE_ENABLED:-$(read_lmehspt_var AUTO_PAUSE_ENABLED)}"
+    AP_BOOL="false"; [ "${AP:-1}" = "1" ] && AP_BOOL="true"
     CE="${COIN_ENABLED:-$(read_lmehspt_var COIN_ENABLED)}"
     NIP="${NODEMCU_IP:-$(read_lmehspt_var NODEMCU_IP)}"
     NMC="${NODEMCU_MAC:-$(read_lmehspt_var NODEMCU_MAC)}"
@@ -256,6 +258,7 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
 \"per_user_burst\":\"$(esc_json "$PUB")\",
 \"unauth_rate\":\"$(esc_json "$UAR")\",
 \"inactivity_timeout\":\"$(esc_json "$IT")\",
+\"auto_pause_enabled\":$AP_BOOL,
 \"coin_enabled\":\"$(esc_json "$CE")\",
 \"coin_on\":$COIN_ON,
 \"nodemcu_ip\":\"$(esc_json "$NIP")\",
@@ -310,6 +313,7 @@ if echo "$QS" | $BB grep -q "action=config_set"; then
     apply_if "PER_USER_BURST"      "$(fget per_user_burst)"
     apply_if "UNAUTH_RATE"         "$(fget unauth_rate)"
     apply_if "INACTIVITY_TIMEOUT"  "$(fget inactivity_timeout)"
+    apply_if "AUTO_PAUSE_ENABLED"  "$(fget auto_pause_enabled)"
     apply_if "NODEMCU_IP"          "$(fget nodemcu_ip)"
     apply_if "NODEMCU_MAC"         "$(fget nodemcu_mac)"
     apply_if "NODEMCU_PORT"        "$(fget nodemcu_port)"
@@ -332,6 +336,28 @@ if echo "$QS" | $BB grep -q "action=config_set"; then
         LMEHSPT_LIB_ONLY=1
         . /lmepisowifi/lmehspt.sh --lib
         start_dhcp
+
+        # Flush the kernel's ARP/neighbor cache for the old and new NodeMCU
+        # IPs. coin_result.sh's Guard 2 authenticates every coin-grant POST
+        # by looking up who currently owns NODEMCU_IP in /proc/net/arp.
+        # Swapping in a new NodeMCU (new MAC, same IP) leaves a STALE entry
+        # pointing at the OLD device's MAC — and unlike a missing entry, a
+        # stale-but-present one is never re-resolved on its own (Guard 2
+        # only re-pings on a cache miss, not a mismatch), so every grant
+        # from the new device gets silently rejected until the kernel
+        # eventually garbage-collects the entry or the box reboots. Deleting
+        # it here forces a genuine cache miss so the very next request
+        # re-resolves the correct MAC immediately instead of binding on reboot.
+        ip neigh del "$OLD_NIP" dev "$HOTSPOT_BR" 2>/dev/null
+        $BB arp -d "$OLD_NIP" 2>/dev/null
+        if [ "$NEW_NIP" != "$OLD_NIP" ]; then
+            ip neigh del "$NEW_NIP" dev "$HOTSPOT_BR" 2>/dev/null
+            $BB arp -d "$NEW_NIP" 2>/dev/null
+        fi
+        # Proactively re-resolve so the cache already reflects the new device
+        # by the time it makes its first request, rather than relying solely
+        # on Guard 2's own on-demand ping-and-retry.
+        ping -c 1 -W 1 "$NEW_NIP" >/dev/null 2>&1
     fi
     touch /tmp/hotspot_qos_reload
     ok_json "{\"ok\":true}"

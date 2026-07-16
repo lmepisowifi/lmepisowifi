@@ -22,6 +22,7 @@ BR0_GATEWAY="192.168.18.1"   # FALLBACK only. The live gateway is auto-detected 
                              # if br0 has no IPv4 address yet.
 GLOBAL_RATE="20mbit"
 INACTIVITY_TIMEOUT="300"
+AUTO_PAUSE_ENABLED="1"
 BOOT_MARKER="/tmp/hotspot_boot.mark"
 ACTIVITY_FILE="/tmp/hotspot_activity.txt"
 PER_USER_RATE="5mbit"
@@ -764,6 +765,7 @@ pause_session() {
 }
 
 check_inactivity() {
+    [ "${AUTO_PAUSE_ENABLED:-1}" = "1" ] || return
     [ -z "$INACTIVITY_TIMEOUT" ] && return
     [ "$INACTIVITY_TIMEOUT" -le 0 ] 2>/dev/null && return
     [ -f "$SESSION_FILE" ] || return
@@ -888,6 +890,7 @@ write_coin_config() {
         printf 'PER_USER_BURST="%s"\n'      "$PER_USER_BURST"
         printf 'UNAUTH_RATE="%s"\n'         "$UNAUTH_RATE"
         printf 'INACTIVITY_TIMEOUT="%s"\n'  "$INACTIVITY_TIMEOUT"
+        printf 'AUTO_PAUSE_ENABLED="%s"\n'  "${AUTO_PAUSE_ENABLED:-1}"
         printf 'PORTAL_IP="%s"\n'           "$PORTAL_IP"
         printf 'PORTAL_PORT="%s"\n'         "$PORTAL_PORT"
         printf 'ANTI_TETHER="%s"\n'         "${ANTI_TETHER:-0}"

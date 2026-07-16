@@ -108,14 +108,23 @@
                     </div>
                     <div class="field-hint">Captive-portal redirect speed for new clients</div>
                 </div>
-                <!-- Inactivity timeout -->
+                <!-- Auto-pause + inactivity timeout -->
                 <div class="col-sm-6">
-                    <label class="form-label">Inactivity Timeout</label>
-                    <div class="rate-row">
-                        <input type="number" class="form-control" id="r-inactivity" placeholder="300" min="30" max="86400">
-                        <span class="form-control" style="width:90px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:13px;cursor:default;user-select:none;">seconds</span>
+                    <div class="d-flex align-items-center justify-content-between">
+                        <label class="form-label mb-0">Auto-Pause Session</label>
+                        <div id="ap-toggle" class="wlan-toggle" onclick="toggleAutoPauseUI()" title="Auto-pause a client's session when idle">
+                            <div class="wlan-toggle-knob"></div>
+                        </div>
                     </div>
-                    <div class="field-hint">Idle time before session auto-pauses</div>
+                    <div class="field-hint">Pause a client's session after prolonged inactivity</div>
+                    <div id="ap-timeout-wrap" style="margin-top:10px;">
+                        <label class="form-label">Inactivity Timeout</label>
+                        <div class="rate-row">
+                            <input type="number" class="form-control" id="r-inactivity" placeholder="300" min="30" max="86400">
+                            <span class="form-control" style="width:90px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:13px;cursor:default;user-select:none;">seconds</span>
+                        </div>
+                        <div class="field-hint">Idle time before session auto-pauses</div>
+                    </div>
                 </div>
             </div>
             <hr class="my-3" style="border-color:var(--border-color);">
@@ -287,6 +296,7 @@ function loadConfig(){
             setRateField('r-burst-val', 'r-burst-unit',  d.per_user_burst||'64k');
             setRateField('r-unauth-val','r-unauth-unit',  d.unauth_rate||'256kbit');
             document.getElementById('r-inactivity').value = d.inactivity_timeout||'300';
+            setAutoPauseUI(d.auto_pause_enabled===true||d.auto_pause_enabled==='1'||d.auto_pause_enabled===1);
             document.getElementById('c-nodemcu-ip').value    = d.nodemcu_ip||'';
             document.getElementById('c-nodemcu-mac').value   = d.nodemcu_mac||'';
             document.getElementById('c-coin-timeout').value  = d.coin_timeout||'';
@@ -306,13 +316,15 @@ function saveRates(){
     var pub = getRateStr('r-burst-val','r-burst-unit');
     var uar = getRateStr('r-unauth-val','r-unauth-unit');
     var ina = document.getElementById('r-inactivity').value.trim();
+    var apOn = document.getElementById('ap-toggle').classList.contains('on');
     if(!gr){toastr.warning('Global Cap is required');return;}
     showOverlay('Saving…');
     var body='global_rate='+encodeURIComponent(gr)
             +'&per_user_rate='+encodeURIComponent(pur)
             +'&per_user_burst='+encodeURIComponent(pub)
             +'&unauth_rate='+encodeURIComponent(uar)
-            +'&inactivity_timeout='+encodeURIComponent(ina);
+            +'&inactivity_timeout='+encodeURIComponent(ina)
+            +'&auto_pause_enabled='+(apOn?'1':'0');
     postForm('config_set', body, function(d){
         hideOverlay();
         if(!d.ok){toastr.error('Save failed');return;}
@@ -320,6 +332,18 @@ function saveRates(){
             toastr.success(r2.ok?'Rates saved — QoS updating…':'Saved (QoS trigger failed)');
         });
     });
+}
+
+/* ── Auto-pause switch (local UI state; persisted via Save & Apply) ── */
+function setAutoPauseUI(on){
+    var tog=document.getElementById('ap-toggle');
+    var wrap=document.getElementById('ap-timeout-wrap');
+    if(on){ tog.classList.add('on'); wrap.style.display=''; }
+    else  { tog.classList.remove('on'); wrap.style.display='none'; }
+}
+function toggleAutoPauseUI(){
+    var tog=document.getElementById('ap-toggle');
+    setAutoPauseUI(!tog.classList.contains('on'));
 }
 
 /* ── Anti-tethering toggle ── */

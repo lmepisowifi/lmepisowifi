@@ -55,7 +55,7 @@ if git diff --cached --quiet; then
     echo "  No changes to commit — skipping commit step."
 else
     echo "► Committing..."
-    git commit -m "$MSG"
+    git commit -m "$MSG" -m "Co-Authored-By: Claude <noreply@anthropic.com>"
 fi
 echo ""
 
