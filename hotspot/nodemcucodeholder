@@ -44,7 +44,7 @@ const int COIN_ENABLE_ACTIVE = HIGH;
 // ota.sh compares it against the release manifest's nodemcu_version and pushes a
 // self-flash ONLY when they differ, so a portal-only update (www2/hotspot files)
 // never needlessly reflashes the coin slot.
-#define FW_VERSION          "1.1.4"
+#define FW_VERSION          "1.2.4"
 // No AP password — open so owner can connect immediately on first setup
 
 // ── CONFIG STRUCT ─────────────────────────────────────────────────────
@@ -72,7 +72,6 @@ volatile int           coinPesos        = 0;
 bool                   sessionActive    = false;
 volatile bool          finalizing       = false;  // True when waiting for pulses to settle
 String                 activeSid        = "";
-String                 activeClientMac  = "";      // MAC of the paying client (from portal /start)
 volatile unsigned long sessionStartMs   = 0;      
 unsigned long          sessionTimeoutMs = 30000UL;
 volatile bool          cancelRequested  = false;  
@@ -706,7 +705,6 @@ void endSession() {
     pendingRetries = 0;
     pendingResult  = true;
     activeSid      = "";
-    activeClientMac = "";
     lastSessionEndMs = millis();   // start the post-session grace clock for any queued reboot
     post_result();
 }
@@ -789,7 +787,6 @@ void handle_coin_start() {
     String sid = coinServer.arg("sid");
     String sig = coinServer.arg("sig");
     String to  = coinServer.arg("timeout");
-    String mac = coinServer.arg("mac");   // paying client's MAC, for power-outage recovery
 
     DBG("[START] sid=%s sig=%s\n", sid.c_str(), sig.c_str());
     dbgHeap("start_req");
@@ -827,12 +824,25 @@ sessionActive    = true;
     finalizing       = false;
     cancelRequested  = false;
     activeSid        = sid;
-    activeClientMac  = mac;       // remembered so a recovery POST can rebuild the portal session
     coinPesos        = 0;
     sessionStartMs   = millis();
     lastPulseMs      = millis(); // Init
     lastPollMs       = millis(); // the /start request itself counts as fresh contact
     countdownPaused  = false;
+
+    // Re-anchor the pulse auto-detect state machine right as the slot goes live.
+    // While idle/inhibited, a stray EMI edge on COIN_PIN can lock activeState to
+    // the wrong polarity (same interference class as the piezo-spark issue) and
+    // leave a half-finished pulse in flight. Left alone, that stale state gets
+    // compared against the customer's actual first coin and can misread or drop
+    // it with nothing visible to show why. Snapshot the current resting level as
+    // the new active-state baseline and clear any in-progress pulse so the first
+    // real coin of this session is judged fresh, not against leftover noise.
+    noInterrupts();
+    activeState     = digitalRead(COIN_PIN);
+    pulseInProgress = false;
+    lastEdgeMs      = millis();
+    interrupts();
     
     sessionTimeoutMs = (to.length() > 0)
                        ? (unsigned long)to.toInt() * 1000UL

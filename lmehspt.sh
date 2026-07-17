@@ -646,40 +646,98 @@ EOF
 }
 
 # ============================================================
-# ANTI-TETHERING (CHOKE CLASS WORKAROUND)
-# Used on limited Realtek kernels where firewall and action modules are stripped.
-# Routes packets with TTL=62 (mobile) or TTL=126 (Windows) to a 1kbps choke class.
+# ANTI-TETHERING
+# Marks tethered packets (TTL=62 Android/Linux, TTL=126 Windows) via iptables
+# mangle FORWARD *before* MASQUERADE rewrites the source IP, scoped to the
+# hotspot bridge (-i $HOTSPOT_BR) so br0 LAN devices are never affected.
+# The netfilter mark (0x666) survives NAT and is read by a fw classifier on
+# WAN egress — the same mark+fw mechanism already used by per-user QoS.
+# Falls back to bare tc u32 TTL match at WAN egress if xt_ttl is unavailable;
+# in that mode the choke still works but cannot distinguish br0 LAN devices
+# that happen to arrive with TTL=62/126 (secondary-router scenario).
 # ============================================================
-
+#supported iptables modules:
+# string state physdev mac limit conntrack conntrack
+# conntrack connlabel comment set connmark2 connmark mark2 mark icmp weburl tcpmss
+# iprange tos dscp dns set set set set set udplite udp tcp
 setup_anti_tether() {
-    local wan_if portal_net
+    local wan_if
     wan_if=$(resolve_wan_int)
-    # Hotspot subnet only (e.g. 10.0.0.0/24, same /24 assumption start_dhcp
-    # uses). $wan_if is also where br0's own LAN devices egress, so a bare
-    # TTL match here was choking ordinary LAN clients too — restricting the
-    # match to source IPs inside the hotspot subnet keeps br0 unaffected.
-    portal_net="$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$/.0/')/24"
 
-    # 1. Add the Choke Class to the active WAN interface (1kbit is essentially 0 speed)
+    # 1. Add the Choke Class to the active WAN interface (1kbit ≈ 0 speed)
     tc class add dev "$wan_if" parent 1:1 classid 1:666 htb rate 1kbit ceil 1kbit burst 1k 2>/dev/null
 
-    # 2. Redirect TTL=62 and TTL=126 to the choke class at high priority (prio 1),
-    #    but only for traffic sourced from the hotspot subnet.
-    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match ip src $portal_net match u8 62 0xff at 8 flowid 1:666 2>/dev/null
-    tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match ip src $portal_net match u8 126 0xff at 8 flowid 1:666 2>/dev/null
+    # 2. Preferred path: mark tethered packets at FORWARD stage using xt_ttl
+    # Note: Linux routes the packet (decrementing TTL by 1) BEFORE traversing the FORWARD chain.
+    # Therefore, a normal device (TTL 64 or 128) will have a TTL of 63 or 127 in FORWARD.
+    # A tethered device (TTL 63 or 127) will have a TTL of 62 or 126 in FORWARD.
+    # We must match 62, 61, 126, and 125 here to avoid falsely blocking normal users.
+    if iptables -t mangle -A FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 62  -j MARK --set-mark 0x666 2>/dev/null \
+    && iptables -t mangle -A FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 61  -j MARK --set-mark 0x666 2>/dev/null \
+    && iptables -t mangle -A FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 126 -j MARK --set-mark 0x666 2>/dev/null \
+    && iptables -t mangle -A FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 125 -j MARK --set-mark 0x666 2>/dev/null; then
+        tc filter add dev "$wan_if" parent 1:0 prio 1 handle 0x666 fw flowid 1:666 2>/dev/null
+        return
+    fi
+
+    # Clean up partial state if xt_ttl failed
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 62  -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 61  -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 126 -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 125 -j MARK --set-mark 0x666 2>/dev/null
+
+    # Fallback A: Try Ingress filtering directly on the Hotspot Bridge.
+    # This is 100% safe as it physically acts on br1 and cannot touch br0.
+    # Note: Ingress runs before routing. The TTL has NOT been decremented yet.
+    # Checking for 63, 62, 127, 126 here is STILL CORRECT.
+    if tc qdisc add dev "$HOTSPOT_BR" handle ffff: ingress 2>/dev/null; then
+        # Add each TTL rule independently; u32 entries under the same prio coexist
+        _at_ok=0
+        tc filter add dev "$HOTSPOT_BR" parent ffff: protocol ip prio 1 u32 match u8 63  0xff at 8 police rate 1kbit burst 1k drop 2>/dev/null && _at_ok=1
+        tc filter add dev "$HOTSPOT_BR" parent ffff: protocol ip prio 1 u32 match u8 62  0xff at 8 police rate 1kbit burst 1k drop 2>/dev/null && _at_ok=1
+        tc filter add dev "$HOTSPOT_BR" parent ffff: protocol ip prio 1 u32 match u8 127 0xff at 8 police rate 1kbit burst 1k drop 2>/dev/null && _at_ok=1
+        tc filter add dev "$HOTSPOT_BR" parent ffff: protocol ip prio 1 u32 match u8 126 0xff at 8 police rate 1kbit burst 1k drop 2>/dev/null && _at_ok=1
+        [ "$_at_ok" = "1" ] && return
+        tc qdisc del dev "$HOTSPOT_BR" ingress 2>/dev/null
+    fi
+
+    # Fallback B: Try iptables TOS injection (older, highly compatible target)
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -j TOS --set-tos 0x10 2>/dev/null
+    if iptables -t mangle -A FORWARD -i "$HOTSPOT_BR" -j TOS --set-tos 0x10 2>/dev/null; then
+        # This matches packets on the WAN egress, so routing has already decremented the TTL.
+        # Like the Preferred path, we must match 62, 61, 126, 125 here.
+        tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 62  0xff at 8 match u8 0x10 0xff at 1 flowid 1:666 2>/dev/null
+        tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 61  0xff at 8 match u8 0x10 0xff at 1 flowid 1:666 2>/dev/null
+        tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 126 0xff at 8 match u8 0x10 0xff at 1 flowid 1:666 2>/dev/null
+        tc filter add dev "$wan_if" parent 1:0 protocol ip prio 1 u32 match u8 125 0xff at 8 match u8 0x10 0xff at 1 flowid 1:666 2>/dev/null
+        return
+    fi
 }
 
 teardown_anti_tether() {
     local wan_if
     wan_if=$(resolve_wan_int)
 
-    # Delete priority 1 filters (clears the TTL matching rules)
-    tc filter del dev "$wan_if" parent 1:0 protocol ip prio 1 2>/dev/null
+    # Remove direct ingress filters (this also removes all tc filters under ffff:)
+    tc qdisc del dev "$HOTSPOT_BR" ingress 2>/dev/null
 
-    # Delete the choke class
-    tc class del dev "$wan_if" classid 1:666 2>/dev/null
+    # Remove iptables mangle marks (single-hop and double-hop, all TTL variants)
+    # We remove both the old buggy values (63, 127) and the new fixed values (62, 126) 
+    # to cleanly handle state left behind from the prior buggy version.
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 63  -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 62  -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 61  -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 127 -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 126 -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -m ttl --ttl-eq 125 -j MARK --set-mark 0x666 2>/dev/null
+    iptables -t mangle -D FORWARD -i "$HOTSPOT_BR" -j TOS --set-tos 0x10 2>/dev/null
+
+    # Remove prio 1 tc filters (fw classifier + u32 Fallback B rules)
+    tc filter del dev "$wan_if" parent 1:0 prio 1 2>/dev/null
+
+    # Remove the choke class
+    tc class  del dev "$wan_if" classid 1:666 2>/dev/null
 }
-
 setup_qos() {
     # Normalise rate strings (handles bare m/k/g and mbps/kbps suffixes)
     GLOBAL_RATE=$(_norm_rate "$GLOBAL_RATE")
@@ -1061,7 +1119,7 @@ apply_portal_ip_change() {
     # 9. Regenerate redirect.sh with the new portal URL (single source of truth)
     write_redirect_cgi
 
-    # 10. Refresh coin_config.env so coin.sh and detect.sh pick up new IP
+    # 10. Refresh coin_config.env so coin.sh picks up new IP
     write_coin_config
 }
 
@@ -1141,14 +1199,14 @@ fi
     # probe requests hit the captive portal page (which causes the OS popup);
     # authenticated MACs have an iptables nat RETURN rule that bypasses DNAT
     # entirely, so their probes go directly to the real internet and get the
-    # correct 204/Success response there.  detect.sh remains in cgi-bin/ and
-    # is callable directly at /cgi-bin/detect.sh if ever needed.
+    # correct 204/Success response there. detect.sh (an earlier, MAC/session-aware
+    # take on this same redirect) was removed — 404to302 + redirect.sh below
+    # is the actual, simpler path every unauthenticated probe hits in production.
 
     # Create the 302 redirect CGI script (single source of truth). This is the
     # magic that reliably triggers the "Sign in to network" prompt for any
     # arbitrary OS probe path by returning a standard HTTP 302 Found status code.
     write_redirect_cgi
-    $BB chmod +x cgi-bin/detect.sh 2>/dev/null
 
     # Create httpd.conf.
     #

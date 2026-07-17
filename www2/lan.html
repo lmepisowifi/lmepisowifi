@@ -607,6 +607,11 @@
                     body: 'mode=' + (nowEnabled ? '1' : '0')
                 }).then(r => {
                     if (!r.ok) return r.text().then(t => { throw new Error(t); });
+                    return fetch('/cgi-bin/lme.cgi?action=dhcp_status').then(r2 => r2.json());
+                }).then(data => {
+                    if (data && data.pending) {
+                        fetch('/cgi-bin/lme.cgi?action=dhcp_confirm').catch(() => {});
+                    }
                 });
             })
             .then(() => {

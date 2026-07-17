@@ -472,6 +472,15 @@ if [ "$REQUEST_METHOD" = "GET" ]; then
         exit 0
     fi
 
+    # --- action=dhcp_confirm: client acknowledged, cancel the DHCP enable/disable revert ---
+    if echo "$QUERY_STRING" | busybox grep -q "action=dhcp_confirm"; then
+        rm -f "$DHCP_REVERT_PENDING" "$DHCP_REVERT_MODE" "$DHCP_REVERT_START"
+        printf "Status: 200 OK\r\n"
+        printf "Content-Type: text/plain\r\n\r\n"
+        printf "confirmed"
+        exit 0
+    fi
+
     # --- action=gpon_status: return GPON SN, LOID, LOID password, PLOAM password ---
     if echo "$QUERY_STRING" | busybox grep -q "action=gpon_status"; then
         G_SN=$(mib get GPON_SN 2>/dev/null \

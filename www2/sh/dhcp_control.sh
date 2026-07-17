@@ -118,7 +118,7 @@ stop_dhcpd() {
 
 start_dhcpd() {
     [ -f "$DHCPD_CONF" ] || setup_dhcpd || return 1
-    "$DHCPD_BIN" -S "$DHCPD_CONF" &
+    "$DHCPD_BIN" -S "$DHCPD_CONF" >/dev/null 2>&1 &
     i=0
     while [ $i -lt 6 ]; do
         sleep 1
