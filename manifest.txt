@@ -1,6 +1,6 @@
-version=1.2.4
-url=https://github.com/lmepisowifi/lmepisowifi/releases/download/v1.2.4/lmepisowifi-1.2.4.tar.gz
-sha256=8bc28a19b884d6209e1af2b606ab0d47309d7f5501999cdaeca0acb99fb88a7b
-notes=Release 1.2.4
+version=1.2.5
+url=https://github.com/lmepisowifi/lmepisowifi/releases/download/v1.2.5/lmepisowifi-1.2.5.tar.gz
+sha256=4275f7ddab42472ee6abd70e1e07981a9fb0a87b30cc9039d979066810644545
+notes=Release 1.2.5
 nodemcu_version=1.2.4
 nodemcu_md5=fc6bbeb73b0fac2cda89aa2412f021ca
