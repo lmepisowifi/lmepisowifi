@@ -32,6 +32,16 @@ IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
 
 HOTSPOT_ENABLED="1"
 ANTI_TETHER="1"
+LAN_ISOLATE="1"
+# Any address in these ranges is private (RFC1918) and, by definition, can
+# only ever be a LAN device — ours, or someone else's upstream gateway in a
+# chained/double-NAT setup (e.g. a repurposed-WAN uplink whose own gateway
+# is itself behind another private hop). Blocking hotspot clients from all
+# three ranges (rather than just the one subnet directly attached to br0 or
+# to the repurposed WAN) closes off every hop in a private chain at once,
+# no matter how many layers deep, while leaving real public-internet
+# destinations untouched.
+LAN_ISOLATE_PRIVATE_NETS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
 COIN_ENABLED="1"
 NODEMCU_IP="10.0.0.2"
 NODEMCU_MAC="ecfabcc8d65a"
@@ -282,6 +292,13 @@ cleanup_old_hotspot() {
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -j DROP 2>/dev/null
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -j ACCEPT 2>/dev/null
+    _lan_isolate=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+    [ -n "$_lan_isolate" ] && iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_lan_isolate" -j DROP 2>/dev/null
+    rm -f /tmp/hotspot_lan_isolate.mark
+    for _priv_net in $LAN_ISOLATE_PRIVATE_NETS; do
+        iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_priv_net" -j DROP 2>/dev/null
+    done
+    iptables -t filter -D INPUT -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT 2>/dev/null
     # Return hotspot-enslaved interfaces to br0 (the LAN bridge) BEFORE tearing
     # down the hotspot bridge. Without this, disabling the hotspot leaves the
     # wlan/eth ports orphaned in the (now removed) bridge and offline. We walk
@@ -420,6 +437,48 @@ setup_firewall() {
     iptables -t filter -D FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD 2>/dev/null
     iptables -t filter -I FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD
     iptables -t filter -I FORWARD -d $NODEMCU_IP -j DROP 2>/dev/null
+    # ── LAN isolation ──────────────────────────────────────────────────────────
+    case "${LAN_ISOLATE:-1}" in
+    1|yes|true)
+        # Block hotspot clients (including authenticated sessions) from reaching
+        # any LAN device on br0. Inserted at position 1 in FORWARD so it fires
+        # before the HOTSPOT_FWD jump, overriding the per-MAC session ACCEPT rules.
+        # www2 ($PORTAL_IP:$WWW2_PORT) is served locally and reached via INPUT —
+        # not FORWARD — so no exception is needed here.
+        _old_lan=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+        [ -n "$_old_lan" ] && iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_old_lan" -j DROP 2>/dev/null
+        _lan_gw=$(resolve_br0_gateway)
+        _lan_subnet=$(printf '%s' "$_lan_gw" | $BB sed 's/\.[^.]*$/.0\/24/')
+        iptables -t filter -I FORWARD 1 -i $HOTSPOT_BR -d "$_lan_subnet" -j DROP
+        printf '%s\n' "$_lan_subnet" > /tmp/hotspot_lan_isolate.mark
+        # Blanket-block every RFC1918 private range too, not just br0's own
+        # subnet. A repurposed-WAN uplink's own gateway (e.g. 192.168.69.1)
+        # may itself be double/triple-NATed behind further private hops
+        # (e.g. 192.168.7.1) that we can't enumerate in advance — since those
+        # are still private addresses, this catches them at any depth without
+        # needing to know the chain. Public internet destinations, which is
+        # everything hotspot clients actually need, are never in these ranges.
+        for _priv_net in $LAN_ISOLATE_PRIVATE_NETS; do
+            iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_priv_net" -j DROP 2>/dev/null
+            iptables -t filter -I FORWARD 1 -i $HOTSPOT_BR -d "$_priv_net" -j DROP
+        done
+        # Guarantee www2 is reachable from the hotspot bridge even if another rule
+        # in INPUT would otherwise block it.
+        iptables -t filter -D INPUT -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT 2>/dev/null
+        iptables -t filter -I INPUT 1 -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT
+        ;;
+    *)
+        # Isolation disabled — clean up any rule left from a prior enabled state.
+        _old_lan=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+        [ -n "$_old_lan" ] && iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_old_lan" -j DROP 2>/dev/null
+        rm -f /tmp/hotspot_lan_isolate.mark
+        for _priv_net in $LAN_ISOLATE_PRIVATE_NETS; do
+            iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_priv_net" -j DROP 2>/dev/null
+        done
+        iptables -t filter -D INPUT -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT 2>/dev/null
+        ;;
+    esac
+    # ──────────────────────────────────────────────────────────────────────────
     # Tag with a comment so the port-80 watchdog can tell these apart from
     # vendor-added rules later. Not every embedded iptables build has the
     # comment match module compiled in, so fall back to untagged rules
@@ -958,6 +1017,7 @@ write_coin_config() {
         printf 'PORTAL_IP="%s"\n'           "$PORTAL_IP"
         printf 'PORTAL_PORT="%s"\n'         "$PORTAL_PORT"
         printf 'ANTI_TETHER="%s"\n'         "${ANTI_TETHER:-0}"
+        printf 'LAN_ISOLATE="%s"\n'         "${LAN_ISOLATE:-1}"
     } > /tmp/coin_config.env
     if [ "$COIN_ENABLED" = "1" ]; then
         touch /tmp/coin_enabled
@@ -1335,6 +1395,32 @@ fi
             _at_last="$_at_want"
             teardown_anti_tether 2>/dev/null
             case "$_at_want" in 1|yes|true) setup_anti_tether ;; esac
+        fi
+
+        # LAN isolation hot-toggle: if LAN_ISOLATE changed since last tick, apply.
+        _li_want="${LAN_ISOLATE:-1}"
+        if [ "${_li_last:-unset}" != "$_li_want" ]; then
+            _li_last="$_li_want"
+            # Tear down first (clean slate regardless of new state)
+            _old_lan=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+            [ -n "$_old_lan" ] && iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_old_lan" -j DROP 2>/dev/null
+            rm -f /tmp/hotspot_lan_isolate.mark
+            for _priv_net in $LAN_ISOLATE_PRIVATE_NETS; do
+                iptables -t filter -D FORWARD -i $HOTSPOT_BR -d "$_priv_net" -j DROP 2>/dev/null
+            done
+            iptables -t filter -D INPUT -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT 2>/dev/null
+            case "$_li_want" in
+            1|yes|true)
+                _lan_gw=$(resolve_br0_gateway)
+                _lan_subnet=$(printf '%s' "$_lan_gw" | $BB sed 's/\.[^.]*$/.0\/24/')
+                iptables -t filter -I FORWARD 1 -i $HOTSPOT_BR -d "$_lan_subnet" -j DROP
+                printf '%s\n' "$_lan_subnet" > /tmp/hotspot_lan_isolate.mark
+                for _priv_net in $LAN_ISOLATE_PRIVATE_NETS; do
+                    iptables -t filter -I FORWARD 1 -i $HOTSPOT_BR -d "$_priv_net" -j DROP
+                done
+                iptables -t filter -I INPUT 1 -i $HOTSPOT_BR -p tcp --dport $WWW2_PORT -j ACCEPT
+                ;;
+            esac
         fi
 
         # Re-evaluate upstream interface (repurpose may have been toggled)

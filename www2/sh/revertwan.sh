@@ -41,6 +41,20 @@ busybox pkill -f "udhcpc.*${TARGET_IFACE}" 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$TARGET_IFACE" -j MASQUERADE 2>/dev/null
 printf 'Removed NAT MASQUERADE for %s\n' "$TARGET_IFACE"
 
+# ── 3b. Remove LAN isolation rules ────────────────────────────────────────
+iptables -t filter -D FORWARD -i "$TARGET_IFACE" -o br0 -j DROP 2>/dev/null
+iptables -t filter -D INPUT -i "$TARGET_IFACE" -p tcp --dport 8080 -j ACCEPT 2>/dev/null
+_RPW_MARK="/tmp/repurpose_subnet_${TARGET_IFACE}.mark"
+_RPW_OLD_SUBNET=$(busybox cat "$_RPW_MARK" 2>/dev/null)
+if [ -n "$_RPW_OLD_SUBNET" ]; then
+    _RPW_HOTSPOT_BR=$(grep -m1 '^HOTSPOT_BR=' /tmp/coin_config.env 2>/dev/null \
+        | sed 's/^HOTSPOT_BR="//;s/"$//')
+    _RPW_HOTSPOT_BR="${_RPW_HOTSPOT_BR:-br1}"
+    iptables -t filter -D FORWARD -i "$_RPW_HOTSPOT_BR" -d "$_RPW_OLD_SUBNET" -j DROP 2>/dev/null
+fi
+rm -f "$_RPW_MARK"
+printf 'Removed LAN isolation rules for %s\n' "$TARGET_IFACE"
+
 # ── 4. Flush IP addresses + take link down before re-bridging ─────────────────
 ip addr flush dev "$TARGET_IFACE" 2>/dev/null
 ip link set "$TARGET_IFACE" down 2>/dev/null

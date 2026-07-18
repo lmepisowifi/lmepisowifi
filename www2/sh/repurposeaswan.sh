@@ -77,6 +77,27 @@ _fix_br0() {
     return 1
 }
 
+# ── Helper: resolve the /24 subnet TARGET_IFACE is currently on ──────────────
+# Mirrors lmehspt.sh's resolve_br0_gateway() logic (assume /24, take the
+# interface's own IPv4 and zero the last octet) so the repurposed-WAN's own
+# local network (e.g. 192.168.69.0/24) can be blocked for hotspot clients,
+# the same way br0's subnet is blocked. Echoes nothing if no IPv4 yet.
+_resolve_iface_subnet() {
+    local _rif="$1" _rip
+    _rip=$(ip -4 addr show "$_rif" 2>/dev/null | busybox grep -o 'inet [0-9.]*' | busybox awk '{print $2}' | head -1)
+    if [ -z "$_rip" ]; then
+        _rip=$(ifconfig "$_rif" 2>/dev/null | busybox grep -o 'inet \(addr:\)\?[0-9.]*' | busybox grep -o '[0-9.]*' | head -1)
+    fi
+    [ -n "$_rip" ] && printf '%s' "$_rip" | busybox sed 's/\.[^.]*$/.0\/24/'
+}
+
+# ── Helper: current hotspot bridge name (falls back to "br1") ────────────────
+_hotspot_br() {
+    _hb=$(grep -m1 '^HOTSPOT_BR=' /tmp/coin_config.env 2>/dev/null \
+        | sed 's/^HOTSPOT_BR="//;s/"$//')
+    printf '%s' "${_hb:-br1}"
+}
+
 # ── Helper: true if our udhcpc PID is alive ───────────────────────────────────
 _udhcpc_alive() {
     if [ -f "$UDHCPC_PID" ]; then
@@ -158,6 +179,37 @@ ip link set "$TARGET_IFACE" nomaster 2>/dev/null
 ip link set "$TARGET_IFACE" up
 _start_udhcpc
 
+# ── LAN isolation ──────────────────────────────────────────────────────────
+# Block the device on this repurposed WAN port from reaching any br0 LAN
+# device. www2 (port 8080) listens on 0.0.0.0 and is hit via INPUT, so no
+# FORWARD exception is needed — the admin UI remains reachable.
+# Honour the LAN_ISOLATE toggle from coin_config.env (default: on).
+_LAN_ISOLATE=$(grep -m1 '^LAN_ISOLATE=' /tmp/coin_config.env 2>/dev/null \
+    | sed 's/^LAN_ISOLATE="//;s/"$//')
+if [ "${_LAN_ISOLATE:-1}" = "1" ]; then
+    iptables -t filter -D FORWARD -i "$TARGET_IFACE" -o br0 -j DROP 2>/dev/null
+    iptables -t filter -I FORWARD 1 -i "$TARGET_IFACE" -o br0 -j DROP
+    iptables -t filter -D INPUT -i "$TARGET_IFACE" -p tcp --dport 8080 -j ACCEPT 2>/dev/null
+    iptables -t filter -I INPUT 1 -i "$TARGET_IFACE" -p tcp --dport 8080 -j ACCEPT
+    # Block hotspot clients from reaching the repurposed-WAN's own upstream
+    # subnet directly (its gateway + sibling devices, e.g. 192.168.69.0/24).
+    # The rule above only stops that network from reaching INTO br0 — it does
+    # nothing to stop br1 clients from addressing that subnet themselves,
+    # since their traffic egresses via TARGET_IFACE, not br0. Destination-based
+    # so ordinary internet-bound traffic (routed *through* the gateway, not
+    # *to* it) is unaffected.
+    _RPW_HOTSPOT_BR=$(_hotspot_br)
+    _RPW_SUBNET=$(_resolve_iface_subnet "$TARGET_IFACE")
+    if [ -n "$_RPW_SUBNET" ]; then
+        iptables -t filter -D FORWARD -i "$_RPW_HOTSPOT_BR" -d "$_RPW_SUBNET" -j DROP 2>/dev/null
+        iptables -t filter -I FORWARD 1 -i "$_RPW_HOTSPOT_BR" -d "$_RPW_SUBNET" -j DROP
+        printf '%s\n' "$_RPW_SUBNET" > "/tmp/repurpose_subnet_${TARGET_IFACE}.mark"
+    fi
+    printf '[%s] LAN isolation rules applied for %s\n' \
+        "$(busybox date)" "$TARGET_IFACE" >> "$LOG"
+fi
+# ──────────────────────────────────────────────────────────────────────────
+
 printf '[%s] Setup complete — watchdog interval=%ds\n' \
     "$(busybox date)" "$WATCHDOG_INTERVAL" >> "$LOG"
 
@@ -237,7 +289,34 @@ while true; do
         fi
     fi
 
-    # ── 5. Carrier state tracking (cable plug-in detection) ───────────────────
+    # ── 5. LAN isolation watchdog — honour LAN_ISOLATE toggle ────────────────
+    _LI=$(grep -m1 '^LAN_ISOLATE=' /tmp/coin_config.env 2>/dev/null \
+        | sed 's/^LAN_ISOLATE="//;s/"$//')
+    _RPW_MARK="/tmp/repurpose_subnet_${TARGET_IFACE}.mark"
+    _RPW_OLD_SUBNET=$(busybox cat "$_RPW_MARK" 2>/dev/null)
+    if [ "${_LI:-1}" = "1" ]; then
+        iptables -t filter -D FORWARD -i "$TARGET_IFACE" -o br0 -j DROP 2>/dev/null
+        iptables -t filter -I FORWARD 1 -i "$TARGET_IFACE" -o br0 -j DROP
+        _RPW_HOTSPOT_BR=$(_hotspot_br)
+        _RPW_SUBNET=$(_resolve_iface_subnet "$TARGET_IFACE")
+        if [ -n "$_RPW_OLD_SUBNET" ] && [ "$_RPW_OLD_SUBNET" != "$_RPW_SUBNET" ]; then
+            iptables -t filter -D FORWARD -i "$_RPW_HOTSPOT_BR" -d "$_RPW_OLD_SUBNET" -j DROP 2>/dev/null
+        fi
+        if [ -n "$_RPW_SUBNET" ]; then
+            iptables -t filter -D FORWARD -i "$_RPW_HOTSPOT_BR" -d "$_RPW_SUBNET" -j DROP 2>/dev/null
+            iptables -t filter -I FORWARD 1 -i "$_RPW_HOTSPOT_BR" -d "$_RPW_SUBNET" -j DROP
+            printf '%s\n' "$_RPW_SUBNET" > "$_RPW_MARK"
+        else
+            rm -f "$_RPW_MARK"
+        fi
+    else
+        iptables -t filter -D FORWARD -i "$TARGET_IFACE" -o br0 -j DROP 2>/dev/null
+        [ -n "$_RPW_OLD_SUBNET" ] && iptables -t filter -D FORWARD -i "$(_hotspot_br)" -d "$_RPW_OLD_SUBNET" -j DROP 2>/dev/null
+        rm -f "$_RPW_MARK"
+    fi
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # ── 6. Carrier state tracking (cable plug-in detection) ───────────────────
     # Belt-and-suspenders for cases where the vendor daemon does NOT re-enslave
     # the interface to br0 on link-up (rare but possible — e.g. when a WLAN
     # interface associates with an AP, or when the LAN switchd handles link

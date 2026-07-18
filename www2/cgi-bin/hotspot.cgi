@@ -248,6 +248,8 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
     HIF="${HOTSPOT_INTERFACES:-$(read_lmehspt_var HOTSPOT_INTERFACES)}"
     AT="${ANTI_TETHER:-$(read_lmehspt_var ANTI_TETHER)}"
     AT_BOOL="false"; [ "${AT:-0}" = "1" ] && AT_BOOL="true"
+    LI="${LAN_ISOLATE:-$(read_lmehspt_var LAN_ISOLATE)}"
+    LI_BOOL="true"; [ "${LI:-1}" = "0" ] && LI_BOOL="false"
 
     HSP_RUNNING="false"; hotspot_running && HSP_RUNNING="true"
     COIN_ON="false"; [ -f /tmp/coin_enabled ] && COIN_ON="true"
@@ -274,6 +276,7 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
 \"hotspot_br\":\"$(esc_json "$HBR")\",
 \"hotspot_interfaces\":\"$(esc_json "$HIF")\",
 \"anti_tether\":$AT_BOOL,
+\"lan_isolate\":$LI_BOOL,
 \"hotspot_running\":$HSP_RUNNING}"
 fi
 
@@ -817,6 +820,62 @@ if echo "$QS" | $BB grep -q "action=coin_toggle"; then
         save_coin_env_var "COIN_ENABLED" "0"
         set_lmehspt_var "COIN_ENABLED" "0"
         ok_json "{\"ok\":true,\"coin_on\":false}"
+    fi
+fi
+
+# ================================================================
+# POST ?action=lan_isolate_set   body: enabled=1|0
+# Instantly applies or removes LAN isolation rules for both the hotspot
+# bridge (br1) and the repurposed WAN interface (if currently active).
+# Saves the new value to coin_config.env, lmehspt.sh, and globals.env so
+# the watchdog picks it up on its next tick.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=lan_isolate_set"; then
+    read -n "${CONTENT_LENGTH:-0}" POST_DATA
+    VAL=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*enabled=\([^&]*\).*/\1/p')
+    load_coin_env
+    HBR="${HOTSPOT_BR:-$(read_lmehspt_var HOTSPOT_BR)}"
+    HBR="${HBR:-br1}"
+    _W2P="8080"
+    # Resolve repurposed WAN interface (empty when feature is not active)
+    _RWAN=$(cat /tmp/repurpose_active 2>/dev/null | $BB tr -cd 'a-z0-9._-')
+    if [ "$VAL" = "1" ]; then
+        # ── Enable: apply hotspot isolation ──────────────────────────────────
+        _old_lan=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+        [ -n "$_old_lan" ] && iptables -t filter -D FORWARD -i "$HBR" -d "$_old_lan" -j DROP 2>/dev/null
+        _lan_gw=$($BB route -n 2>/dev/null | $BB awk 'NR>1&&$1=="0.0.0.0"&&$2!="0.0.0.0"{print $2;exit}')
+        [ -z "$_lan_gw" ] && _lan_gw="192.168.18.1"
+        _lan_subnet=$(printf '%s' "$_lan_gw" | $BB sed 's/\.[^.]*$/.0\/24/')
+        iptables -t filter -I FORWARD 1 -i "$HBR" -d "$_lan_subnet" -j DROP
+        printf '%s\n' "$_lan_subnet" > /tmp/hotspot_lan_isolate.mark
+        iptables -t filter -D INPUT -i "$HBR" -p tcp --dport "$_W2P" -j ACCEPT 2>/dev/null
+        iptables -t filter -I INPUT 1 -i "$HBR" -p tcp --dport "$_W2P" -j ACCEPT
+        # ── Enable: apply repurposed WAN isolation (if active) ────────────────
+        if [ -n "$_RWAN" ]; then
+            iptables -t filter -D FORWARD -i "$_RWAN" -o br0 -j DROP 2>/dev/null
+            iptables -t filter -I FORWARD 1 -i "$_RWAN" -o br0 -j DROP
+            iptables -t filter -D INPUT -i "$_RWAN" -p tcp --dport "$_W2P" -j ACCEPT 2>/dev/null
+            iptables -t filter -I INPUT 1 -i "$_RWAN" -p tcp --dport "$_W2P" -j ACCEPT
+        fi
+        save_coin_env_var "LAN_ISOLATE" "1"
+        set_lmehspt_var   "LAN_ISOLATE" "1"
+        set_globals_var   "LAN_ISOLATE" "1"
+        ok_json '{"ok":true,"lan_isolate":true}'
+    else
+        # ── Disable: remove hotspot isolation ────────────────────────────────
+        _old_lan=$(cat /tmp/hotspot_lan_isolate.mark 2>/dev/null)
+        [ -n "$_old_lan" ] && iptables -t filter -D FORWARD -i "$HBR" -d "$_old_lan" -j DROP 2>/dev/null
+        rm -f /tmp/hotspot_lan_isolate.mark
+        iptables -t filter -D INPUT -i "$HBR" -p tcp --dport "$_W2P" -j ACCEPT 2>/dev/null
+        # ── Disable: remove repurposed WAN isolation (if active) ─────────────
+        if [ -n "$_RWAN" ]; then
+            iptables -t filter -D FORWARD -i "$_RWAN" -o br0 -j DROP 2>/dev/null
+            iptables -t filter -D INPUT -i "$_RWAN" -p tcp --dport "$_W2P" -j ACCEPT 2>/dev/null
+        fi
+        save_coin_env_var "LAN_ISOLATE" "0"
+        set_lmehspt_var   "LAN_ISOLATE" "0"
+        set_globals_var   "LAN_ISOLATE" "0"
+        ok_json '{"ok":true,"lan_isolate":false}'
     fi
 fi
 
