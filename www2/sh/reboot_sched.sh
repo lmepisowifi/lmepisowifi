@@ -62,6 +62,10 @@ dow_match() {
 
 do_reboot() {
     logger -t reboot_sched "$1 — rebooting"
+    # Flush hotspot_data (users.txt, income.env, ...) to flash first — reboot
+    # doesn't guarantee pending writes have left the page cache, and this
+    # daemon can fire moments after a login/logout/coin write.
+    sync
     reboot
 }
 

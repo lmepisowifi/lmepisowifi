@@ -13,6 +13,16 @@ PORTAL_PORT="80"
 WWW2_PORT="8080"   # busybox httpd -h /lmepisowifi/www2 -p 8080 (admin UI). /admin on the portal redirects here.
 SESSION_FILE="/tmp/active_sessions.txt"
 USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
+# Two alternating backup generations (refreshed every 5 min, see
+# backup_users_file) rather than one — so a crash mid-write to one
+# generation still leaves the other, already-durable, copy intact.
+USERS_BACKUP_A="${USERS_FILE}_backup_a"
+USERS_BACKUP_B="${USERS_FILE}_backup_b"
+USERS_BACKUP_GEN="${USERS_FILE}_backup_gen"   # tiny marker: which of A/B was written last
+INCOME_FILE="/lmepisowifi/hotspot_data/income.env"
+INCOME_BACKUP_A="${INCOME_FILE}_backup_a"
+INCOME_BACKUP_B="${INCOME_FILE}_backup_b"
+INCOME_BACKUP_GEN="${INCOME_FILE}_backup_gen"
 WHITELIST_FILE="/lmepisowifi/hotspot_data/whitelist.txt"
 
 WAN_INT_DEFAULT="br0"
@@ -167,6 +177,89 @@ sync_to_persistent_db() {
     fi
     $BB mv "$USERS_TMP" "$USERS_FILE"
 }
+
+# ── users.txt / income.env crash-safety: 2-generation backup + validated restore ──
+# Refreshed every 5 min (see LAST_SNAPSHOT in the main loop), right after
+# sync_to_persistent_db, and also once right after boot. Alternates between
+# the "_backup_a"/"_backup_b" generations (tracked by a tiny "_backup_gen"
+# marker) so a crash mid-write to one generation still leaves the other,
+# already-durable, copy intact. Skipped when the source is empty so a
+# genuinely empty hotspot (or a bad read) never overwrites a good backup
+# with nothing. Callers are expected to run `sync` right after this so the
+# new generation is actually durable, not just renamed in the page cache.
+_backup_rotate() {
+    # $1=source $2=backup_a $3=backup_b $4=gen_marker
+    local src="$1" a="$2" b="$3" genf="$4" gen target
+    [ -s "$src" ] || return 0
+    gen=$($BB cat "$genf" 2>/dev/null)
+    if [ "$gen" = "a" ]; then target="$b"; gen="b"; else target="$a"; gen="a"; fi
+    $BB cp "$src" "${target}.tmp" 2>/dev/null \
+        && $BB mv "${target}.tmp" "$target" 2>/dev/null \
+        && printf '%s' "$gen" > "$genf" 2>/dev/null
+}
+backup_users_file()  { _backup_rotate "$USERS_FILE"  "$USERS_BACKUP_A"  "$USERS_BACKUP_B"  "$USERS_BACKUP_GEN"; }
+backup_income_file() { _backup_rotate "$INCOME_FILE" "$INCOME_BACKUP_A" "$INCOME_BACKUP_B" "$INCOME_BACKUP_GEN"; }
+
+# Validates and restores one users.txt backup candidate. Only lines that
+# look like genuine entries (real MAC, active/paused status, numeric
+# remaining/total with remaining > 0) are kept — a half-written or
+# otherwise mangled backup can't graft garbage sessions onto a fresh boot.
+_restore_users_candidate() {
+    local candidate="$1" tmp valid=0 mac status remaining total fmt
+    [ -s "$candidate" ] || return 1
+    tmp="${USERS_FILE}.restore_tmp"
+    > "$tmp"
+    while read -r mac status remaining total fmt; do
+        [ -n "$mac" ] || continue
+        printf '%s' "$mac" | $BB grep -qE '^[0-9a-f:]{17}$' || continue
+        case "$status" in active|paused) ;; *) continue ;; esac
+        printf '%s' "$remaining" | $BB grep -qE '^[0-9]+$' || continue
+        printf '%s' "$total"     | $BB grep -qE '^[0-9]+$' || continue
+        [ "$remaining" -gt 0 ] || continue
+        echo "$mac $status $remaining $total $fmt" >> "$tmp"
+        valid=1
+    done < "$candidate"
+    if [ "$valid" = "1" ]; then
+        $BB mv "$tmp" "$USERS_FILE" 2>/dev/null && return 0
+    fi
+    $BB rm -f "$tmp" 2>/dev/null
+    return 1
+}
+
+# Validates and restores one income.env backup candidate — must contain a
+# genuine INCOME_TOTAL assignment to be trusted.
+_restore_income_candidate() {
+    local candidate="$1"
+    [ -s "$candidate" ] || return 1
+    $BB grep -qE '^INCOME_TOTAL=' "$candidate" 2>/dev/null || return 1
+    $BB cp "$candidate" "$INCOME_FILE" 2>/dev/null
+}
+
+# Boot-time safety net: if users.txt/income.env is missing or 0 bytes but a
+# backup generation has valid data, restore it before anything else reads
+# the file, so paused/active sessions and income totals resume normally
+# instead of every user/every counter starting over at zero. Tries the
+# most-recently-written generation first, falls back to the other one if
+# that one is missing or fails validation.
+_restore_from_backup() {
+    # $1=label $2=live_file $3=backup_a $4=backup_b $5=gen_marker $6=validate_fn
+    local label="$1" live="$2" a="$3" b="$4" genf="$5" validate="$6" gen first second
+    [ -s "$live" ] && return 0
+    gen=$($BB cat "$genf" 2>/dev/null)
+    if [ "$gen" = "a" ]; then first="$a"; second="$b"; else first="$b"; second="$a"; fi
+    if "$validate" "$first"; then
+        logger -t lmehspt "$label restored from backup ($first) after empty/missing file at boot" 2>/dev/null
+        return 0
+    fi
+    if "$validate" "$second"; then
+        logger -t lmehspt "$label restored from backup ($second) after empty/missing file at boot" 2>/dev/null
+        return 0
+    fi
+    logger -t lmehspt "$label empty/missing at boot and no valid backup found" 2>/dev/null
+    return 1
+}
+restore_users_file_from_backup()  { _restore_from_backup "users.txt"   "$USERS_FILE"  "$USERS_BACKUP_A"  "$USERS_BACKUP_B"  "$USERS_BACKUP_GEN"  _restore_users_candidate; }
+restore_income_file_from_backup() { _restore_from_backup "income.env"  "$INCOME_FILE" "$INCOME_BACKUP_A" "$INCOME_BACKUP_B" "$INCOME_BACKUP_GEN" _restore_income_candidate; }
 
 # ============================================================
 
@@ -1242,7 +1335,13 @@ cleanup_old_hotspot
 if [ ! -f "$BOOT_MARKER" ]; then
     touch "$SESSION_FILE" 2>/dev/null
     _lock
+    restore_users_file_from_backup
+    restore_income_file_from_backup
     sync_to_persistent_db
+    sync
+    backup_users_file
+    backup_income_file
+    sync
     _unlock
     touch "$BOOT_MARKER"
 fi
@@ -1512,6 +1611,10 @@ fi
         if [ $((NOW - LAST_SNAPSHOT)) -ge 300 ]; then
             _lock
             sync_to_persistent_db
+            sync
+            backup_users_file
+            backup_income_file
+            sync
             _unlock
             LAST_SNAPSHOT=$NOW
         fi

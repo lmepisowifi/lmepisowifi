@@ -1202,7 +1202,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
             printf "Status: 200 OK\r\n"
             printf "Content-Type: text/plain\r\n\r\n"
             printf "REBOOT"
-            ( sleep 3; reboot ) &
+            ( sleep 3; sync; reboot ) &
             exit 0
         fi
 
@@ -1958,7 +1958,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         printf "Status: 200 OK\r\n"
         printf "Content-Type: text/plain\r\n\r\n"
         printf "OK"
-        ( sleep 1; reboot ) &
+        ( sleep 1; sync; reboot ) &
         exit 0
     fi
 
