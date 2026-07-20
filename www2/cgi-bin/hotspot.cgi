@@ -51,16 +51,96 @@ SESSION_DATA="/tmp/active_sessions.txt"
 USERS_FILE="$HDATA/users.txt"
 WHITELIST_FILE="$HDATA/whitelist.txt"
 
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (see
+        # lmehspt.sh's _lock for the full explanation) - a flat 5s wait was
+        # force-breaking a live holder's lock under normal polling load and
+        # letting two writers stomp the same USERS_FILE.tmp at once. This
+        # must match the protocol used by coin_result.sh/login.sh/logout.sh/
+        # status.sh/lmehspt.sh exactly (including writing our own pid below)
+        # or THIS script's lock is the one that ends up looking "dead" to
+        # them after just ~1s and gets stolen out from under it mid-write.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$($BB cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         $BB sleep 0.1 2>/dev/null || sleep 0.1
         i=$((i + 1))
     done
+    $BB echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
     trap _unlock EXIT INT TERM
 }
+
+# Stages "${USERS_FILE}.tmp" with every line except the one starting "$1 ",
+# WITHOUT committing it - callers that need to append a replacement line
+# first (kick/add_time/reset_time all do) can do so before calling
+# _users_file_commit. Refuses (returns 1, tmp file removed) if grep
+# couldn't actually read USERS_FILE in the first place. `grep -v` exit
+# status: 0 = some lines kept, 1 = every line was a genuine match (also
+# what a truly-empty file returns - normal for a fresh/just-touched file),
+# 2+ = read/access error. Without this check, a single transient flash
+# read glitch produces an empty tmp file that then gets committed over
+# USERS_FILE unconditionally, wiping every user's balance in one request.
+# Call this INSIDE _lock.
+_users_file_stage_excl() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 1 ] && [ "$rc" -gt 1 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+# Same guard as _users_file_stage_excl above, but for VOUCHER_FILE (admin
+# voucher add/delete). Without the existed/rc check, a transient flash read
+# glitch here would produce an empty tmp file that then gets moved over
+# VOUCHER_FILE unconditionally, deleting every voucher in the database in
+# one request. Returns 1 (VOUCHER_FILE left untouched) on a genuine read
+# error; caller must not report success in that case.
+_voucher_file_replace_excl() {
+    local code="$1" existed=0 rc=0
+    [ -e "$VOUCHER_FILE" ] && existed=1
+    $BB grep -v "^${code} " "$VOUCHER_FILE" > "${VOUCHER_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        $BB mv "${VOUCHER_FILE}.tmp" "$VOUCHER_FILE"
+        return 0
+    fi
+    rm -f "${VOUCHER_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "vouchers.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
+}
+# Same idea, but for the paused-session update sites which filter with awk
+# instead of grep (need to drop only the "$mac paused ..." line, keeping
+# any active line for the same mac untouched - grep -v "^$mac " would wrongly
+# drop both). Plain awk exits 0 whether or not any line matched, so unlike
+# grep there's no "1 = legitimately nothing matched" case to allow through -
+# any nonzero exit here reliably means awk couldn't process the file.
+_users_file_stage_excl_paused() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    $BB awk -v m="$mac" '$1==m && $2=="paused"{next}{print}' "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 1 ] && [ "$rc" -ne 0 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after awk read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+_users_file_commit() { $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"; }
+
 _fmt_secs() {
     # Guard against blank or empty variables
     local s="${1:-0}"
@@ -513,9 +593,10 @@ if echo "$QS" | $BB grep -q "action=kick"; then
 
         # add/replace in master db as paused
         mkdir -p "$HDATA"; touch "$USERS_FILE"
-        $BB grep -v "^$MAC " "$USERS_FILE" > /tmp/kick_u.tmp 2>/dev/null
-        [ "$REM" -gt 0 ] && echo "$MAC paused $REM $K_TOT $(_fmt_secs "$REM")" >> /tmp/kick_u.tmp
-        $BB mv /tmp/kick_u.tmp "$USERS_FILE"
+        if _users_file_stage_excl "$MAC"; then
+            [ "$REM" -gt 0 ] && echo "$MAC paused $REM $K_TOT $(_fmt_secs "$REM")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         PAUSED="true"
     fi
     _unlock
@@ -582,18 +663,14 @@ if echo "$QS" | $BB grep -q "action=add_time"; then
         NEW_EXP=$($BB grep "^$MAC " "$SESSION_DATA" | $BB awk '{print $2}')
         NEW_TOT=$($BB grep "^$MAC " "$SESSION_DATA" | $BB awk '{print $3}')
         REM=$(( NEW_EXP - UPTIME ))
-        $BB grep -v "^$MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-        echo "$MAC active $REM $NEW_TOT $(_fmt_secs "$REM")" >> "${USERS_FILE}.tmp"
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        if _users_file_stage_excl "$MAC"; then
+            echo "$MAC active $REM $NEW_TOT $(_fmt_secs "$REM")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         FOUND=1
         
     # Paused session in users.txt -> update Flash
     elif [ -f "$USERS_FILE" ] && $BB grep -q "^$MAC paused " "$USERS_FILE"; then
-        $BB awk -v m="$MAC" '
-            $1==m && $2=="paused" { next }
-            { print }
-        ' "$USERS_FILE" > /tmp/at_u.tmp
-        
         OLD_P=$($BB grep "^$MAC paused " "$USERS_FILE" | head -1)
         P_REM=$($BB echo "$OLD_P" | $BB awk '{print $3}')
         P_TOT=$($BB echo "$OLD_P" | $BB awk '{print $4}')
@@ -601,8 +678,10 @@ if echo "$QS" | $BB grep -q "action=add_time"; then
         N_REM=$(( P_REM + ADD ))
         N_TOT=$(( P_TOT + ADD ))
         
-        echo "$MAC paused $N_REM $N_TOT $(_fmt_secs "$N_REM")" >> /tmp/at_u.tmp
-        $BB mv /tmp/at_u.tmp "$USERS_FILE"
+        if _users_file_stage_excl_paused "$MAC"; then
+            echo "$MAC paused $N_REM $N_TOT $(_fmt_secs "$N_REM")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         FOUND=1
     fi
 
@@ -611,9 +690,10 @@ if echo "$QS" | $BB grep -q "action=add_time"; then
         mkdir -p "$HDATA"; touch "$SESSION_DATA"; touch "$USERS_FILE"
         echo "$MAC $(( UPTIME + ADD )) $ADD" >> "$SESSION_DATA"
         
-        $BB grep -v "^$MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-        echo "$MAC active $ADD $ADD $(_fmt_secs "$ADD")" >> "${USERS_FILE}.tmp"
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        if _users_file_stage_excl "$MAC"; then
+            echo "$MAC active $ADD $ADD $(_fmt_secs "$ADD")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         
         iptables -t nat    -I HOTSPOT     1 -m mac --mac-source "$MAC" -j RETURN 2>/dev/null
         iptables -t filter -I HOTSPOT_FWD 1 -m mac --mac-source "$MAC" -j ACCEPT 2>/dev/null
@@ -660,9 +740,10 @@ if echo "$QS" | $BB grep -q "action=remove_time"; then
         NEW_EXP=$($BB grep "^$MAC " "$SESSION_DATA" | $BB awk '{print $2}')
         NEW_TOT=$($BB grep "^$MAC " "$SESSION_DATA" | $BB awk '{print $3}')
         REM=$(( NEW_EXP - UPTIME ))
-        $BB grep -v "^$MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-        echo "$MAC active $REM $NEW_TOT $(_fmt_secs "$REM")" >> "${USERS_FILE}.tmp"
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        if _users_file_stage_excl "$MAC"; then
+            echo "$MAC active $REM $NEW_TOT $(_fmt_secs "$REM")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         FOUND=1
 
     # Paused session — update flash only
@@ -674,9 +755,10 @@ if echo "$QS" | $BB grep -q "action=remove_time"; then
         N_REM=$(( P_REM - SUB )); [ "$N_REM" -lt "$MIN_REM" ] && N_REM=$MIN_REM
         N_TOT=$(( P_TOT - SUB )); [ "$N_TOT" -lt "$MIN_REM" ] && N_TOT=$MIN_REM
 
-        $BB awk -v m="$MAC" '$1==m && $2=="paused"{next}{print}' "$USERS_FILE" > /tmp/rt_u.tmp
-        echo "$MAC paused $N_REM $N_TOT $(_fmt_secs "$N_REM")" >> /tmp/rt_u.tmp
-        $BB mv /tmp/rt_u.tmp "$USERS_FILE"
+        if _users_file_stage_excl_paused "$MAC"; then
+            echo "$MAC paused $N_REM $N_TOT $(_fmt_secs "$N_REM")" >> "${USERS_FILE}.tmp"
+            _users_file_commit
+        fi
         FOUND=1
     fi
     _unlock
@@ -698,7 +780,7 @@ if echo "$QS" | $BB grep -q "action=remove_user"; then
 
     _lock
     [ -f "$SESSION_DATA" ] && { $BB grep -v "^$MAC " "$SESSION_DATA" > /tmp/rm_s.tmp; $BB mv /tmp/rm_s.tmp "$SESSION_DATA"; }
-    [ -f "$USERS_FILE"   ] && { $BB grep -v "^$MAC " "$USERS_FILE"   > /tmp/rm_u.tmp 2>/dev/null; $BB mv /tmp/rm_u.tmp "$USERS_FILE"; }
+    _users_file_stage_excl "$MAC" && _users_file_commit
     _unlock
 
     # Revoke internet access (no-op if already paused/removed)
@@ -749,7 +831,16 @@ if echo "$QS" | $BB grep -q "action=whitelist_del"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     MAC=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*mac=\([^&]*\).*/\1/p' | urldecode | $BB tr 'A-Z' 'a-z' | $BB tr -cd 'a-f0-9')
     [ -z "$MAC" ] && err_json "missing_mac"
-    [ -f "$WHITELIST_FILE" ] && { $BB grep -iv "^${MAC}$" "$WHITELIST_FILE" > /tmp/wl_del.tmp; $BB mv /tmp/wl_del.tmp "$WHITELIST_FILE"; }
+    if [ -f "$WHITELIST_FILE" ]; then
+        WL_RC=0
+        $BB grep -iv "^${MAC}$" "$WHITELIST_FILE" > /tmp/wl_del.tmp 2>/dev/null || WL_RC=$?
+        if [ "$WL_RC" -gt 1 ]; then
+            rm -f /tmp/wl_del.tmp 2>/dev/null
+            logger -t lmehspt "whitelist.txt: refused overwrite after read error (rc=$WL_RC) - kept existing file" 2>/dev/null
+            err_json "read_error"
+        fi
+        $BB mv /tmp/wl_del.tmp "$WHITELIST_FILE"
+    fi
     RAW_MAC=$(printf '%s' "$MAC" | $BB sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6/')
     iptables -t nat    -D HOTSPOT     -m mac --mac-source "$RAW_MAC" -j RETURN 2>/dev/null
     iptables -t filter -D HOTSPOT_FWD -m mac --mac-source "$RAW_MAC" -j ACCEPT 2>/dev/null
@@ -787,7 +878,13 @@ if echo "$QS" | $BB grep -q "action=voucher_add"; then
     [ -z "$CODE" ] && err_json "missing_code"
     [ -z "$DUR"  ] && err_json "missing_duration"
     mkdir -p "$HDATA"; touch "$VOUCHER_FILE"
-    $BB grep -v "^$CODE " "$VOUCHER_FILE" > /tmp/vch_add.tmp
+    VCH_RC=0
+    $BB grep -v "^$CODE " "$VOUCHER_FILE" > /tmp/vch_add.tmp 2>/dev/null || VCH_RC=$?
+    if [ "$VCH_RC" -gt 1 ]; then
+        rm -f /tmp/vch_add.tmp 2>/dev/null
+        logger -t lmehspt "vouchers.txt: refused overwrite after read error (rc=$VCH_RC) - kept existing file" 2>/dev/null
+        err_json "read_error"
+    fi
     echo "$CODE $DUR" >> /tmp/vch_add.tmp
     $BB mv /tmp/vch_add.tmp "$VOUCHER_FILE"
     ok_json "{\"ok\":true,\"code\":\"$CODE\"}"
@@ -800,7 +897,9 @@ if echo "$QS" | $BB grep -q "action=voucher_del"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     CODE=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*code=\([^&]*\).*/\1/p' | urldecode | $BB tr 'a-z' 'A-Z' | $BB tr -cd 'A-Z0-9')
     [ -z "$CODE" ] && err_json "missing_code"
-    [ -f "$VOUCHER_FILE" ] && { $BB grep -v "^$CODE " "$VOUCHER_FILE" > /tmp/vch_del.tmp; $BB mv /tmp/vch_del.tmp "$VOUCHER_FILE"; }
+    if [ -f "$VOUCHER_FILE" ] && ! _voucher_file_replace_excl "$CODE"; then
+        err_json "read_error"
+    fi
     ok_json "{\"ok\":true,\"code\":\"$CODE\"}"
 fi
 

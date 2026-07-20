@@ -9,14 +9,30 @@ USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
 # the guarded call below is skipped.
 [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
 
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (see
+        # lmehspt.sh's _lock for the full explanation) - a flat 5s wait was
+        # force-breaking a live holder's lock under normal polling load and
+        # letting two writers stomp the same USERS_FILE.tmp at once.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$($BB cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         $BB sleep 0.1 2>/dev/null || sleep 0.1
         i=$((i + 1))
     done
+    $BB echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
     trap _unlock EXIT INT TERM
 }
 _fmt_secs() {
@@ -38,6 +54,27 @@ _fmt_secs() {
     if [ "$d" -gt 0 ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
     elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
     else printf '%dm' "$m"; fi
+}
+
+# Rewrites USERS_FILE with every line except the one starting "$1 ", but
+# refuses to commit if grep couldn't actually read USERS_FILE in the first
+# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
+# genuine match (also what a truly-empty file returns - normal when the
+# last user is being removed), 2+ = read/access error. Without this check,
+# a single transient flash read glitch produces an empty tmp file that then
+# gets moved over USERS_FILE unconditionally, wiping every user's balance
+# in one request - no concurrency needed at all. Call this INSIDE _lock.
+_users_file_replace_excl() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        return 0
+    fi
+    rm -f "${USERS_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
 }
 
 $BB echo "Content-type: application/json"
@@ -77,8 +114,7 @@ $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 # Save paused user to flash master database
 PAUSED_OK=0
 if [ "$REMAINING" -gt 0 ]; then
-    $BB grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    _users_file_replace_excl "$CLIENT_MAC"
     $BB echo "$CLIENT_MAC paused $REMAINING $TOTAL $(_fmt_secs "$REMAINING")" >> "$USERS_FILE"
     PAUSED_OK=1
 fi

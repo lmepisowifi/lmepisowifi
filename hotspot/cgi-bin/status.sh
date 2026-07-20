@@ -5,14 +5,30 @@ SESSION_FILE="/tmp/active_sessions.txt"
 USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
 HOTSPOT_BR="br1"
 
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (see
+        # lmehspt.sh's _lock for the full explanation) - a flat 5s wait was
+        # force-breaking a live holder's lock under normal polling load and
+        # letting two writers stomp the same USERS_FILE.tmp at once.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$($BB cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         $BB sleep 0.1 2>/dev/null || sleep 0.1
         i=$((i + 1))
     done
+    $BB echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
     trap _unlock EXIT INT TERM
 }
 

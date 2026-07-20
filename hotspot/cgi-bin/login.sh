@@ -8,14 +8,30 @@ VOUCHER_FILE="/lmepisowifi/hotspot_data/vouchers.txt"
 # Customizable Telegram/Discord message templates
 [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
 
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (see
+        # lmehspt.sh's _lock for the full explanation) - a flat 5s wait was
+        # force-breaking a live holder's lock under normal polling load and
+        # letting two writers stomp the same USERS_FILE.tmp at once.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$($BB cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         $BB sleep 0.1 2>/dev/null || sleep 0.1
         i=$((i + 1))
     done
+    $BB echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
     trap _unlock EXIT INT TERM
 }
 _fmt_secs() {
@@ -23,6 +39,47 @@ _fmt_secs() {
     if [ "$d" -gt 0 ]; then printf '%dd %dh %dm' "$d" "$h" "$m"
     elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
     else printf '%dm' "$m"; fi
+}
+
+# Rewrites USERS_FILE with every line except the one starting "$1 ", but
+# refuses to commit if grep couldn't actually read USERS_FILE in the first
+# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
+# genuine match (also what a truly-empty file returns - normal when the
+# last user is being removed), 2+ = read/access error. Without this check,
+# a single transient flash read glitch produces an empty tmp file that then
+# gets moved over USERS_FILE unconditionally, wiping every user's balance
+# in one request - no concurrency needed at all. Call this INSIDE _lock.
+_users_file_replace_excl() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        return 0
+    fi
+    rm -f "${USERS_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
+}
+
+# Same guard as _users_file_replace_excl above, but for VOUCHER_FILE. A
+# voucher redemption calls this to burn the code the customer just used -
+# without the existed/rc check, a transient flash read glitch on
+# VOUCHER_FILE would produce an empty tmp file that then gets moved over
+# VOUCHER_FILE unconditionally, deleting every unredeemed voucher in one
+# request. Returns 1 (VOUCHER_FILE left untouched) on a genuine read error;
+# caller must not treat the redemption as successful in that case.
+_voucher_file_replace_excl() {
+    local code="$1" existed=0 rc=0
+    [ -e "$VOUCHER_FILE" ] && existed=1
+    $BB grep -v "^${code} " "$VOUCHER_FILE" > "${VOUCHER_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        $BB mv "${VOUCHER_FILE}.tmp" "$VOUCHER_FILE"
+        return 0
+    fi
+    rm -f "${VOUCHER_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "vouchers.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
 }
 
 # 1. Parse uptime instantly using zero-fork built-ins (Sets global $NOW)
@@ -108,8 +165,7 @@ if [ -n "$RESUME" ] && [ "$RESUME" = "1" ]; then
         TOTAL=$($BB echo "$PAUSED" | $BB awk '{print $4}')
         [ -z "$TOTAL" ] && TOTAL=$DURATION
         
-        $BB grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        _users_file_replace_excl "$CLIENT_MAC"
     elif [ -n "$EXISTING" ]; then
         # Stale "Resume Time" click landing after the session was already
         # activated some other way — most commonly: the user inserted coins
@@ -166,8 +222,14 @@ else
         fi
     fi
 
-    $BB grep -v "^$VOUCHER " "$VOUCHER_FILE" > "${VOUCHER_FILE}.tmp"
-    $BB mv "${VOUCHER_FILE}.tmp" "$VOUCHER_FILE"
+    if ! _voucher_file_replace_excl "$VOUCHER"; then
+        # VOUCHER_FILE couldn't be safely read/rewritten (transient flash
+        # glitch) - fail closed. Granting time here without actually
+        # burning the code would let the same voucher be redeemed
+        # repeatedly until the file happens to read cleanly.
+        echo '{"ok":false,"error":"try_again"}'
+        exit 0
+    fi
 fi
 
 STACKED=false
@@ -198,8 +260,7 @@ if [ -z "$RESUME" ]; then
             DURATION=$(( VOUCHER_DURATION + PAUSED_DURATION ))
             NEW_TOTAL=$(( PAUSED_TOTAL + VOUCHER_DURATION ))
             
-            $BB grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-            $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+            _users_file_replace_excl "$CLIENT_MAC"
             STACKED=true
         else
             NEW_TOTAL=$VOUCHER_DURATION
@@ -215,8 +276,7 @@ $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 $BB echo "$CLIENT_MAC $NEW_EXPIRY $NEW_TOTAL" >> "$SESSION_FILE"
 
 # Immediately write state to persistent Flash database as 'active'
-$BB grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-$BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+_users_file_replace_excl "$CLIENT_MAC"
 REMAINING_SECS=$(( NEW_EXPIRY - NOW ))
 $BB echo "$CLIENT_MAC active $REMAINING_SECS $NEW_TOTAL $(_fmt_secs "$REMAINING_SECS")" >> "$USERS_FILE"
 

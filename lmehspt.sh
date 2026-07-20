@@ -117,14 +117,58 @@ seed_globals
 # ============================================================
 # UTILITY
 # ============================================================
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (PID recorded
+        # below no longer exists) - never just because THIS waiter got tired
+        # of polling. login.sh/logout.sh/status.sh/coin_result.sh all poll
+        # this same lock roughly once a second from every connected client,
+        # so a busy box can legitimately queue past a few seconds. The old
+        # flat "5s and I grab it" rule force-removed a lock a still-running
+        # holder was mid-write on, letting two writers stomp the same *.tmp
+        # file at once and blackhole USERS_FILE for every user, not just
+        # whoever triggered the second writer.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                # Absolute last-resort failsafe (~30s) in case PID tracking
+                # itself is ever unreliable - don't wedge forever.
+                $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$($BB cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    $BB rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         $BB sleep 0.1 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
         i=$((i + 1))
     done
+    $BB echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
+}
+
+# Rewrites USERS_FILE with every line except the one starting "$1 ", but
+# refuses to commit if grep couldn't actually read USERS_FILE in the first
+# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
+# genuine match (also what a truly-empty file returns - normal when the
+# last user is being removed), 2+ = read/access error. Without this check,
+# a single transient flash read glitch produces an empty tmp file that then
+# gets moved over USERS_FILE unconditionally, wiping every user's balance
+# in one request - no concurrency needed at all. Call this INSIDE _lock.
+_users_file_replace_excl() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        return 0
+    fi
+    rm -f "${USERS_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
 }
 _fmt_secs() {
     # 1. If s is empty, default it to 0
@@ -155,6 +199,29 @@ sync_to_persistent_db() {
     local USERS_TMP="${USERS_FILE}.tmp"
     local NOW
     NOW=$($BB awk '{print int($1)}' /proc/uptime)
+
+    # Guard: this function merges SESSION_FILE + USERS_FILE into USERS_TMP via
+    # plain `while read` loops below and then, unlike every other USERS_FILE
+    # writer in this codebase, used to `mv` the result over USERS_FILE
+    # unconditionally. A `while read < file` loop doesn't surface a mid-read
+    # I/O error the way `grep`'s exit status does elsewhere - a transient
+    # flash read glitch on USERS_FILE just looks like early EOF, silently
+    # truncating the merge, and this function runs on an unattended 5-minute
+    # timer plus once at every boot. Probe both sources with `cat` first,
+    # whose exit status DOES reflect a real read failure, and skip the sync
+    # entirely (leaving the existing USERS_FILE untouched) if either a
+    # non-empty SESSION_FILE or a non-empty USERS_FILE can't actually be
+    # read back right now. Call this INSIDE _lock, same as the other
+    # USERS_FILE writers.
+    if [ -s "$SESSION_FILE" ] && ! $BB cat "$SESSION_FILE" >/dev/null 2>&1; then
+        logger -t lmehspt "sync_to_persistent_db: active_sessions.txt unreadable (I/O error) - skipped sync, kept existing users.txt" 2>/dev/null
+        return 1
+    fi
+    if [ -s "$USERS_FILE" ] && ! $BB cat "$USERS_FILE" >/dev/null 2>&1; then
+        logger -t lmehspt "sync_to_persistent_db: users.txt unreadable (I/O error) - skipped sync, kept existing file" 2>/dev/null
+        return 1
+    fi
+
     > "$USERS_TMP"
     if [ -f "$SESSION_FILE" ]; then
         while read -r mac expiry total; do
@@ -678,8 +745,19 @@ save_ip_map() {
 }
 get_ip_for_mac() {
     local mac=$1 ip
-    ip=$($BB arp -n 2>/dev/null | $BB grep -i "$mac" | $BB awk '{print $1}' | head -1)
-    [ -n "$ip" ] && { echo "$ip"; return; }
+    # Scope this to $HOTSPOT_BR only. A bare "arp -n | grep mac" can match a
+    # stale/unrelated neighbor entry for the same MAC on a different
+    # interface (e.g. wlan0-vxd) whose IP isn't even on the portal subnet -
+    # ip_to_cid() then silently returns empty for it, which skips QoS class
+    # creation, zeroes out download packet counting in check_inactivity(),
+    # and sends the liveness ping to the wrong address, all at once. Filter
+    # out FAILED entries too; STALE/DELAY are still usable mappings.
+    ip=$(ip neigh show dev "$HOTSPOT_BR" 2>/dev/null | $BB grep -i "$mac" | $BB grep -vi FAILED | $BB awk '{print $1}' | head -1)
+    if [ -n "$ip" ]; then
+        save_ip_map "$mac" "$ip"
+        echo "$ip"
+        return
+    fi
     $BB grep -i "^$mac " "$IP_MAP_FILE" 2>/dev/null | $BB awk '{print $2}' | head -1
 }
 
@@ -947,8 +1025,7 @@ pause_session() {
     $BB grep -v "^$mac " "$SESSION_FILE" > "${SESSION_FILE}.tmp" 2>/dev/null
     $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
     
-    $BB grep -v "^$mac " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    _users_file_replace_excl "$mac"
     echo "$mac paused $remaining $total $(_fmt_secs "$remaining")" >> "$USERS_FILE"
     _unlock
 
@@ -1567,6 +1644,17 @@ fi
                                    # sessions aren't stuck in the unauth bucket
         fi
 
+        # Runtime self-heal: if users.txt was ever found empty/missing (e.g.
+        # a lock race let two writers stomp its .tmp file), restore it from
+        # the last good generation immediately instead of leaving every
+        # paused/active entry lost until the box is next rebooted (the boot
+        # sequence above only ever runs this once, at startup). Safe to call
+        # every ~1s loop tick: _restore_from_backup's very first check is
+        # `[ -s "$live" ] && return 0`, so this is a no-op on the healthy path.
+        _lock
+        restore_users_file_from_backup
+        _unlock
+
         if [ -f "$SESSION_FILE" ]; then
             NOW=$($BB awk '{print int($1)}' /proc/uptime)
             _SES_TMP="${SESSION_FILE}.tmp"
@@ -1582,8 +1670,7 @@ fi
                         $BB mv /tmp/activity_exp.tmp "$ACTIVITY_FILE" 2>/dev/null
                         del_user_qos "$mac"
                         
-                        $BB grep -v "^$mac " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-                        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+                        _users_file_replace_excl "$mac"
                         
                         # See pause_session()'s identical comment: re-source
                         # so this long-running watchdog picks up template

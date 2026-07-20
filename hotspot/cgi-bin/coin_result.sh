@@ -23,15 +23,52 @@ _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
 _clear_pending() { rm -f "${COIN_PENDING_DIR}/${1}" "${COIN_PENDING_DIR}/${1}.tmp" 2>/dev/null; }
 
-_unlock() { rmdir /tmp/hotspot_session.lock 2>/dev/null; }
+_unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
     while ! mkdir /tmp/hotspot_session.lock 2>/dev/null; do
-        [ "$i" -gt 50 ] && rmdir /tmp/hotspot_session.lock 2>/dev/null
+        # Only steal the lock once its holder is provably dead (see
+        # lmehspt.sh's _lock for the full explanation) - a flat 5s wait was
+        # force-breaking a live holder's lock under normal polling load and
+        # letting two writers stomp the same USERS_FILE.tmp at once.
+        if [ "$((i % 10))" -eq 0 ] && [ "$i" -gt 0 ]; then
+            if [ "$i" -ge 300 ]; then
+                rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                rmdir /tmp/hotspot_session.lock 2>/dev/null
+            else
+                _HPID=$(cat /tmp/hotspot_session.lock/pid 2>/dev/null)
+                if [ -z "$_HPID" ] || ! kill -0 "$_HPID" 2>/dev/null; then
+                    rm -f /tmp/hotspot_session.lock/pid 2>/dev/null
+                    rmdir /tmp/hotspot_session.lock 2>/dev/null
+                fi
+            fi
+        fi
         sleep 0.1 2>/dev/null || sleep 1
         i=$((i + 1))
     done
+    echo $$ > /tmp/hotspot_session.lock/pid 2>/dev/null
     trap _unlock EXIT INT TERM
+}
+
+# Rewrites USERS_FILE with every line except the one starting "$1 ", but
+# refuses to commit if grep couldn't actually read USERS_FILE in the first
+# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
+# genuine match (also what a truly-empty file returns - normal when the
+# last user is being removed), 2+ = read/access error. Without this check,
+# a single transient flash read glitch produces an empty tmp file that then
+# gets moved over USERS_FILE unconditionally, wiping every user's balance
+# in one request - no concurrency needed at all. Call this INSIDE _lock.
+_users_file_replace_excl() {
+    local mac="$1" existed=0 rc=0
+    [ -e "$USERS_FILE" ] && existed=1
+    grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
+    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
+        mv "${USERS_FILE}.tmp" "$USERS_FILE"
+        return 0
+    fi
+    rm -f "${USERS_FILE}.tmp" 2>/dev/null
+    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+    return 1
 }
 
 _fmt_secs() {
@@ -250,8 +287,7 @@ if [ "${MINUTES:-0}" -gt 0 ]; then
             SECS=$(( SECS + PAUSED_REM ))
             NEW_TOTAL=$(( PAUSED_TOT + (MINUTES * 60) ))
 
-            grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-            mv "${USERS_FILE}.tmp" "$USERS_FILE"
+            _users_file_replace_excl "$CLIENT_MAC"
         else
             NEW_TOTAL=$SECS
         fi
@@ -263,8 +299,7 @@ if [ "${MINUTES:-0}" -gt 0 ]; then
     fi
 
     # Immediately write state to persistent Flash database as 'active'
-    grep -v "^$CLIENT_MAC " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null
-    mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    _users_file_replace_excl "$CLIENT_MAC"
     N_REMAIN=$(( NEW_EXP - NOW ))
     printf '%s active %s %s %s\n' "$CLIENT_MAC" "$N_REMAIN" "$NEW_TOTAL" "$(_fmt_secs "$N_REMAIN")" >> "$USERS_FILE"
     _unlock

@@ -2290,6 +2290,7 @@ function startCoinPoll() {
             prev2.textContent = '' + fmtMinutesLong(d.minutes) + ' added.';
             prev2.className = 'coin-preview active';
             _pauseCoinBgMusic();
+            _hideCoinButtons();
             setTimeout(function() {
               _coinSID = null; 
               closeCoinModalUI();
