@@ -56,25 +56,37 @@ _fmt_secs() {
     else printf '%dm' "$m"; fi
 }
 
-# Rewrites USERS_FILE with every line except the one starting "$1 ", but
-# refuses to commit if grep couldn't actually read USERS_FILE in the first
-# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
-# genuine match (also what a truly-empty file returns - normal when the
-# last user is being removed), 2+ = read/access error. Without this check,
-# a single transient flash read glitch produces an empty tmp file that then
-# gets moved over USERS_FILE unconditionally, wiping every user's balance
+# Stages "${USERS_FILE}.tmp" with every line except the one starting "$1 ",
+# WITHOUT committing it - the caller appends the paused-replacement line
+# directly into that same tmp file, then calls _users_file_commit once, so
+# the exclusion and the new line land in a single atomic mv instead of two
+# separate writes to the live file. Refuses (returns 1, tmp file removed)
+# if grep couldn't actually read USERS_FILE in the first place. `grep -v`
+# exit status: 0 = some lines kept, 1 = every line was a genuine match
+# (also what a truly-empty file returns - normal when the last user is
+# being removed), 2+ = read/access error. Without this check, a single
+# transient flash read glitch produces an empty tmp file that then gets
+# committed over USERS_FILE unconditionally, wiping every user's balance
 # in one request - no concurrency needed at all. Call this INSIDE _lock.
-_users_file_replace_excl() {
+_users_file_stage_excl() {
     local mac="$1" existed=0 rc=0
     [ -e "$USERS_FILE" ] && existed=1
     $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
-    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
-        return 0
+    if [ "$existed" -eq 1 ] && [ "$rc" -gt 1 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
     fi
-    rm -f "${USERS_FILE}.tmp" 2>/dev/null
-    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
-    return 1
+    return 0
+}
+# Commits a staged "${USERS_FILE}.tmp" via a single atomic mv, so the
+# empty-expected marker is evaluated exactly once against the file's true
+# final content for this operation - never against a transient
+# mid-operation state that a separate later append could change out from
+# under it.
+_users_file_commit() {
+    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
 $BB echo "Content-type: application/json"
@@ -111,12 +123,32 @@ REMAINING=$(( EXPIRY - NOW ))
 $BB grep -v "^$CLIENT_MAC " "$SESSION_FILE" > "${SESSION_FILE}.tmp"
 $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 
-# Save paused user to flash master database
+# Save paused user to flash master database. Stage+commit is now
+# UNCONDITIONAL (matches hotspot.cgi's admin "kick" handler) - only the
+# appended "paused" line is conditional on REMAINING>0.
+#
+# Why: a manual pause/logout request can race the session's own natural
+# expiry, landing here with REMAINING<=0. SESSION_FILE is cleared for this
+# MAC unconditionally above regardless of REMAINING, but USERS_FILE used to
+# be skipped entirely whenever REMAINING<=0 - leaving whatever "active ..."
+# line was last written there (from the original grant or the last 5-minute
+# sync) stranded in place. Because the MAC is now gone from SESSION_FILE,
+# the ~1s expiry watchdog never encounters it again to clean it up either
+# (it only walks entries still in SESSION_FILE) - so that stale line
+# survived indefinitely, until the next periodic sync_to_persistent_db()
+# run reinterpreted the orphaned "active" status as "paused" and copied its
+# old remaining/total across unchanged, handing the user back whatever
+# time had been recorded at that last write even though the session had
+# already fully run out. Excluding the MAC's line unconditionally here
+# (and only re-adding it when there's real time to preserve) removes the
+# entry outright instead of leaving it behind.
 PAUSED_OK=0
-if [ "$REMAINING" -gt 0 ]; then
-    _users_file_replace_excl "$CLIENT_MAC"
-    $BB echo "$CLIENT_MAC paused $REMAINING $TOTAL $(_fmt_secs "$REMAINING")" >> "$USERS_FILE"
-    PAUSED_OK=1
+if _users_file_stage_excl "$CLIENT_MAC"; then
+    if [ "$REMAINING" -gt 0 ]; then
+        $BB echo "$CLIENT_MAC paused $REMAINING $TOTAL $(_fmt_secs "$REMAINING")" >> "${USERS_FILE}.tmp"
+        PAUSED_OK=1
+    fi
+    _users_file_commit
 fi
 
 iptables -t nat -D HOTSPOT -m mac --mac-source "$CLIENT_MAC" -j RETURN 2>/dev/null

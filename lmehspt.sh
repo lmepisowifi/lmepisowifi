@@ -42,7 +42,7 @@ IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
 
 HOTSPOT_ENABLED="1"
 ANTI_TETHER="1"
-LAN_ISOLATE="1"
+LAN_ISOLATE="0"
 # Any address in these ranges is private (RFC1918) and, by definition, can
 # only ever be a LAN device — ours, or someone else's upstream gateway in a
 # chained/double-NAT setup (e.g. a repurposed-WAN uplink whose own gateway
@@ -158,16 +158,59 @@ _lock() {
 # a single transient flash read glitch produces an empty tmp file that then
 # gets moved over USERS_FILE unconditionally, wiping every user's balance
 # in one request - no concurrency needed at all. Call this INSIDE _lock.
-_users_file_replace_excl() {
+
+# Stages "${USERS_FILE}.tmp" with every line except the one starting "$1 ",
+# WITHOUT committing it - callers that need to append a replacement line
+# (pause_session, the expiry watchdog's replace-with-nothing case, etc.) can
+# do so into the .tmp file before calling _users_file_commit. Refuses
+# (returns 1, tmp file removed) if grep couldn't actually read USERS_FILE in
+# the first place. `grep -v` exit status: 0 = some lines kept, 1 = every
+# line was a genuine match (also what a truly-empty file returns - normal
+# when the last user is being removed), 2+ = read/access error. Without this
+# check, a single transient flash read glitch produces an empty tmp file
+# that then gets committed over USERS_FILE unconditionally, wiping every
+# user's balance in one request - no concurrency needed at all. Call this
+# INSIDE _lock.
+_users_file_stage_excl() {
     local mac="$1" existed=0 rc=0
     [ -e "$USERS_FILE" ] && existed=1
     $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
-    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    if [ "$existed" -eq 1 ] && [ "$rc" -gt 1 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
+    fi
+    return 0
+}
+# Commits a staged "${USERS_FILE}.tmp" (see _users_file_stage_excl above) -
+# whatever the caller appended to it, exclusion and replacement together,
+# lands in USERS_FILE via a single atomic mv. This is what makes the
+# empty-expected marker below trustworthy: it's evaluated exactly once,
+# against the file's true final content for this operation, never against
+# a transient mid-operation state that a separate later append could still
+# change out from under it.
+_users_file_commit() {
+    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # Record whether this guarded commit legitimately left USERS_FILE
+    # empty (e.g. the sole remaining user just expired/logged out/got
+    # removed) vs non-empty. The runtime self-heal below (search
+    # restore_users_file_from_backup) uses this to tell "correctly zero
+    # active users right now" apart from "file went empty some other
+    # way" - without it, the self-heal can't distinguish the two and
+    # resurrects an already-expired user from the last backup snapshot
+    # on its very next ~1s tick. /tmp is tmpfs, so this costs no flash
+    # writes and is naturally cleared on reboot (when we DO want the
+    # boot-time restore to run its normal crash-recovery logic).
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
+}
+# Pure-removal convenience wrapper for callers with no replacement line to
+# append (e.g. the expiry watchdog below, which just drops the mac
+# entirely). Stage+commit in one call, still fails closed on a read error.
+_users_file_replace_excl() {
+    if _users_file_stage_excl "$1"; then
+        _users_file_commit
         return 0
     fi
-    rm -f "${USERS_FILE}.tmp" 2>/dev/null
-    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
     return 1
 }
 _fmt_secs() {
@@ -243,6 +286,7 @@ sync_to_persistent_db() {
         done < "$USERS_FILE"
     fi
     $BB mv "$USERS_TMP" "$USERS_FILE"
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
 # ── users.txt / income.env crash-safety: 2-generation backup + validated restore ──
@@ -325,7 +369,21 @@ _restore_from_backup() {
     logger -t lmehspt "$label empty/missing at boot and no valid backup found" 2>/dev/null
     return 1
 }
-restore_users_file_from_backup()  { _restore_from_backup "users.txt"   "$USERS_FILE"  "$USERS_BACKUP_A"  "$USERS_BACKUP_B"  "$USERS_BACKUP_GEN"  _restore_users_candidate; }
+restore_users_file_from_backup()  {
+    # If the last guarded write to USERS_FILE deliberately left it empty
+    # (see the marker comment in _users_file_replace_excl above) and it's
+    # still empty now, that's the expected "no active/paused users right
+    # now" state - e.g. the sole remaining user just ran out of time. Don't
+    # restore over it: backup_users_file() only refreshes the backup every
+    # 5 minutes (skipping entirely while the source is empty, by design -
+    # see _backup_rotate), so for up to that whole window the backup still
+    # holds the user's last non-empty snapshot (say "3 minutes remaining").
+    # Without this check, this function - called every ~1s - would restore
+    # that stale snapshot right back, making an already-expired user's time
+    # appear to come back.
+    [ -e /tmp/hotspot_users_empty_expected ] && [ ! -s "$USERS_FILE" ] && return 0
+    _restore_from_backup "users.txt"   "$USERS_FILE"  "$USERS_BACKUP_A"  "$USERS_BACKUP_B"  "$USERS_BACKUP_GEN"  _restore_users_candidate
+}
 restore_income_file_from_backup() { _restore_from_backup "income.env"  "$INCOME_FILE" "$INCOME_BACKUP_A" "$INCOME_BACKUP_B" "$INCOME_BACKUP_GEN" _restore_income_candidate; }
 
 # ============================================================
@@ -1024,9 +1082,11 @@ pause_session() {
     _lock
     $BB grep -v "^$mac " "$SESSION_FILE" > "${SESSION_FILE}.tmp" 2>/dev/null
     $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
-    
-    _users_file_replace_excl "$mac"
-    echo "$mac paused $remaining $total $(_fmt_secs "$remaining")" >> "$USERS_FILE"
+
+    if _users_file_stage_excl "$mac"; then
+        echo "$mac paused $remaining $total $(_fmt_secs "$remaining")" >> "${USERS_FILE}.tmp"
+        _users_file_commit
+    fi
     _unlock
 
     $BB grep -v "^$mac " "$ACTIVITY_FILE" > /tmp/activity_pause.tmp 2>/dev/null

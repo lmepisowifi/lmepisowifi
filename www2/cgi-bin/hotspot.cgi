@@ -139,7 +139,14 @@ _users_file_stage_excl_paused() {
     fi
     return 0
 }
-_users_file_commit() { $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"; }
+_users_file_commit() {
+    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # See the matching comment on _users_file_replace_excl in lmehspt.sh:
+    # this tells the runtime self-heal that an empty USERS_FILE right now
+    # is expected (e.g. an admin just removed the last/only user), not a
+    # sign of corruption to restore from backup.
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
+}
 
 _fmt_secs() {
     # Guard against blank or empty variables
@@ -878,6 +885,12 @@ if echo "$QS" | $BB grep -q "action=voucher_add"; then
     [ -z "$CODE" ] && err_json "missing_code"
     [ -z "$DUR"  ] && err_json "missing_duration"
     mkdir -p "$HDATA"; touch "$VOUCHER_FILE"
+    # Locked: login.sh's redemption path takes this same lock before it
+    # touches VOUCHER_FILE. Without taking it here too, an admin add landing
+    # mid-redemption is a lost-update race - both sides read the pre-change
+    # file, so whichever mv() lands second silently reverts the other's
+    # change (e.g. resurrecting a code a customer just redeemed).
+    _lock
     VCH_RC=0
     $BB grep -v "^$CODE " "$VOUCHER_FILE" > /tmp/vch_add.tmp 2>/dev/null || VCH_RC=$?
     if [ "$VCH_RC" -gt 1 ]; then
@@ -887,6 +900,7 @@ if echo "$QS" | $BB grep -q "action=voucher_add"; then
     fi
     echo "$CODE $DUR" >> /tmp/vch_add.tmp
     $BB mv /tmp/vch_add.tmp "$VOUCHER_FILE"
+    _unlock
     ok_json "{\"ok\":true,\"code\":\"$CODE\"}"
 fi
 
@@ -897,9 +911,14 @@ if echo "$QS" | $BB grep -q "action=voucher_del"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     CODE=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*code=\([^&]*\).*/\1/p' | urldecode | $BB tr 'a-z' 'A-Z' | $BB tr -cd 'A-Z0-9')
     [ -z "$CODE" ] && err_json "missing_code"
+    # Locked: see the identical note in voucher_add above - login.sh's
+    # redemption path takes this same lock, so this side needs to as well.
+    _lock
     if [ -f "$VOUCHER_FILE" ] && ! _voucher_file_replace_excl "$CODE"; then
+        _unlock
         err_json "read_error"
     fi
+    _unlock
     ok_json "{\"ok\":true,\"code\":\"$CODE\"}"
 fi
 

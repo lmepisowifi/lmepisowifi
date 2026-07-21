@@ -50,25 +50,38 @@ _lock() {
     trap _unlock EXIT INT TERM
 }
 
-# Rewrites USERS_FILE with every line except the one starting "$1 ", but
-# refuses to commit if grep couldn't actually read USERS_FILE in the first
-# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
-# genuine match (also what a truly-empty file returns - normal when the
-# last user is being removed), 2+ = read/access error. Without this check,
-# a single transient flash read glitch produces an empty tmp file that then
-# gets moved over USERS_FILE unconditionally, wiping every user's balance
-# in one request - no concurrency needed at all. Call this INSIDE _lock.
-_users_file_replace_excl() {
+# Stages "${USERS_FILE}.tmp" with every line except the one starting "$1 ",
+# WITHOUT committing it - the caller appends its replacement line (grant/
+# extend/pause) directly into that same tmp file, then calls
+# _users_file_commit once, so the exclusion and the new line land in a
+# single atomic mv instead of two separate writes to the live file. Refuses
+# (returns 1, tmp file removed) if grep couldn't actually read USERS_FILE in
+# the first place. `grep -v` exit status: 0 = some lines kept, 1 = every
+# line was a genuine match (also what a truly-empty file returns - normal
+# when the last user is being removed), 2+ = read/access error. Without this
+# check, a single transient flash read glitch produces an empty tmp file
+# that then gets committed over USERS_FILE unconditionally, wiping every
+# user's balance in one request - no concurrency needed at all. Call this
+# INSIDE _lock.
+_users_file_stage_excl() {
     local mac="$1" existed=0 rc=0
     [ -e "$USERS_FILE" ] && existed=1
     grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
-    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
-        mv "${USERS_FILE}.tmp" "$USERS_FILE"
-        return 0
+    if [ "$existed" -eq 1 ] && [ "$rc" -gt 1 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
     fi
-    rm -f "${USERS_FILE}.tmp" 2>/dev/null
-    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
-    return 1
+    return 0
+}
+# Commits a staged "${USERS_FILE}.tmp" via a single atomic mv, so the
+# empty-expected marker is evaluated exactly once against the file's true
+# final content for this operation (exclusion + replacement together) -
+# never against a transient mid-operation state that a separate later
+# append could still change out from under it.
+_users_file_commit() {
+    mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
 _fmt_secs() {
@@ -286,8 +299,6 @@ if [ "${MINUTES:-0}" -gt 0 ]; then
 
             SECS=$(( SECS + PAUSED_REM ))
             NEW_TOTAL=$(( PAUSED_TOT + (MINUTES * 60) ))
-
-            _users_file_replace_excl "$CLIENT_MAC"
         else
             NEW_TOTAL=$SECS
         fi
@@ -299,9 +310,11 @@ if [ "${MINUTES:-0}" -gt 0 ]; then
     fi
 
     # Immediately write state to persistent Flash database as 'active'
-    _users_file_replace_excl "$CLIENT_MAC"
     N_REMAIN=$(( NEW_EXP - NOW ))
-    printf '%s active %s %s %s\n' "$CLIENT_MAC" "$N_REMAIN" "$NEW_TOTAL" "$(_fmt_secs "$N_REMAIN")" >> "$USERS_FILE"
+    if _users_file_stage_excl "$CLIENT_MAC"; then
+        printf '%s active %s %s %s\n' "$CLIENT_MAC" "$N_REMAIN" "$NEW_TOTAL" "$(_fmt_secs "$N_REMAIN")" >> "${USERS_FILE}.tmp"
+        _users_file_commit
+    fi
     _unlock
 fi
 

@@ -41,28 +41,41 @@ _fmt_secs() {
     else printf '%dm' "$m"; fi
 }
 
-# Rewrites USERS_FILE with every line except the one starting "$1 ", but
-# refuses to commit if grep couldn't actually read USERS_FILE in the first
-# place. `grep -v` exit status: 0 = some lines kept, 1 = every line was a
-# genuine match (also what a truly-empty file returns - normal when the
-# last user is being removed), 2+ = read/access error. Without this check,
-# a single transient flash read glitch produces an empty tmp file that then
-# gets moved over USERS_FILE unconditionally, wiping every user's balance
-# in one request - no concurrency needed at all. Call this INSIDE _lock.
-_users_file_replace_excl() {
+# Stages "${USERS_FILE}.tmp" with every line except the one starting "$1 ",
+# WITHOUT committing it - the caller appends its replacement line (resume/
+# stack/grant) directly into that same tmp file, then calls
+# _users_file_commit once, so the exclusion and the new line land in a
+# single atomic mv instead of two separate writes to the live file. Refuses
+# (returns 1, tmp file removed) if grep couldn't actually read USERS_FILE in
+# the first place. `grep -v` exit status: 0 = some lines kept, 1 = every
+# line was a genuine match (also what a truly-empty file returns - normal
+# when the last user is being removed), 2+ = read/access error. Without this
+# check, a single transient flash read glitch produces an empty tmp file
+# that then gets committed over USERS_FILE unconditionally, wiping every
+# user's balance in one request - no concurrency needed at all. Call this
+# INSIDE _lock.
+_users_file_stage_excl() {
     local mac="$1" existed=0 rc=0
     [ -e "$USERS_FILE" ] && existed=1
     $BB grep -v "^${mac} " "$USERS_FILE" > "${USERS_FILE}.tmp" 2>/dev/null || rc=$?
-    if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
-        $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
-        return 0
+    if [ "$existed" -eq 1 ] && [ "$rc" -gt 1 ]; then
+        rm -f "${USERS_FILE}.tmp" 2>/dev/null
+        logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
+        return 1
     fi
-    rm -f "${USERS_FILE}.tmp" 2>/dev/null
-    logger -t lmehspt "users.txt: refused overwrite after read error (rc=$rc) - kept existing file" 2>/dev/null
-    return 1
+    return 0
+}
+# Commits a staged "${USERS_FILE}.tmp" via a single atomic mv, so the
+# empty-expected marker is evaluated exactly once against the file's true
+# final content for this operation - never against a transient
+# mid-operation state that a separate later append could change out from
+# under it.
+_users_file_commit() {
+    $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
-# Same guard as _users_file_replace_excl above, but for VOUCHER_FILE. A
+# Same guard as _users_file_stage_excl above, but for VOUCHER_FILE. A
 # voucher redemption calls this to burn the code the customer just used -
 # without the existed/rc check, a transient flash read glitch on
 # VOUCHER_FILE would produce an empty tmp file that then gets moved over
@@ -164,8 +177,6 @@ if [ -n "$RESUME" ] && [ "$RESUME" = "1" ]; then
         DURATION=$($BB echo "$PAUSED" | $BB awk '{print $3}')
         TOTAL=$($BB echo "$PAUSED" | $BB awk '{print $4}')
         [ -z "$TOTAL" ] && TOTAL=$DURATION
-        
-        _users_file_replace_excl "$CLIENT_MAC"
     elif [ -n "$EXISTING" ]; then
         # Stale "Resume Time" click landing after the session was already
         # activated some other way — most commonly: the user inserted coins
@@ -259,8 +270,6 @@ if [ -z "$RESUME" ]; then
             
             DURATION=$(( VOUCHER_DURATION + PAUSED_DURATION ))
             NEW_TOTAL=$(( PAUSED_TOTAL + VOUCHER_DURATION ))
-            
-            _users_file_replace_excl "$CLIENT_MAC"
             STACKED=true
         else
             NEW_TOTAL=$VOUCHER_DURATION
@@ -276,9 +285,11 @@ $BB mv "${SESSION_FILE}.tmp" "$SESSION_FILE"
 $BB echo "$CLIENT_MAC $NEW_EXPIRY $NEW_TOTAL" >> "$SESSION_FILE"
 
 # Immediately write state to persistent Flash database as 'active'
-_users_file_replace_excl "$CLIENT_MAC"
 REMAINING_SECS=$(( NEW_EXPIRY - NOW ))
-$BB echo "$CLIENT_MAC active $REMAINING_SECS $NEW_TOTAL $(_fmt_secs "$REMAINING_SECS")" >> "$USERS_FILE"
+if _users_file_stage_excl "$CLIENT_MAC"; then
+    $BB echo "$CLIENT_MAC active $REMAINING_SECS $NEW_TOTAL $(_fmt_secs "$REMAINING_SECS")" >> "${USERS_FILE}.tmp"
+    _users_file_commit
+fi
 
 if [ "$NEED_FW_RULES" = "true" ]; then
     iptables -t nat -I HOTSPOT 1 -m mac --mac-source "$CLIENT_MAC" -j RETURN 2>/dev/null
