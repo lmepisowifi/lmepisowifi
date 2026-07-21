@@ -81,6 +81,12 @@ _users_file_stage_excl() {
 # append could still change out from under it.
 _users_file_commit() {
     mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # Rename is atomic/crash-consistent on ubifs, but that only guarantees
+    # you never see a half-written file - it says nothing about whether
+    # this specific write has actually reached the NAND yet vs. still
+    # sitting dirty in the page cache. Force it out now so a power-cut
+    # moments after a coin grant can't silently roll this request back.
+    sync
     if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 

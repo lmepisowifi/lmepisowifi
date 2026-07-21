@@ -72,6 +72,13 @@ _users_file_stage_excl() {
 # under it.
 _users_file_commit() {
     $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # Rename is atomic/crash-consistent on ubifs, but that only guarantees
+    # you never see a half-written file - it says nothing about whether
+    # this specific write has actually reached the NAND yet vs. still
+    # sitting dirty in the page cache. Force it out now so a power-cut
+    # moments after a resume/voucher/coin-stack grant can't silently roll
+    # this request back.
+    sync
     if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
@@ -88,6 +95,11 @@ _voucher_file_replace_excl() {
     $BB grep -v "^${code} " "$VOUCHER_FILE" > "${VOUCHER_FILE}.tmp" 2>/dev/null || rc=$?
     if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
         $BB mv "${VOUCHER_FILE}.tmp" "$VOUCHER_FILE"
+        # Force the burned code out to flash now - without this, a
+        # power-cut between this redemption and the users.txt grant
+        # further down could roll vouchers.txt back to "unredeemed"
+        # while the code has already been shown to the customer as used.
+        sync
         return 0
     fi
     rm -f "${VOUCHER_FILE}.tmp" 2>/dev/null

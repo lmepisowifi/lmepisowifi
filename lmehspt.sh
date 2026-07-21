@@ -42,7 +42,7 @@ IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
 
 HOTSPOT_ENABLED="1"
 ANTI_TETHER="1"
-LAN_ISOLATE="0"
+LAN_ISOLATE="1"
 # Any address in these ranges is private (RFC1918) and, by definition, can
 # only ever be a LAN device — ours, or someone else's upstream gateway in a
 # chained/double-NAT setup (e.g. a repurposed-WAN uplink whose own gateway
@@ -191,6 +191,13 @@ _users_file_stage_excl() {
 # change out from under it.
 _users_file_commit() {
     $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # Rename is atomic/crash-consistent on ubifs, but that only guarantees
+    # you never see a half-written file - it says nothing about whether
+    # this specific write has actually reached the NAND yet vs. still
+    # sitting dirty in the page cache. Force it out now so a power-cut
+    # moments after an inactivity pause or expiry can't silently roll
+    # this update back.
+    sync
     # Record whether this guarded commit legitimately left USERS_FILE
     # empty (e.g. the sole remaining user just expired/logged out/got
     # removed) vs non-empty. The runtime self-heal below (search

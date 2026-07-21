@@ -116,6 +116,9 @@ _voucher_file_replace_excl() {
     $BB grep -v "^${code} " "$VOUCHER_FILE" > "${VOUCHER_FILE}.tmp" 2>/dev/null || rc=$?
     if [ "$existed" -eq 0 ] || [ "$rc" -le 1 ]; then
         $BB mv "${VOUCHER_FILE}.tmp" "$VOUCHER_FILE"
+        # Force this out to flash now rather than leaving it to the page
+        # cache's own timing - see the matching comment in login.sh.
+        sync
         return 0
     fi
     rm -f "${VOUCHER_FILE}.tmp" 2>/dev/null
@@ -141,6 +144,13 @@ _users_file_stage_excl_paused() {
 }
 _users_file_commit() {
     $BB mv "${USERS_FILE}.tmp" "$USERS_FILE"
+    # Rename is atomic/crash-consistent on ubifs, but that only guarantees
+    # you never see a half-written file - it says nothing about whether
+    # this specific write has actually reached the NAND yet vs. still
+    # sitting dirty in the page cache. Force it out now so a power-cut
+    # moments after an admin kick/add_time/remove_time/remove_user can't
+    # silently roll this request back.
+    sync
     # See the matching comment on _users_file_replace_excl in lmehspt.sh:
     # this tells the runtime self-heal that an empty USERS_FILE right now
     # is expected (e.g. an admin just removed the last/only user), not a
@@ -900,6 +910,7 @@ if echo "$QS" | $BB grep -q "action=voucher_add"; then
     fi
     echo "$CODE $DUR" >> /tmp/vch_add.tmp
     $BB mv /tmp/vch_add.tmp "$VOUCHER_FILE"
+    sync
     _unlock
     ok_json "{\"ok\":true,\"code\":\"$CODE\"}"
 fi
