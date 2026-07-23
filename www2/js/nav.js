@@ -67,6 +67,7 @@ setInterval(function () {
             { label: 'Repurpose as WAN', href: '/wan-repurpose.html' },
             { label: 'Dashboard Layout', href: '/dashboard-layout.html' },
             { label: 'Software Update',  href: '/ota.html'           },
+            { label: 'MIB Configuration', href: '/mibconfig.html'    },
             { label: 'Reboot',           href: '/reboot.html'        },
         ]},
     ];

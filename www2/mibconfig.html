@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
+
+        .file-row {
+            display:flex; align-items:center; justify-content:space-between;
+            gap:10px; padding:10px 0; border-bottom:1px solid rgba(255,255,255,.06);
+        }
+        .file-row:last-child { border-bottom:none; }
+        .file-row-info { min-width:0; }
+        .file-row-name { font-size:13.5px; font-weight:600; color:var(--text-primary); }
+        .file-row-path { font-size:11.5px; color:var(--text-secondary); font-family:monospace; }
+        .file-row-meta { font-size:11px; color:var(--text-secondary); margin-top:2px; }
+        .file-row-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
+
+        .status-pill { display:inline-block; padding:2px 8px; border-radius:3px; font-size:10.5px; font-weight:700; }
+        .status-pill.present { background:rgba(76,175,80,.18); color:#81c784; }
+        .status-pill.missing { background:rgba(158,158,158,.18); color:#aaa; }
+
+        /* reboot countdown card (same treatment as Reboot page) */
+        #reboot-countdown-card {
+            display:none; text-align:center; padding:18px 0 10px;
+        }
+        .big-countdown { font-size:48px; font-weight:700; line-height:1; color:var(--text-primary); }
+        .big-countdown-sub { font-size:13px; color:var(--text-secondary); margin-top:6px; }
+        .countdown-bar-wrap {
+            height:5px; border-radius:3px; background:rgba(255,255,255,.08); margin-top:6px; overflow:hidden;
+        }
+        .countdown-bar { height:100%; border-radius:3px; background:#fff; transition:width 1s linear; }
+
+        code { color:#ccc; font-size:12px; }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <div id="overlay-blur"></div>
+        <div id="overlay-msg">
+            <div id="overlay-spinner"></div>
+            <span id="overlay-text"></span>
+        </div>
+    </div>
+
+    <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
+
+    <div class="container mt-5" id="page-content">
+        <div class="row justify-content-center">
+            <div class="col-md-7">
+
+                <!-- ─── Reboot countdown (shown after an upload triggers one) ─── -->
+                <div class="card mb-4" id="reboot-countdown-wrap" style="display:none;">
+                    <div class="card-body">
+                        <div id="reboot-countdown-card" style="display:block;">
+                            <div class="big-countdown" id="reboot-big-num">60</div>
+                            <div class="big-countdown-sub" id="reboot-sub">Uploading configuration&hellip;</div>
+                            <div class="countdown-bar-wrap mt-3">
+                                <div class="countdown-bar" id="reboot-bar" style="width:100%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ─── Download Configuration ─── -->
+                <div class="card mb-4" id="download-card">
+                    <div class="card-header">Download Configuration</div>
+                    <div class="card-body">
+                        <div class="file-row" data-key="current">
+                            <div class="file-row-info">
+                                <div class="file-row-name">Current Configuration</div>
+                                <div class="file-row-path">/config/config.xml</div>
+                                <div class="file-row-meta" data-meta></div>
+                            </div>
+                            <div class="file-row-actions">
+                                <span class="status-pill" data-pill></span>
+                                <a class="btn btn-sm btn-outline-secondary" data-dl
+                                   href="/cgi-bin/mibconfig.cgi?action=download&file=current" download>Download</a>
+                            </div>
+                        </div>
+                        <div class="file-row" data-key="hs">
+                            <div class="file-row-info">
+                                <div class="file-row-name">Hardware Configuration</div>
+                                <div class="file-row-path">/config/config_hs.xml</div>
+                                <div class="file-row-meta" data-meta></div>
+                            </div>
+                            <div class="file-row-actions">
+                                <span class="status-pill" data-pill></span>
+                                <a class="btn btn-sm btn-outline-secondary" data-dl
+                                   href="/cgi-bin/mibconfig.cgi?action=download&file=hs" download>Download</a>
+                            </div>
+                        </div>
+                        <div class="file-row" data-key="default">
+                            <div class="file-row-info">
+                                <div class="file-row-name">Default Configuration</div>
+                                <div class="file-row-path">/config/config_custom_default.xml</div>
+                                <div class="file-row-meta" data-meta></div>
+                            </div>
+                            <div class="file-row-actions">
+                                <span class="status-pill" data-pill></span>
+                                <a class="btn btn-sm btn-outline-secondary" data-dl
+                                   href="/cgi-bin/mibconfig.cgi?action=download&file=default" download>Download</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ─── Upload Configuration ─── -->
+                <div class="card" id="upload-card">
+                    <div class="card-header">Upload Configuration</div>
+                    <div class="card-body">
+                        <div class="file-row">
+                            <div class="file-row-info">
+                                <div class="file-row-name">Current Configuration</div>
+                                <div class="file-row-path">/config/config.xml</div>
+                            </div>
+                            <div class="file-row-actions">
+                                <button class="btn btn-sm btn-outline-primary" onclick="document.getElementById('up-current').click()">Upload</button>
+                                <input type="file" id="up-current" accept=".xml" style="display:none;" onchange="handleUploadFile('current', this)">
+                            </div>
+                        </div>
+                        <div class="file-row">
+                            <div class="file-row-info">
+                                <div class="file-row-name">Hardware Configuration</div>
+                                <div class="file-row-path">/config/config_hs.xml</div>
+                            </div>
+                            <div class="file-row-actions">
+                                <button class="btn btn-sm btn-outline-primary" onclick="document.getElementById('up-hs').click()">Upload</button>
+                                <input type="file" id="up-hs" accept=".xml" style="display:none;" onchange="handleUploadFile('hs', this)">
+                            </div>
+                        </div>
+                        <p class="field-hint mt-2 mb-0">
+                            Uploading either file overwrites it on the device, syncs it to flash, and reboots
+                            immediately so the change takes effect. You'll lose connectivity for about a minute.
+                        </p>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Upload Confirm Modal ── -->
+    <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered" style="max-width:380px;margin-left:auto;margin-right:auto;">
+            <div class="modal-content" style="border:1px solid var(--border-color);">
+                <div class="modal-header py-2 px-3">
+                    <div class="fw-semibold" style="font-size:14px;">Confirm Upload</div>
+                    <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal" style="font-size:12px;"></button>
+                </div>
+                <div class="modal-body px-3 pb-2 pt-3">
+                    <p style="font-size:13px;margin:0 0 10px;">
+                        This will overwrite <code id="up-modal-path"></code> with
+                        <code id="up-modal-filename"></code> and <strong>reboot the device immediately</strong>.
+                    </p>
+                    <p class="field-hint mb-0">The file currently on the device is backed up to the same path with a <code>.bak</code> suffix first.</p>
+                </div>
+                <div class="modal-footer py-2 px-3" style="border-top:1px solid var(--border-color);">
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-danger" id="up-modal-confirm" onclick="confirmUpload()">Upload &amp; Reboot</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { closeButton:true, progressBar:true, positionClass:'toast-top-right', timeOut:4000 };
+
+var overlay        = document.getElementById('overlay');
+var overlayTxt      = document.getElementById('overlay-text');
+var overlaySpinner  = document.getElementById('overlay-spinner');
+
+function showOverlay(msg, spinning) {
+    overlayTxt.textContent = msg;
+    overlaySpinner.style.display = (spinning === false) ? 'none' : '';
+    overlay.classList.add('visible');
+}
+function hideOverlay(cb) {
+    overlay.classList.remove('visible');
+    if (cb) setTimeout(cb, 360);
+}
+
+var REBOOT_WAIT_SECS = 90;
+var POLL_INTERVAL    = 2000;
+
+var PATHS = {
+    current: '/config/config.xml',
+    hs:      '/config/config_hs.xml',
+    default: '/config/config_custom_default.xml'
+};
+
+/* ── Load file metadata (size / exists) ── */
+function fmtBytes(n) {
+    if (!n) return '0 B';
+    var u = ['B','KB','MB','GB'], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+}
+function fmtDate(unixSecs) {
+    if (!unixSecs) return '';
+    var d = new Date(unixSecs * 1000);
+    return d.toLocaleString();
+}
+
+function loadFileList() {
+    fetch('/cgi-bin/mibconfig.cgi?action=list', { cache: 'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (!d.ok) return;
+            Object.keys(d.files).forEach(function(key){
+                var info = d.files[key];
+                var row  = document.querySelector('.file-row[data-key="' + key + '"]');
+                if (!row) return;
+                var pill = row.querySelector('[data-pill]');
+                var meta = row.querySelector('[data-meta]');
+                var dl   = row.querySelector('[data-dl]');
+                if (info.exists) {
+                    pill.textContent = 'present';
+                    pill.classList.add('present');
+                    meta.textContent = fmtBytes(info.size) + ' \u00b7 modified ' + fmtDate(info.mtime);
+                } else {
+                    pill.textContent = 'missing';
+                    pill.classList.add('missing');
+                    meta.textContent = 'Not present on this device';
+                    if (dl) { dl.classList.add('disabled'); dl.removeAttribute('href'); dl.style.pointerEvents = 'none'; }
+                }
+            });
+        })
+        .catch(function(){ /* leave defaults, download links still work on click */ });
+}
+loadFileList();
+
+/* ── Upload flow ── */
+var _upModal = null;
+var _upTarget = null;
+var _upFileText = null;
+var _upFileName = null;
+
+function handleUploadFile(target, input) {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    _upTarget = target;
+    _upFileName = file.name;
+
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        // readAsDataURL gives "data:<mime>;base64,<data>" - keep the part after the comma
+        var dataUrl = e.target.result;
+        var comma = dataUrl.indexOf(',');
+        _upFileText = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+
+        document.getElementById('up-modal-path').textContent = PATHS[target];
+        document.getElementById('up-modal-filename').textContent = _upFileName;
+
+        if (!_upModal) _upModal = new bootstrap.Modal(document.getElementById('uploadModal'));
+        _upModal.show();
+    };
+    reader.onerror = function() { toastr.error('Could not read file'); };
+    reader.readAsDataURL(file);
+
+    // Reset so selecting the same file again still fires onchange
+    input.value = '';
+}
+
+function confirmUpload() {
+    if (!_upFileText || !_upTarget) { toastr.error('No file loaded'); return; }
+    _upModal.hide();
+
+    document.getElementById('download-card').style.display = 'none';
+    document.getElementById('upload-card').style.display = 'none';
+    document.getElementById('reboot-countdown-wrap').style.display = '';
+    document.getElementById('reboot-sub').textContent = 'Uploading configuration\u2026';
+
+    fetch('/cgi-bin/mibconfig.cgi?action=upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'target=' + encodeURIComponent(_upTarget) + '&data=' + encodeURIComponent(_upFileText)
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok) {
+            startRebootCountdown();
+        } else {
+            showUploadFailure('Upload failed: ' + (d.error || ''));
+        }
+    })
+    .catch(function(){
+        // Network dropped right as the device rebooted - that's expected
+        startRebootCountdown();
+    });
+
+    _upFileText = null; _upFileName = null; _upTarget = null;
+}
+
+function showUploadFailure(msg) {
+    document.getElementById('reboot-countdown-wrap').style.display = 'none';
+    document.getElementById('download-card').style.display = '';
+    document.getElementById('upload-card').style.display = '';
+    toastr.error(msg);
+}
+
+function startRebootCountdown() {
+    document.getElementById('reboot-sub').textContent = 'Rebooting\u2026 page will reload when the device comes back up.';
+
+    var secs = REBOOT_WAIT_SECS;
+    var bigNum = document.getElementById('reboot-big-num');
+    var bar    = document.getElementById('reboot-bar');
+
+    bigNum.textContent = secs;
+    bar.style.width = '100%';
+
+    var tick = setInterval(function() {
+        secs--;
+        bigNum.textContent = Math.max(0, secs);
+        bar.style.width = Math.max(0, (secs / REBOOT_WAIT_SECS * 100)) + '%';
+        if (secs <= 0) {
+            clearInterval(tick);
+            pollUntilBack();
+        }
+    }, 1000);
+}
+
+function pollUntilBack() {
+    var bigNum = document.getElementById('reboot-big-num');
+    bigNum.textContent = '\u21ba';
+    document.getElementById('reboot-sub').textContent = 'Waiting for device to come back\u2026';
+
+    var attempts = 0;
+    var maxAttempts = 60;
+
+    var poll = setInterval(function() {
+        attempts++;
+        fetch('/cgi-bin/check_auth.cgi', { cache: 'no-store' })
+            .then(function(r) { return r.text(); })
+            .then(function(t) {
+                if (t.trim() === 'authenticated' || t.trim() === 'ok') {
+                    clearInterval(poll);
+                    window.location.reload();
+                }
+            })
+            .catch(function() {/* still down */});
+        if (attempts >= maxAttempts) {
+            clearInterval(poll);
+            document.getElementById('reboot-sub').textContent =
+                'Device may still be booting. Try refreshing manually.';
+        }
+    }, POLL_INTERVAL);
+}
+</script>
+</body>
+</html>

@@ -39,6 +39,10 @@ case "${CONTENT_LENGTH:-0}" in *[!0-9]*|"") CONTENT_LENGTH=0 ;; esac
 _ACT_PRE=$(echo "$QUERY_STRING" | grep -o 'action=[^&]*' | sed 's/action=//')
 if [ "$_ACT_PRE" = "portal_upload" ] || [ "$_ACT_PRE" = "portal_audio_upload" ]; then
     [ "$CONTENT_LENGTH" -gt 15728640 ] && CONTENT_LENGTH=15728640
+elif [ "$_ACT_PRE" = "users_import" ]; then
+    # A url-encoded users.txt (colons/spaces expand to %XX) needs more room
+    # than the default cap for any deployment beyond a handful of users.
+    [ "$CONTENT_LENGTH" -gt 1048576  ] && CONTENT_LENGTH=1048576
 else
     [ "$CONTENT_LENGTH" -gt 65536   ] && CONTENT_LENGTH=65536
 fi
@@ -722,6 +726,58 @@ if echo "$QS" | $BB grep -q "action=add_time"; then
 fi
 
 # ================================================================
+# POST ?action=create_session   body: mac=xx:xx:xx:xx:xx:xx&minutes=N
+# Manual admin entry: creates a brand-new ACTIVE session for a MAC
+# that has no session yet. Unlike add_time (which happily extends or
+# creates), this REFUSES outright if the MAC already has an active or
+# paused session - use +Time on the existing row for that instead.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=create_session"; then
+    read -n "$CONTENT_LENGTH" POST_DATA
+    MAC=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*mac=\([^&]*\).*/\1/p' | urldecode | $BB tr 'A-Z' 'a-z' | $BB tr -cd 'a-f0-9:')
+    MINS=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*minutes=\([^&]*\).*/\1/p' | $BB tr -cd '0-9')
+    [ -z "$MAC" ]  && err_json "missing_mac"
+    [ -z "$MINS" ] && err_json "missing_minutes"
+    [ "$MINS" -le 0 ] 2>/dev/null && err_json "bad_minutes"
+
+    # Manual entry has no ARP/DHCP source to sanity-check against (every
+    # other action here only ever sees MACs the router itself already
+    # observed), so require a strict xx:xx:xx:xx:xx:xx shape before it's
+    # allowed anywhere near iptables --mac-source or the session files.
+    case "$MAC" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+        *) err_json "bad_mac" ;;
+    esac
+
+    ADD=$(( MINS * 60 ))
+    UPTIME=$($BB awk '{print int($1)}' /proc/uptime)
+
+    _lock
+    # Duplicate guard: same two places add_time checks for an existing
+    # session (live RAM table, then the flash-persisted paused row).
+    if [ -f "$SESSION_DATA" ] && $BB grep -q "^$MAC " "$SESSION_DATA"; then
+        _unlock; err_json "session_exists"
+    fi
+    if [ -f "$USERS_FILE" ] && $BB grep -q "^$MAC paused " "$USERS_FILE"; then
+        _unlock; err_json "session_exists"
+    fi
+
+    mkdir -p "$HDATA"; touch "$SESSION_DATA"; touch "$USERS_FILE"
+    echo "$MAC $(( UPTIME + ADD )) $ADD" >> "$SESSION_DATA"
+
+    if _users_file_stage_excl "$MAC"; then
+        echo "$MAC active $ADD $ADD $(_fmt_secs "$ADD")" >> "${USERS_FILE}.tmp"
+        _users_file_commit
+    fi
+
+    iptables -t nat    -I HOTSPOT     1 -m mac --mac-source "$MAC" -j RETURN 2>/dev/null
+    iptables -t filter -I HOTSPOT_FWD 1 -m mac --mac-source "$MAC" -j ACCEPT 2>/dev/null
+    _unlock
+
+    ok_json "{\"ok\":true,\"mac\":\"$MAC\",\"added\":$ADD}"
+fi
+
+# ================================================================
 # POST ?action=remove_time   body: mac=xx:xx:..&minutes=N
 # Subtracts N minutes from an active or paused session.
 # Clamps to a minimum of 60 s remaining so the session is never
@@ -809,6 +865,135 @@ if echo "$QS" | $BB grep -q "action=remove_user"; then
     [ -f /tmp/hotspot_ip_map.txt ] && { $BB grep -v "^$MAC " /tmp/hotspot_ip_map.txt > /tmp/rm_i.tmp;           $BB mv /tmp/rm_i.tmp /tmp/hotspot_ip_map.txt; }
 
     ok_json "{\"ok\":true,\"mac\":\"$MAC\"}"
+fi
+
+# ================================================================
+# GET ?action=users_export
+# Streams the raw persistent users.txt database back as plain text so
+# the admin can save it as a backup or move it to another box. Same
+# row format action=users_import reads back in.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=users_export"; then
+    _lock
+    EXPORT_DATA=$($BB cat "$USERS_FILE" 2>/dev/null)
+    _unlock
+    printf "Status: 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+    printf '%s\n' "$EXPORT_DATA"
+    exit 0
+fi
+
+# ================================================================
+# POST ?action=users_import   body: mode=overwrite|merge & data=<users.txt text>
+# overwrite: wipes every current user (active sessions get kicked and
+#            their firewall rule dropped first) and replaces the whole
+#            database with the imported rows.
+# merge:     keeps every current user; a MAC present in BOTH the current
+#            database and the imported file is overwritten with the
+#            imported file's value, everything else is left untouched.
+# Every imported row lands as "paused" regardless of its original
+# status - import only ever seeds a balance, it never opens a firewall
+# rule on its own. A device is promoted back to active the normal way,
+# through the captive portal's own login/resume flow, exactly like any
+# other paused row.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=users_import"; then
+    read -n "$CONTENT_LENGTH" POST_DATA
+
+    fget() {
+        printf '%s' "$POST_DATA" \
+            | $BB tr '&' '\n' \
+            | $BB grep "^$1=" \
+            | $BB sed 's/^[^=]*=//' \
+            | urldecode \
+            | head -1
+    }
+
+    MODE=$(fget mode | $BB tr -cd 'a-z')
+    case "$MODE" in overwrite|merge) ;; *) err_json "bad_mode" ;; esac
+
+    # data may be many lines - unlike fget's single-value fields this one
+    # must NOT be truncated to the first line, so it's pulled out by hand.
+    RAW=$(printf '%s' "$POST_DATA" | $BB tr '&' '\n' | $BB grep "^data=" | $BB sed 's/^data=//' | urldecode)
+    [ -z "$RAW" ] && err_json "no_data"
+
+    # Sanitize: keep only well-formed "mac ... remaining total ..." rows,
+    # normalize the MAC to lowercase, dedup by MAC (last occurrence in the
+    # uploaded file wins). Nothing past this point reads the raw upload -
+    # only this filtered, validated set ever reaches users.txt.
+    IMPORT_TMP=$(mktemp /tmp/users_import.XXXXXX)
+    TOTAL_LINES=$(printf '%s\n' "$RAW" | $BB tr -d '\r' | $BB grep -c '[^[:space:]]')
+    printf '%s\n' "$RAW" | $BB tr -d '\r' | $BB awk '
+        {
+            mac = tolower($1)
+            if (mac !~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/) next
+            rem = $3; tot = $4
+            if (rem !~ /^[0-9]+$/ || rem+0 <= 0) next
+            if (tot !~ /^[0-9]+$/ || tot+0 <= 0) tot = rem
+            val[mac] = mac " " rem " " tot
+        }
+        END { for (m in val) print val[m] }
+    ' > "$IMPORT_TMP"
+
+    IMPORTED_COUNT=$($BB grep -c '.' "$IMPORT_TMP" 2>/dev/null); [ -z "$IMPORTED_COUNT" ] && IMPORTED_COUNT=0
+    if [ "$IMPORTED_COUNT" -eq 0 ]; then
+        rm -f "$IMPORT_TMP"
+        err_json "no_valid_rows"
+    fi
+    SKIPPED_COUNT=$(( TOTAL_LINES - IMPORTED_COUNT )); [ "$SKIPPED_COUNT" -lt 0 ] && SKIPPED_COUNT=0
+
+    _lock
+    mkdir -p "$HDATA"; touch "$USERS_FILE"; touch "$SESSION_DATA"
+
+    if [ "$MODE" = "overwrite" ]; then
+        # Full reset: nothing from the current database survives, so revoke
+        # every currently-active MAC's firewall rule and clear RAM state
+        # before the persistent file is replaced wholesale below.
+        while read -r mac expiry total; do
+            [ -n "$mac" ] || continue
+            iptables -t nat    -D HOTSPOT     -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+            iptables -t filter -D HOTSPOT_FWD -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+        done < "$SESSION_DATA"
+        : > "$SESSION_DATA"
+        BASE_SRC="/dev/null"
+    else
+        # Merge: any imported MAC that's currently active gets pulled out of
+        # RAM and its rule revoked first, so a live active-in-RAM record
+        # never sits alongside the freshly-imported paused row for the same
+        # MAC once the database is rewritten below.
+        while read -r mac expiry total; do
+            [ -n "$mac" ] || continue
+            if $BB grep -q "^$mac " "$IMPORT_TMP"; then
+                iptables -t nat    -D HOTSPOT     -m mac --mac-source "$mac" -j RETURN 2>/dev/null
+                iptables -t filter -D HOTSPOT_FWD -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+            fi
+        done < "$SESSION_DATA"
+        $BB awk -v importf="$IMPORT_TMP" '
+            BEGIN { while ((getline line < importf) > 0) { split(line, a, " "); skip[a[1]] = 1 } }
+            { if (!($1 in skip)) print }
+        ' "$SESSION_DATA" > /tmp/ui_s.tmp && $BB mv /tmp/ui_s.tmp "$SESSION_DATA"
+        BASE_SRC="$USERS_FILE"
+    fi
+
+    # Existing rows not being overwritten (empty set in overwrite mode),
+    # followed by every imported row - written in as paused with the time
+    # column recomputed fresh.
+    {
+        if [ "$BASE_SRC" != "/dev/null" ] && [ -f "$BASE_SRC" ]; then
+            $BB awk -v importf="$IMPORT_TMP" '
+                BEGIN { while ((getline line < importf) > 0) { split(line, a, " "); skip[a[1]] = 1 } }
+                { if (!($1 in skip)) print }
+            ' "$BASE_SRC"
+        fi
+        while read -r mac rem tot; do
+            [ -n "$mac" ] || continue
+            echo "$mac paused $rem $tot $(_fmt_secs "$rem")"
+        done < "$IMPORT_TMP"
+    } > "${USERS_FILE}.tmp"
+    _users_file_commit
+    rm -f "$IMPORT_TMP"
+    _unlock
+
+    ok_json "{\"ok\":true,\"mode\":\"$MODE\",\"imported\":$IMPORTED_COUNT,\"skipped\":$SKIPPED_COUNT}"
 fi
 
 # ================================================================

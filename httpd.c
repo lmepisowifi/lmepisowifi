@@ -1,11 +1,12 @@
 /* vi: set sw=4 ts=4: */
 /*
  * httpd implementation for busybox
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * Copyright (C) 2002,2003 Glenn Engel <glenne@engel.org>
  * Copyright (C) 2003-2006 Vladimir Oleynik <dzo@simtreas.ru>
  *
- * Licensed under GPLv2 or later, see file LICENSE in this source tree.
+ * Licensed under GPLv2 or later, see file LICENSES/GPL-2.0-or-later.txt in this source tree.
  *
  *****************************************************************************
  *
