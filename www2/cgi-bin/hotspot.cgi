@@ -351,6 +351,8 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
     AT_BOOL="false"; [ "${AT:-0}" = "1" ] && AT_BOOL="true"
     LI="${LAN_ISOLATE:-$(read_lmehspt_var LAN_ISOLATE)}"
     LI_BOOL="true"; [ "${LI:-1}" = "0" ] && LI_BOOL="false"
+    MRF="${MAC_RANDOMIZATION_FIX:-$(read_lmehspt_var MAC_RANDOMIZATION_FIX)}"
+    MRF_BOOL="true"; [ "${MRF:-1}" = "0" ] && MRF_BOOL="false"
 
     HSP_RUNNING="false"; hotspot_running && HSP_RUNNING="true"
     COIN_ON="false"; [ -f /tmp/coin_enabled ] && COIN_ON="true"
@@ -378,6 +380,7 @@ if echo "$QS" | $BB grep -q "action=config_get"; then
 \"hotspot_interfaces\":\"$(esc_json "$HIF")\",
 \"anti_tether\":$AT_BOOL,
 \"lan_isolate\":$LI_BOOL,
+\"mac_randomization_fix\":$MRF_BOOL,
 \"hotspot_running\":$HSP_RUNNING}"
 fi
 
@@ -1191,6 +1194,35 @@ if echo "$QS" | $BB grep -q "action=lan_isolate_set"; then
         set_globals_var   "LAN_ISOLATE" "0"
         ok_json '{"ok":true,"lan_isolate":false}'
     fi
+fi
+
+# ================================================================
+# POST ?action=mac_fix_set   body: enabled=1|0
+# Toggles the cookie-based MAC-randomization session-continuity fix (see
+# /lmepisowifi/hotspot/macfix.sh). Unlike anti-tether/LAN-isolate there's no
+# firewall chain to build or tear down here — it only changes how the
+# portal's own CGI scripts (login.sh/status.sh/logout.sh) look up a
+# returning device — so this just persists the flag across all three
+# config tiers, same as every other simple on/off toggle.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=mac_fix_set"; then
+    read -n "${CONTENT_LENGTH:-0}" POST_DATA
+    VAL=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*enabled=\([^&]*\).*/\1/p')
+    case "$VAL" in
+        1)
+            save_coin_env_var "MAC_RANDOMIZATION_FIX" "1"
+            set_lmehspt_var   "MAC_RANDOMIZATION_FIX" "1"
+            set_globals_var   "MAC_RANDOMIZATION_FIX" "1"
+            ok_json '{"ok":true,"mac_randomization_fix":true}'
+            ;;
+        0)
+            save_coin_env_var "MAC_RANDOMIZATION_FIX" "0"
+            set_lmehspt_var   "MAC_RANDOMIZATION_FIX" "0"
+            set_globals_var   "MAC_RANDOMIZATION_FIX" "0"
+            ok_json '{"ok":true,"mac_randomization_fix":false}'
+            ;;
+        *) err_json "bad_value" ;;
+    esac
 fi
 
 # ================================================================

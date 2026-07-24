@@ -7,6 +7,11 @@ VOUCHER_FILE="/lmepisowifi/hotspot_data/vouchers.txt"
 
 # Customizable Telegram/Discord message templates
 [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
+# Live-updatable toggles (MAC_RANDOMIZATION_FIX among them) written by
+# lmehspt.sh / hotspot.cgi — same cache coin.sh/coin_result.sh already use.
+[ -f /tmp/coin_config.env ] && . /tmp/coin_config.env
+# MAC-randomization session-continuity fix (cookie-based device fingerprint)
+[ -f /lmepisowifi/hotspot/macfix.sh ] && . /lmepisowifi/hotspot/macfix.sh
 
 _unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
@@ -115,9 +120,25 @@ else
     NOW=$(date +%s)
 fi
 
+# 1b. Resolve the client's MAC now — ahead of the rate-limiter/DOS checks
+# below, which never look at it — purely so a device-fingerprint cookie can
+# be verified/refreshed as part of this response's one-and-only header
+# block. Same /proc/net/arp lookup this script always did, just done once,
+# here, instead of a second time further down (see step 5, where it used to
+# live — CLIENT_MAC is used as-is from here on).
+CLIENT_IP="$REMOTE_ADDR"
+CLIENT_MAC=$(
+    $BB cat /proc/net/arp \
+    | $BB grep "^$CLIENT_IP " \
+    | $BB awk '{print $4}' \
+    | $BB head -1
+)
+mf_reconcile
+
 # 2. Output HTTP Headers EXACTLY ONCE
 echo "Content-type: application/json"
 echo "Cache-Control: no-store"
+[ -n "$MF_COOKIE_HEADER" ] && echo "$MF_COOKIE_HEADER"
 echo ""
 
 # 3. Zero-Fork Rate Limiter Interceptor
@@ -160,14 +181,6 @@ RESUME=$(
     | $BB grep '^resume=' \
     | $BB cut -d '=' -f 2- \
     | $BB tr -dc '0-9'
-)
-
-CLIENT_IP="$REMOTE_ADDR"
-CLIENT_MAC=$(
-    $BB cat /proc/net/arp \
-    | $BB grep "^$CLIENT_IP " \
-    | $BB awk '{print $4}' \
-    | $BB head -1
 )
 
 if [ -z "$CLIENT_MAC" ] || [ "$CLIENT_MAC" = "00:00:00:00:00:00" ]; then

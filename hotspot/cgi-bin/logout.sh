@@ -8,6 +8,11 @@ USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
 # harmless if the file is missing — tpl_render just won't be defined and
 # the guarded call below is skipped.
 [ -f /lmepisowifi/hotspot/notify_templates.sh ] && . /lmepisowifi/hotspot/notify_templates.sh
+# Live-updatable toggles (MAC_RANDOMIZATION_FIX among them) written by
+# lmehspt.sh / hotspot.cgi — same cache coin.sh/coin_result.sh already use.
+[ -f /tmp/coin_config.env ] && . /tmp/coin_config.env
+# MAC-randomization session-continuity fix (cookie-based device fingerprint)
+[ -f /lmepisowifi/hotspot/macfix.sh ] && . /lmepisowifi/hotspot/macfix.sh
 
 _unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
@@ -97,10 +102,6 @@ _users_file_commit() {
     if [ -s "$USERS_FILE" ]; then rm -f /tmp/hotspot_users_empty_expected 2>/dev/null; else : > /tmp/hotspot_users_empty_expected 2>/dev/null; fi
 }
 
-$BB echo "Content-type: application/json"
-$BB echo "Cache-Control: no-store"
-$BB echo ""
-
 CLIENT_IP="$REMOTE_ADDR"
 CLIENT_MAC=$(
     $BB cat /proc/net/arp \
@@ -108,6 +109,16 @@ CLIENT_MAC=$(
     | $BB awk '{print $4}' \
     | $BB head -1
 )
+# Verify/refresh this browser's fingerprint cookie and, if it was last seen
+# on a different MAC, migrate its live session/firewall rule onto the
+# current one first — so a manual Pause tap finds the right session even
+# if the phone's MAC rotated moments before this request.
+mf_reconcile
+
+$BB echo "Content-type: application/json"
+$BB echo "Cache-Control: no-store"
+[ -n "$MF_COOKIE_HEADER" ] && $BB echo "$MF_COOKIE_HEADER"
+$BB echo ""
 
 if [ -z "$CLIENT_MAC" ] || [ "$CLIENT_MAC" = "00:00:00:00:00:00" ]; then
     $BB echo '{"ok":false,"error":"no_mac"}'

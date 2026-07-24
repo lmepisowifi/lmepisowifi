@@ -43,6 +43,7 @@ IP_MAP_FILE="/tmp/hotspot_ip_map.txt"
 HOTSPOT_ENABLED="1"
 ANTI_TETHER="1"
 LAN_ISOLATE="1"
+MAC_RANDOMIZATION_FIX="1"
 # Any address in these ranges is private (RFC1918) and, by definition, can
 # only ever be a LAN device — ours, or someone else's upstream gateway in a
 # chained/double-NAT setup (e.g. a repurposed-WAN uplink whose own gateway
@@ -1255,6 +1256,7 @@ write_coin_config() {
         printf 'PORTAL_PORT="%s"\n'         "$PORTAL_PORT"
         printf 'ANTI_TETHER="%s"\n'         "${ANTI_TETHER:-0}"
         printf 'LAN_ISOLATE="%s"\n'         "${LAN_ISOLATE:-1}"
+        printf 'MAC_RANDOMIZATION_FIX="%s"\n' "${MAC_RANDOMIZATION_FIX:-1}"
     } > /tmp/coin_config.env
     if [ "$COIN_ENABLED" = "1" ]; then
         touch /tmp/coin_enabled

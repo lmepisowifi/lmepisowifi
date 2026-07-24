@@ -5,6 +5,12 @@ SESSION_FILE="/tmp/active_sessions.txt"
 USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
 HOTSPOT_BR="br1"
 
+# Live-updatable toggles (MAC_RANDOMIZATION_FIX among them) written by
+# lmehspt.sh / hotspot.cgi — same cache coin.sh/coin_result.sh already use.
+[ -f /tmp/coin_config.env ] && . /tmp/coin_config.env
+# MAC-randomization session-continuity fix (cookie-based device fingerprint)
+[ -f /lmepisowifi/hotspot/macfix.sh ] && . /lmepisowifi/hotspot/macfix.sh
+
 _unlock() { rm -f /tmp/hotspot_session.lock/pid 2>/dev/null; rmdir /tmp/hotspot_session.lock 2>/dev/null; }
 _lock() {
     local i=0
@@ -32,10 +38,6 @@ _lock() {
     trap _unlock EXIT INT TERM
 }
 
-$BB echo "Content-type: application/json"
-$BB echo "Cache-Control: no-store"
-$BB echo ""
-
 CLIENT_IP="$REMOTE_ADDR"
 CLIENT_MAC=$(
     $BB cat /proc/net/arp \
@@ -43,6 +45,15 @@ CLIENT_MAC=$(
     | $BB awk '{print $4}' \
     | $BB head -1
 )
+# Verify/refresh this browser's fingerprint cookie and, if it was last seen
+# on a different MAC (a randomized-MAC reconnect), migrate its live
+# session/firewall rule onto the current one before the lookups below run.
+mf_reconcile
+
+$BB echo "Content-type: application/json"
+$BB echo "Cache-Control: no-store"
+[ -n "$MF_COOKIE_HEADER" ] && $BB echo "$MF_COOKIE_HEADER"
+$BB echo ""
 
 if [ -z "$CLIENT_MAC" ] || [ "$CLIENT_MAC" = "00:00:00:00:00:00" ]; then
     $BB echo '{"logged_in":false,"error":"no_mac"}'
