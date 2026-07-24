@@ -1,9 +1,0 @@
-defaults.env
-globals.env
-lmehspt.sh
-hotspot/macfix.sh
-hotspot/cgi-bin/login.sh
-hotspot/cgi-bin/logout.sh
-hotspot/cgi-bin/status.sh
-www2/hotspot.html
-www2/cgi-bin/hotspot.cgi
