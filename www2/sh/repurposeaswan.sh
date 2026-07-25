@@ -98,6 +98,26 @@ _hotspot_br() {
     printf '%s' "${_hb:-br1}"
 }
 
+# ── Helper: true if TARGET_IFACE is a wlan*-vxd that is disabled in the MIB ──
+# VXD interfaces live at slot 5 of their radio's MBSSIB table:
+#   wlan0-vxd → WLAN_MBSSIB_TBL.5.wlanDisabled
+#   wlan1-vxd → WLAN1_MBSSIB_TBL.5.wlanDisabled
+# Non-VXD interfaces (LAN ports, main wlan0/wlan1) always return false —
+# they have no per-MBSSIB slot 5 disable bit owned by wlanbasic.cgi.
+_vxd_mib_disabled() {
+    local _tbl
+    case "$TARGET_IFACE" in
+        wlan0-vxd) _tbl="WLAN_MBSSIB_TBL"  ;;
+        wlan1-vxd) _tbl="WLAN1_MBSSIB_TBL" ;;
+        *)          return 1                  ;;
+    esac
+    _VD=$(mib get "${_tbl}.5.wlanDisabled" 2>/dev/null \
+        | busybox grep '=' \
+        | busybox cut -d'=' -f2- \
+        | busybox tr -d '\r\n')
+    [ "${_VD:-0}" = "1" ]
+}
+
 # ── Helper: true if our udhcpc PID is alive ───────────────────────────────────
 _udhcpc_alive() {
     if [ -f "$UDHCPC_PID" ]; then
@@ -235,6 +255,21 @@ while true; do
         printf '[%s] State changed to "%s" — exiting\n' \
             "$(busybox date)" "$_CUR" >> "$LOG"
         rm -f "$PID_FILE"
+        exit 0
+    fi
+
+    # ── VXD MIB disable check ─────────────────────────────────────────────────
+    # When the user disables a wlan*-vxd interface via wlanbasic.cgi, it sets
+    # WLAN*_MBSSIB_TBL.5.wlanDisabled=1 and calls wlan_apply, which instructs
+    # the driver to bring the VXD kernel interface down.  Without this check the
+    # watchdog would detect the DOWN state at check 2 and fight the driver by
+    # immediately forcing it UP again — every 15 seconds, indefinitely.
+    # Read the authoritative MIB bit so the decision is not affected by
+    # transient kernel interface states.
+    if _vxd_mib_disabled; then
+        printf '[%s] %s: wlanDisabled=1 in MIB — stopping repurpose watchdog\n' \
+            "$(busybox date)" "$TARGET_IFACE" >> "$LOG"
+        rm -f "$STATE_FILE" "$PID_FILE"
         exit 0
     fi
 

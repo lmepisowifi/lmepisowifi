@@ -264,31 +264,12 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         mib set "WIFI_STA_CONTROL" "$FORM_BSTEER"
         mib commit
         dbg "save_bandsteer: applied WIFI_STA_CONTROL=$FORM_BSTEER"
+        # wlan_apply restart brings both interfaces down then up, which triggers
+        # stactrl_init() on each radio. stactrl_init() reads stactrl_prefer_band
+        # from pmib and derives the correct asymmetric runtime state
+        # (stactrl_prefer=1 on the preferred radio, 0 on the non-preferred).
+        # libmib.so sets these MIBs correctly, so the restart alone is sufficient.
         wlan_apply restart
-
-        # libmib.so pushes the WRONG per-radio stactrl_prefer_band values into
-        # the driver on every `wlan_apply restart` (the inverted-preference
-        # bug). Kick off the watchdog in the background to wait for the radios
-        # to come back and re-assert the correct iwpriv state. A few spaced
-        # passes catch the case where libmib clobbers the driver slightly after
-        # the interfaces reappear. Only relevant when steering is enabled (1/3).
-        if [ "$FORM_BSTEER" = "1" ] || [ "$FORM_BSTEER" = "3" ]; then
-            (
-                _T=0
-                while [ "$_T" -lt 60 ]; do
-                    if ifconfig wlan0 >/dev/null 2>&1 \
-                       && ifconfig wlan1 >/dev/null 2>&1; then
-                        break
-                    fi
-                    sleep 1
-                    _T=$((_T + 1))
-                done
-                sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
-                sleep 5;  sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
-                sleep 10; sh /lmepisowifi/www2/sh/bandsteer_watchdog.sh once
-            ) &
-            dbg "save_bandsteer: launched band steering watchdog"
-        fi
 
         printf "Status: 200 OK\r\n"
         printf "Content-Type: text/plain\r\n\r\n"
