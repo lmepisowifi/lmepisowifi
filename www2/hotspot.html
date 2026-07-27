@@ -194,6 +194,16 @@
         </div>
         <div class="card-body">
             <div class="row g-3">
+                <div class="col-sm-8">
+                    <label class="form-label">Title <span class="field-hint d-inline">(shown to customers when multiple units exist)</span></label>
+                    <input type="text" class="form-control" id="c-nodemcu-title" placeholder="Coin Slot" maxlength="40">
+                </div>
+                <div class="col-sm-4 d-flex align-items-end">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="c-nodemcu-enabled">
+                        <label class="form-check-label" for="c-nodemcu-enabled">In service</label>
+                    </div>
+                </div>
                 <div class="col-sm-6">
                     <label class="form-label">NodeMCU IP</label>
                     <input type="text" class="form-control" id="c-nodemcu-ip" placeholder="192.168.99.2">
@@ -233,6 +243,16 @@
                     <div class="field-hint">Peso amounts and time durations customers can purchase</div>
                 </div>
                 <a href="/hotspot-rates.html" class="btn btn-outline-primary btn-sm">Manage WiFi Rates &rarr;</a>
+            </div>
+
+            <!-- Additional NodeMCUs -->
+            <hr class="my-3" style="border-color:var(--border-color);">
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div>
+                    <label class="form-label mb-0">Additional NodeMCUs</label>
+                    <div class="field-hint">Run more than one coin acceptor — customers pick a slot by title</div>
+                </div>
+                <a href="/hotspot-nodemcus.html" class="btn btn-outline-primary btn-sm">Manage NodeMCUs &rarr;</a>
             </div>
 
             <hr class="my-3" style="border-color:var(--border-color);">
@@ -330,6 +350,8 @@ function loadConfig(){
             setAutoPauseUI(d.auto_pause_enabled===true||d.auto_pause_enabled==='1'||d.auto_pause_enabled===1);
             document.getElementById('c-nodemcu-ip').value    = d.nodemcu_ip||'';
             document.getElementById('c-nodemcu-mac').value   = d.nodemcu_mac||'';
+            document.getElementById('c-nodemcu-title').value = d.nodemcu_1_title||'';
+            document.getElementById('c-nodemcu-enabled').checked = !(d.nodemcu_1_enabled===false||d.nodemcu_1_enabled==='0'||d.nodemcu_1_enabled===0);
             document.getElementById('c-coin-timeout').value  = d.coin_timeout||'';
             document.getElementById('c-strike-threshold').value = d.coin_strike_threshold||'';
             document.getElementById('c-cooldown').value       = d.coin_cooldown||'';
@@ -464,6 +486,8 @@ function saveCoin(){
     var p={
         nodemcu_ip:     document.getElementById('c-nodemcu-ip').value.trim(),
         nodemcu_mac:    document.getElementById('c-nodemcu-mac').value.trim().replace(/:/g,'').toLowerCase(),
+        nodemcu_1_title:   document.getElementById('c-nodemcu-title').value.trim(),
+        nodemcu_1_enabled: document.getElementById('c-nodemcu-enabled').checked ? '1' : '0',
         coin_timeout:   document.getElementById('c-coin-timeout').value.trim(),
         coin_psk:       document.getElementById('c-coin-psk').value,
         coin_strike_threshold: document.getElementById('c-strike-threshold').value.trim(),
@@ -472,6 +496,8 @@ function saveCoin(){
     showOverlay('Saving coin settings…');
     var body='nodemcu_ip='+encodeURIComponent(p.nodemcu_ip)
         +'&nodemcu_mac='+encodeURIComponent(p.nodemcu_mac)
+        +'&nodemcu_1_title='+encodeURIComponent(p.nodemcu_1_title)
+        +'&nodemcu_1_enabled='+encodeURIComponent(p.nodemcu_1_enabled)
         +'&coin_timeout='+encodeURIComponent(p.coin_timeout)
         +'&coin_psk='+encodeURIComponent(p.coin_psk)
         +'&coin_strike_threshold='+encodeURIComponent(p.coin_strike_threshold)

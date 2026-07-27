@@ -55,6 +55,7 @@ setInterval(function () {
             { label: 'Income & Alerts', href: '/hotspot-income.html',    hotspot: 'always'  },
             { label: 'Portal',          href: '/hotspot-portal.html',    hotspot: 'always'  },
             { label: 'WiFi Rates',      href: '/hotspot-rates.html',     hotspot: 'enabled' },
+            { label: 'NodeMCUs',        href: '/hotspot-nodemcus.html',  hotspot: 'enabled' },
             { label: 'Sessions',        href: '/hotspot-sessions.html',  hotspot: 'enabled' },
             { label: 'Vouchers',        href: '/hotspot-vouchers.html',  hotspot: 'enabled' },
             { label: 'Whitelist',       href: '/hotspot-whitelist.html', hotspot: 'enabled' },

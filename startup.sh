@@ -63,12 +63,28 @@
         . /tmp/coin_config.env
         [ -n "$COIN_PSK" ] || exit 0
 
+        # PSK for a given node id — mirrors coin.sh/coin_result.sh's
+        # _node_field lookup, just scoped to the one column this loop needs.
+        _node_psk() {
+            if [ "$1" = "1" ] || [ -z "$1" ]; then
+                printf '%s' "$COIN_PSK"
+                return
+            fi
+            [ -n "$NODEMCU_EXTRA_FILE" ] && [ -f "$NODEMCU_EXTRA_FILE" ] || return 0
+            awk -F'|' -v id="$1" '$1==id {print $6; exit}' "$NODEMCU_EXTRA_FILE"
+        }
+
         for f in "$COIN_PENDING_DIR"/*; do
             [ -f "$f" ] || continue          # empty dir → literal glob, skip
             case "$f" in *.tmp) continue ;; esac  # skip half-written mirrors
 
-            # Mirror format written by coin.sh: "SID MAC AMOUNT CREATED_AT"
-            read -r P_SID P_MAC P_AMOUNT P_CREATED < "$f"
+            # Mirror format written by coin.sh: "SID MAC AMOUNT CREATED_AT NODE_ID"
+            # (NODE_ID is a coin.sh addition — a mirror from before that field
+            # existed only has 4 words, so P_NODE reads back empty and the
+            # fallback below treats it as the primary, exactly as it always
+            # implicitly was.)
+            read -r P_SID P_MAC P_AMOUNT P_CREATED P_NODE < "$f"
+            P_NODE="${P_NODE:-1}"
 
             # Validate the mirrored fields before trusting them; drop junk.
             printf '%s' "$P_SID"    | grep -qE '^[0-9a-f]{16}$'  || { rm -f "$f"; continue; }
@@ -76,11 +92,14 @@
             printf '%s' "$P_AMOUNT" | grep -qE '^[0-9]+$'        || { rm -f "$f"; continue; }
             [ "${P_AMOUNT:-0}" -gt 0 ] || { rm -f "$f"; continue; }
 
+            P_PSK=$(_node_psk "$P_NODE")
+            [ -n "$P_PSK" ] || P_PSK="$COIN_PSK"   # unknown/removed node id → best-effort fallback
+
             # Sign exactly as the NodeMCU recovery POST did:
             #   sig = md5(PSK:SID:AMOUNT:MAC:recover)
             # coin_result.sh re-verifies this (defense in depth) and clears the
             # mirror itself on a successful/duplicate grant.
-            P_SIG=$(printf '%s' "${COIN_PSK}:${P_SID}:${P_AMOUNT}:${P_MAC}:recover" \
+            P_SIG=$(printf '%s' "${P_PSK}:${P_SID}:${P_AMOUNT}:${P_MAC}:recover" \
                     | md5sum | awk '{print $1}')
 
             # Reuse coin_result.sh's grant/extend logic via a direct LOCAL exec
@@ -88,7 +107,7 @@
             # is exactly what its boot-replay guard requires — a network caller
             # can neither blank REMOTE_ADDR nor set COIN_BOOT_REPLAY.
             COIN_BOOT_REPLAY=1 REMOTE_ADDR="" \
-            SID="$P_SID" AMOUNT="$P_AMOUNT" SIG="$P_SIG" RECOVER_MAC="$P_MAC" \
+            SID="$P_SID" AMOUNT="$P_AMOUNT" SIG="$P_SIG" RECOVER_MAC="$P_MAC" NODE_ID="$P_NODE" \
                 /bin/sh /lmepisowifi/hotspot/cgi-bin/coin_result.sh >/dev/null 2>&1
 
             # Safety net: if coin_result.sh couldn't clear it (e.g. a transient

@@ -1,3 +1,3 @@
 # Changelog
-## v1.2.11
-added mac randomization fix, preventing users from losing time if their mac changes.
+## v1.2.14
+large update (this might break things), added multiple nodemcu support, fixed the issue of the startup.sh in the www2 not carrying over properly if the startup.sh has new or deleted lines

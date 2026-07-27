@@ -24,6 +24,12 @@ INCOME_BACKUP_A="${INCOME_FILE}_backup_a"
 INCOME_BACKUP_B="${INCOME_FILE}_backup_b"
 INCOME_BACKUP_GEN="${INCOME_FILE}_backup_gen"
 WHITELIST_FILE="/lmepisowifi/hotspot_data/whitelist.txt"
+# Additional NodeMCU coin acceptors beyond the primary (#1, configured via
+# NODEMCU_IP/MAC/PORT/COIN_PSK above). One line per unit:
+#   ID|TITLE|IP|MAC|PORT|PSK|ENABLED
+# Absent or empty on any existing install — the box simply behaves as a
+# single-NodeMCU system, unchanged, until an admin adds a unit via the UI.
+NODEMCU_EXTRA_FILE="/lmepisowifi/hotspot_data/nodemcus_extra.txt"
 
 WAN_INT_DEFAULT="br0"
 WAN_INT="br0"
@@ -58,6 +64,8 @@ NODEMCU_IP="10.0.0.2"
 NODEMCU_MAC="ecfabcc8d65a"
 NODEMCU_PORT="8080"
 COIN_PSK="2Au6410y1O15YV9610wHmr52"
+NODEMCU_1_TITLE="Coin Slot"
+NODEMCU_1_ENABLED="1"
 COIN_TIMEOUT="30"
 COIN_RATES="1:15 5:90 10:210 15:360 20:720 25:1080 30:2160 35:2880 40:3600 45:4320 50:5040 55:5760"
 COIN_STRIKE_THRESHOLD="3"
@@ -483,6 +491,32 @@ wait_for_wlan_ready() {
 
 
 
+# ── Extra NodeMCU coin-acceptor firewall isolation ─────────────────────────
+# Applies the same "unreachable except via the router's own proxy scripts"
+# FORWARD DROP the primary NodeMCU gets (see setup_firewall/cleanup_old_hotspot
+# below) to every additional unit in NODEMCU_EXTRA_FILE. Re-entrant: always
+# tears down whatever it applied last time (via the .mark file, same idea as
+# hotspot_lan_isolate.mark below) before re-reading the current file, so
+# edits/removals take effect cleanly on re-run without orphaned rules. Called
+# both from setup_firewall and from the watchdog's hot-reload tick.
+NODEMCU_EXTRA_FW_MARK="/tmp/hotspot_nodemcu_extra.mark"
+apply_extra_nodemcu_fw() {
+    if [ -f "$NODEMCU_EXTRA_FW_MARK" ]; then
+        while IFS= read -r _old_ip; do
+            [ -n "$_old_ip" ] && iptables -t filter -D FORWARD -d "$_old_ip" -j DROP 2>/dev/null
+        done < "$NODEMCU_EXTRA_FW_MARK"
+    fi
+    : > "$NODEMCU_EXTRA_FW_MARK"
+    [ -f "$NODEMCU_EXTRA_FILE" ] || return 0
+    while IFS='|' read -r _nid _ntitle _nip _nmac _nport _npsk _nen; do
+        case "$_nid" in ''|*[!0-9]*) continue ;; esac
+        [ "${_nen:-1}" = "1" ] || continue
+        [ -n "$_nip" ] || continue
+        iptables -t filter -I FORWARD -d "$_nip" -j DROP 2>/dev/null
+        printf '%s\n' "$_nip" >> "$NODEMCU_EXTRA_FW_MARK"
+    done < "$NODEMCU_EXTRA_FILE"
+}
+
 cleanup_old_hotspot() {
     tc qdisc del dev $WAN_INT root 2>/dev/null
     for iface in $HOTSPOT_INTERFACES; do
@@ -514,6 +548,11 @@ cleanup_old_hotspot() {
     iptables -t nat -F HOTSPOT 2>/dev/null
     iptables -t nat -X HOTSPOT 2>/dev/null
     iptables -t filter -D FORWARD -d $NODEMCU_IP -j DROP 2>/dev/null
+    if [ -f "$NODEMCU_EXTRA_FW_MARK" ]; then
+        while IFS= read -r _old_ip; do
+            [ -n "$_old_ip" ] && iptables -t filter -D FORWARD -d "$_old_ip" -j DROP 2>/dev/null
+        done < "$NODEMCU_EXTRA_FW_MARK"
+    fi
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m comment --comment "lmehspt_ratelimit" -j DROP 2>/dev/null
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -j DROP 2>/dev/null
     iptables -t filter -D INPUT -p tcp --dport $PORTAL_PORT -m state --state NEW -m limit --limit 20/sec --limit-burst 40 -m comment --comment "lmehspt_ratelimit" -j ACCEPT 2>/dev/null
@@ -663,6 +702,7 @@ setup_firewall() {
     iptables -t filter -D FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD 2>/dev/null
     iptables -t filter -I FORWARD -i $HOTSPOT_BR -j HOTSPOT_FWD
     iptables -t filter -I FORWARD -d $NODEMCU_IP -j DROP 2>/dev/null
+    apply_extra_nodemcu_fw
     # ── LAN isolation ──────────────────────────────────────────────────────────
     case "${LAN_ISOLATE:-1}" in
     1|yes|true)
@@ -935,8 +975,19 @@ option dns      1.1.1.1
 lease_file      /tmp/udhcpd.leases
 pidfile         /tmp/hotspot_dhcp.pid
 EOF
-    if [ "$COIN_ENABLED" = "1" ] && [ -n "$NODEMCU_MAC" ]; then
+    if [ "$COIN_ENABLED" = "1" ] && [ -n "$NODEMCU_MAC" ] && [ "${NODEMCU_1_ENABLED:-1}" = "1" ]; then
         printf 'static_lease    %s %s\n' "$(format_mac "$NODEMCU_MAC")" "$NODEMCU_IP" >> /tmp/hotspot_dhcp.conf
+    fi
+    # Additional coin acceptor units (#2+), each pinned to its own IP the same
+    # way the primary is above. A malformed/blank row is skipped rather than
+    # aborting the whole lease file.
+    if [ "$COIN_ENABLED" = "1" ] && [ -f "$NODEMCU_EXTRA_FILE" ]; then
+        while IFS='|' read -r _nid _ntitle _nip _nmac _nport _npsk _nen; do
+            case "$_nid" in ''|*[!0-9]*) continue ;; esac
+            [ "${_nen:-1}" = "1" ] || continue
+            [ -n "$_nmac" ] && [ -n "$_nip" ] || continue
+            printf 'static_lease    %s %s\n' "$(format_mac "$_nmac")" "$_nip" >> /tmp/hotspot_dhcp.conf
+        done < "$NODEMCU_EXTRA_FILE"
     fi
     $BB udhcpd /tmp/hotspot_dhcp.conf
 }
@@ -1227,7 +1278,9 @@ check_inactivity() {
 
 write_coin_config() {
     mkdir -p /tmp/coin_sessions
-    rm -f /tmp/coin_sessions/*.result /tmp/coin_sessions/* /tmp/coin_lock /tmp/coin_strikes.txt /tmp/coin_queue.txt 2>/dev/null
+    rm -f /tmp/coin_sessions/*.result /tmp/coin_sessions/* \
+          /tmp/coin_lock /tmp/coin_lock_* /tmp/coin_strikes.txt \
+          /tmp/coin_queue.txt /tmp/coin_queue_*.txt 2>/dev/null
     # Always write coin_config.env regardless of COIN_ENABLED so hotspot.cgi
     # can read and update all vars at runtime without restarting the script.
     {
@@ -1235,6 +1288,9 @@ write_coin_config() {
         printf 'NODEMCU_MAC="%s"\n'         "$NODEMCU_MAC"
         printf 'NODEMCU_PORT="%s"\n'        "$NODEMCU_PORT"
         printf 'COIN_PSK="%s"\n'            "$COIN_PSK"
+        printf 'NODEMCU_1_TITLE="%s"\n'     "$NODEMCU_1_TITLE"
+        printf 'NODEMCU_1_ENABLED="%s"\n'   "$NODEMCU_1_ENABLED"
+        printf 'NODEMCU_EXTRA_FILE="%s"\n'  "$NODEMCU_EXTRA_FILE"
         printf 'COIN_TIMEOUT="%s"\n'        "$COIN_TIMEOUT"
         printf 'COIN_RATES="%s"\n'          "$COIN_RATES"
         printf 'COIN_STRIKE_THRESHOLD="%s"\n' "$COIN_STRIKE_THRESHOLD"

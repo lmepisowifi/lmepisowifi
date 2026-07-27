@@ -17,6 +17,27 @@ _err() { printf '{"error":"%s"}\n' "$1"; exit 0; }
 _ok()  { printf '%s\n' "$1";           exit 0; }
 _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 
+# ── Multi-NodeMCU node registry (see coin.sh for the full explanation) ──────
+NODEMCU_EXTRA_FILE="${NODEMCU_EXTRA_FILE:-/lmepisowifi/hotspot_data/nodemcus_extra.txt}"
+_node_ids() {
+    printf '1'
+    [ -f "$NODEMCU_EXTRA_FILE" ] && $BB awk -F'|' '$1 ~ /^[0-9]+$/ {printf " %s", $1}' "$NODEMCU_EXTRA_FILE"
+    printf '\n'
+}
+# $1=node id, $2=column (2=title 3=ip 4=mac 5=port 6=psk 7=enabled)
+_node_field() {
+    if [ "$1" = "1" ]; then
+        case "$2" in
+            3) printf '%s' "$NODEMCU_IP" ;;
+            4) printf '%s' "$NODEMCU_MAC" ;;
+            6) printf '%s' "$COIN_PSK" ;;
+        esac
+        return
+    fi
+    [ -f "$NODEMCU_EXTRA_FILE" ] || return 0
+    $BB awk -F'|' -v id="$1" -v col="$2" '$1==id {print $col; exit}' "$NODEMCU_EXTRA_FILE"
+}
+
 # Non-volatile pending-session mirror written by coin.sh's poll handler. Once a
 # session is granted/finalized here, drop its mirror so startup.sh won't replay
 # (and double-grant) it on the next boot.
@@ -132,21 +153,29 @@ if [ "$COIN_BOOT_REPLAY" = "1" ] && [ -z "$REMOTE_ADDR" ]; then
 fi
 
 if [ "$LOCAL_REPLAY" != "1" ]; then
-    # --- Guard 1: Only requests from NODEMCU_IP are processed ---
-    [ "$REMOTE_ADDR" = "$NODEMCU_IP" ] || _err "Forbidden"
+    # --- Guard 1: Only requests from a configured NodeMCU's IP are processed ---
+    # Identify WHICH unit is calling by matching its source IP against the
+    # registry — the same "who is this" signal the single-node version used,
+    # generalized from one hardcoded address to every configured node.
+    CALL_NODE=""
+    for _nid in $(_node_ids); do
+        [ "$(_node_field "$_nid" 3)" = "$REMOTE_ADDR" ] && { CALL_NODE="$_nid"; break; }
+    done
+    [ -n "$CALL_NODE" ] || _err "Forbidden"
+    N_MAC=$(_node_field "$CALL_NODE" 4)
 
     # --- Guard 2: Verify NodeMCU MAC via ARP (fail closed) ---
-    EXPECTED_MAC=$(printf '%s' "$NODEMCU_MAC" | tr -d ':' | tr 'A-F' 'a-f' | \
+    EXPECTED_MAC=$(printf '%s' "$N_MAC" | tr -d ':' | tr 'A-F' 'a-f' | \
         sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5:\6/')
-    CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
+    CALLER_MAC=$(awk -v ip="$REMOTE_ADDR" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
     if [ -z "$CALLER_MAC" ]; then
         # Cache miss (e.g. stale/expired ARP entry) — force a resolution
         # attempt before deciding anything. Silently falling through to
         # Guard 1's source-IP-only check here would make this endpoint
         # spoofable by anyone on the shared LAN segment; a missing ARP
         # entry must be treated the same as a mismatched one, not skipped.
-        ping -c 1 -W 1 "$NODEMCU_IP" >/dev/null 2>&1
-        CALLER_MAC=$(awk -v ip="$NODEMCU_IP" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
+        ping -c 1 -W 1 "$REMOTE_ADDR" >/dev/null 2>&1
+        CALLER_MAC=$(awk -v ip="$REMOTE_ADDR" '$1==ip {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
     fi
     [ -n "$CALLER_MAC" ] && [ "$CALLER_MAC" = "$EXPECTED_MAC" ] || _err "MAC mismatch"
 
@@ -169,6 +198,7 @@ if [ "$LOCAL_REPLAY" = "1" ]; then
     SIG="$SIG"
     RECOVER=1
     RECOVER_MAC="$RECOVER_MAC"
+    CALL_NODE="${NODE_ID:-1}"
 else
     SID=$(_post "sid")
     AMOUNT=$(_post "amount")
@@ -176,6 +206,7 @@ else
     RECOVER=$(_post "recover")   # "1" when NodeMCU is replaying a power-outage session on boot
     RECOVER_MAC=$(_post "mac")   # paying client's MAC, only trusted in recovery mode
 fi
+N_PSK=$(_node_field "$CALL_NODE" 6)
 
 [ -n "$SID" ] && [ -n "$AMOUNT" ] && [ -n "$SIG" ] || _err "Missing params"
 printf '%s' "$SID"    | grep -qE '^[0-9a-f]{16}$' || _err "Invalid sid"
@@ -196,7 +227,7 @@ if [ "$RECOVER" = "1" ]; then
     # forge a grant. We validate the MAC shape, then jump straight to the
     # grant/extend logic below.
     printf '%s' "$RECOVER_MAC" | grep -qE '^[0-9a-f:]{17}$' || _err "Invalid mac"
-    R_EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${AMOUNT}:${RECOVER_MAC}:recover")
+    R_EXP_SIG=$(_md5 "${N_PSK}:${SID}:${AMOUNT}:${RECOVER_MAC}:recover")
     [ "$SIG" = "$R_EXP_SIG" ] || _err "Bad sig"
 
     # Idempotency: if this exact recovery SID was already credited (NodeMCU
@@ -213,7 +244,7 @@ if [ "$RECOVER" = "1" ]; then
 else
     # ── NORMAL END-OF-SESSION PATH ──────────────────────────────────────
     # --- Guard 3: Verify PSK-based signature ---
-    EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${AMOUNT}:end")
+    EXP_SIG=$(_md5 "${N_PSK}:${SID}:${AMOUNT}:end")
     [ "$SIG" = "$EXP_SIG" ] || _err "Bad sig"
 
     [ -f "$SESSION_PATH" ] || _err "Session not found"
@@ -250,7 +281,7 @@ if [ "${AMOUNT:-0}" -eq 0 ]; then
     fi
 
     printf '0 0\n' > "$RESULT_PATH"
-    rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
+    rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock_${CALL_NODE}"
     _clear_pending "$SID"
     _ok '{"ok":true,"amount":0,"minutes":0}'
 fi
@@ -380,7 +411,7 @@ fi
 # -------------------------------------------------------------------------
 
 printf '%s %s\n' "$AMOUNT" "$MINUTES" > "$RESULT_PATH"
-rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock"
+rm -f "$SESSION_PATH" "${SESSION_PATH}.miss" "${SESSION_PATH}.amt" "${SESSION_PATH}.rem" "/tmp/coin_lock_${CALL_NODE}"
 _clear_pending "$SID"   # coins credited → drop the non-volatile crash mirror
 
 if [ "$RECOVER" = "1" ]; then

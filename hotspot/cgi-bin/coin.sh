@@ -15,6 +15,56 @@ _err() { printf '{"error":"%s"}\n' "$1"; exit 0; }
 _ok()  { printf '%s\n' "$1";           exit 0; }
 _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 
+# ── Multi-NodeMCU node registry ──────────────────────────────────────────────
+# Node #1 is always the primary (NODEMCU_IP/MAC/PORT/COIN_PSK, sourced above
+# from coin_config.env). Units #2+ live in NODEMCU_EXTRA_FILE, one per line:
+#   ID|TITLE|IP|MAC|PORT|PSK|ENABLED
+# maintained by hotspot.cgi's nodemcu_add/nodemcu_edit/nodemcu_del handlers.
+# Read directly from the persistent file (same approach as COIN_PENDING_DIR
+# above) rather than through a /tmp cache — one extra flash *read* per request
+# is negligible, and it means there's nothing here that can go stale.
+NODEMCU_EXTRA_FILE="${NODEMCU_EXTRA_FILE:-/lmepisowifi/hotspot_data/nodemcus_extra.txt}"
+
+_esc_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# Every configured node id, primary first, space-separated.
+_node_ids() {
+    printf '1'
+    [ -f "$NODEMCU_EXTRA_FILE" ] && $BB awk -F'|' '$1 ~ /^[0-9]+$/ {printf " %s", $1}' "$NODEMCU_EXTRA_FILE"
+    printf '\n'
+}
+
+# One field of a node's row. $1=node id, $2=column per the schema above
+# (2=title 3=ip 4=mac 5=port 6=psk 7=enabled). Unknown id → empty string.
+_node_field() {
+    if [ "$1" = "1" ]; then
+        case "$2" in
+            2) printf '%s' "${NODEMCU_1_TITLE:-Coin Slot}" ;;
+            3) printf '%s' "$NODEMCU_IP" ;;
+            4) printf '%s' "$NODEMCU_MAC" ;;
+            5) printf '%s' "$NODEMCU_PORT" ;;
+            6) printf '%s' "$COIN_PSK" ;;
+            7) printf '%s' "${NODEMCU_1_ENABLED:-1}" ;;
+        esac
+        return
+    fi
+    [ -f "$NODEMCU_EXTRA_FILE" ] || return 0
+    $BB awk -F'|' -v id="$1" -v col="$2" '$1==id {print $col; exit}' "$NODEMCU_EXTRA_FILE"
+}
+
+# JSON array of {id,title} for every ENABLED node — what the portal needs to
+# show a picker. IP/MAC/PSK are never exposed to this unauthenticated CGI's
+# public callers.
+_node_list_json() {
+    _nlj_out="["; _nlj_sep=""
+    for _nid in $(_node_ids); do
+        [ "$(_node_field "$_nid" 7)" = "1" ] || continue
+        _nlj_out="${_nlj_out}${_nlj_sep}{\"id\":${_nid},\"title\":\"$(_esc_json "$(_node_field "$_nid" 2)")\"}"
+        _nlj_sep=","
+    done
+    printf '%s]' "$_nlj_out"
+}
+
 # ── NON-VOLATILE COIN PERSISTENCE ────────────────────────────────────────────
 # Crash-safe coin protection now lives HERE on the router, not on the NodeMCU.
 # The NodeMCU used to mirror every coin to its own LittleFS flash, but that
@@ -31,12 +81,14 @@ COIN_PENDING_DIR="/lmepisowifi/hotspot_data/coin_pending"
 
 # Persist the authoritative session snapshot to non-volatile flash. Written on
 # every verified poll (so the amount is at most ~1s stale) and on session start.
-# Format: "SID MAC AMOUNT CREATED_AT" — everything coin_result.sh needs to
-# grant/extend the time on boot replay without any /tmp state.
+# Format: "SID MAC AMOUNT CREATED_AT NODE_ID" — everything coin_result.sh needs
+# to grant/extend the time on boot replay without any /tmp state. NODE_ID
+# defaults to 1 when omitted, so a pending file written by pre-multi-NodeMCU
+# code (only 4 fields) still replays correctly against the primary unit.
 _persist_pending() {
-    # $1=SID $2=MAC $3=AMOUNT $4=CREATED_AT
+    # $1=SID $2=MAC $3=AMOUNT $4=CREATED_AT $5=NODE_ID
     [ -d "$COIN_PENDING_DIR" ] || mkdir -p "$COIN_PENDING_DIR" 2>/dev/null
-    printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" \
+    printf '%s %s %s %s %s\n' "$1" "$2" "$3" "$4" "${5:-1}" \
         > "${COIN_PENDING_DIR}/${1}.tmp" 2>/dev/null \
         && mv "${COIN_PENDING_DIR}/${1}.tmp" "${COIN_PENDING_DIR}/${1}" 2>/dev/null
 }
@@ -75,6 +127,13 @@ get_qs() {
 
 ACTION=$(get_qs "action")
 
+# Which NodeMCU this request targets. Only meaningful for "start" (poll/cancel
+# resolve it themselves from the session file instead, since the client only
+# ever hands those a sid). Defaults to the primary — old cached frontend JS,
+# or anything hitting this CGI directly, always means node 1.
+NODE_ID=$(get_qs "nodemcu")
+case "$NODE_ID" in ''|*[!0-9]*) NODE_ID=1 ;; esac
+
 # --- Get client MAC from ARP — server-side, client cannot forge this ---
 CLIENT_MAC=$(awk -v ip="$REMOTE_ADDR" -v br="$HOTSPOT_BR" \
     '$1==ip && $6==br {print tolower($4); exit}' /proc/net/arp 2>/dev/null)
@@ -83,37 +142,45 @@ CLIENT_MAC=$(awk -v ip="$REMOTE_ADDR" -v br="$HOTSPOT_BR" \
 if [ "$ACTION" = "config" ]; then
     RESUME_FLAG="false"
     PENDING_FLAG="false"
+    RESUME_NODE=1
 
-    # Expose to frontend if this user has an ongoing session that survived a page reload
+    # Expose to frontend if this user has an ongoing session that survived a
+    # page reload. With multiple NodeMCUs the live session (if any) could
+    # belong to any one of them, so every configured node's lock gets checked
+    # — first match wins (a client can only ever hold one lock at a time).
     if [ -n "$CLIENT_MAC" ]; then
-        if [ -f /tmp/coin_lock ]; then
-            LOCK_MAC=$(awk '{print $3}' /tmp/coin_lock)
-            LOCK_STATE=$(awk '{print $4}' /tmp/coin_lock)
-
-            if [ "$LOCK_MAC" = "$CLIENT_MAC" ]; then
-                if [ "$LOCK_STATE" = "ACTIVE" ]; then
-                    RESUME_FLAG="true"
-                elif [ "$LOCK_STATE" = "PENDING" ] || [ "$LOCK_STATE" = "CANCELLING" ]; then
-                    # PENDING: the original "start" request (the one talking to
-                    # the NodeMCU) is still in flight server-side — most likely
-                    # because the page got reloaded right after the button
-                    # was clicked, before that request could finish and
-                    # flip the lock to ACTIVE. Tell the frontend to retry
-                    # shortly instead of silently giving up here, which
-                    # used to require a manual second click/reload.
-                    # CANCELLING: a cancel/done was just issued and NodeMCU
-                    # hasn't confirmed the teardown yet — same "wait a beat
-                    # and retry" treatment, so a reload right after closing
-                    # the modal doesn't get offered a stale resume.
-                    PENDING_FLAG="true"
+        for _nid in $(_node_ids); do
+            _lf="/tmp/coin_lock_${_nid}"
+            [ -f "$_lf" ] || continue
+            LOCK_MAC=$(awk '{print $3}' "$_lf")
+            [ "$LOCK_MAC" = "$CLIENT_MAC" ] || continue
+            LOCK_STATE=$(awk '{print $4}' "$_lf")
+            if [ "$LOCK_STATE" = "ACTIVE" ]; then
+                RESUME_FLAG="true"; RESUME_NODE="$_nid"; break
+            elif [ "$LOCK_STATE" = "PENDING" ] || [ "$LOCK_STATE" = "CANCELLING" ]; then
+                # PENDING: the original "start" request (the one talking to
+                # the NodeMCU) is still in flight server-side — most likely
+                # because the page got reloaded right after the button
+                # was clicked, before that request could finish and
+                # flip the lock to ACTIVE. Tell the frontend to retry
+                # shortly instead of silently giving up here, which
+                # used to require a manual second click/reload.
+                # CANCELLING: a cancel/done was just issued and NodeMCU
+                # hasn't confirmed the teardown yet — same "wait a beat
+                # and retry" treatment, so a reload right after closing
+                # the modal doesn't get offered a stale resume.
+                PENDING_FLAG="true"; RESUME_NODE="$_nid"; break
+            fi
+        done
+        # If not actively locked anywhere, see if they were mid-queue somewhere
+        if [ "$RESUME_FLAG" = "false" ] && [ "$PENDING_FLAG" = "false" ]; then
+            for _nid in $(_node_ids); do
+                _qf="/tmp/coin_queue_${_nid}.txt"
+                [ -f "$_qf" ] || continue
+                if $BB grep -q "^$CLIENT_MAC " "$_qf" 2>/dev/null; then
+                    RESUME_FLAG="true"; RESUME_NODE="$_nid"; break
                 fi
-            fi
-        fi
-        # If not actively locked, see if they were in the middle of waiting in the queue
-        if [ "$RESUME_FLAG" = "false" ] && [ -f /tmp/coin_queue.txt ]; then
-            if $BB grep -q "^$CLIENT_MAC " /tmp/coin_queue.txt 2>/dev/null; then
-                RESUME_FLAG="true"
-            fi
+            done
         fi
     fi
 
@@ -137,7 +204,7 @@ if [ "$ACTION" = "config" ]; then
                 fi
             fi
         fi
-        _ok "{\"enabled\":true,\"timeout\":${COIN_TIMEOUT},\"rates\":\"${COIN_RATES}\",\"resume\":${RESUME_FLAG},\"pending\":${PENDING_FLAG},\"suspended\":${SUSPENDED_FLAG},\"cooldown_remaining\":${COOLDOWN_REMAINING}}"
+        _ok "{\"enabled\":true,\"timeout\":${COIN_TIMEOUT},\"rates\":\"${COIN_RATES}\",\"resume\":${RESUME_FLAG},\"resume_nodemcu\":${RESUME_NODE},\"pending\":${PENDING_FLAG},\"suspended\":${SUSPENDED_FLAG},\"cooldown_remaining\":${COOLDOWN_REMAINING},\"nodemcus\":$(_node_list_json)}"
     else
         _ok '{"enabled":false}'
     fi
@@ -191,8 +258,18 @@ start)
         fi
     fi
 
-    LOCK_FILE="/tmp/coin_lock"
-    QFILE="/tmp/coin_queue.txt"
+    # Resolve which physical unit this request targets, and refuse anything
+    # that doesn't map to a real, in-service node — otherwise a stale/removed
+    # id would fall through to empty IP/PORT/PSK and fail confusingly deep
+    # inside the wget calls below instead of with a clear error right here.
+    _N_IP=$(_node_field "$NODE_ID" 3)
+    _N_PORT=$(_node_field "$NODE_ID" 5)
+    _N_PSK=$(_node_field "$NODE_ID" 6)
+    _N_EN=$(_node_field "$NODE_ID" 7)
+    { [ -n "$_N_IP" ] && [ "${_N_EN:-1}" = "1" ]; } || _err "Selected coin slot is unavailable"
+
+    LOCK_FILE="/tmp/coin_lock_${NODE_ID}"
+    QFILE="/tmp/coin_queue_${NODE_ID}.txt"
 
     # 1. Clean stale queue entries (>10s old)
     if [ -f "$QFILE" ]; then
@@ -239,14 +316,14 @@ start)
                     RESUME_AMOUNT=0
                     RESUME_REMAINING=$COIN_TIMEOUT
                     R_VERIFIED=0
-                    R_POLL_SIG=$(_md5 "${COIN_PSK}:${LOCK_SID}:poll")
+                    R_POLL_SIG=$(_md5 "${_N_PSK}:${LOCK_SID}:poll")
                     R_LIVE=$(wget -q -T 2 -O - \
-                        "http://${NODEMCU_IP}:${NODEMCU_PORT}/status?sid=${LOCK_SID}&sig=${R_POLL_SIG}" \
+                        "http://${_N_IP}:${_N_PORT}/status?sid=${LOCK_SID}&sig=${R_POLL_SIG}" \
                         2>/dev/null)
                     if [ -n "$R_LIVE" ]; then
                         R_RAW_AMT=$(printf '%s' "$R_LIVE" | grep -o '"amount":[0-9]*' | grep -o '[0-9]*$')
                         R_RAW_SIG=$(printf '%s' "$R_LIVE" | grep -o '"sig":"[^"]*"' | awk -F'"' '{print $4}')
-                        R_EXP_SIG=$(_md5 "${COIN_PSK}:${LOCK_SID}:${R_RAW_AMT}:status")
+                        R_EXP_SIG=$(_md5 "${_N_PSK}:${LOCK_SID}:${R_RAW_AMT}:status")
                         if [ -n "$R_RAW_SIG" ] && [ "$R_RAW_SIG" = "$R_EXP_SIG" ]; then
                             R_VERIFIED=1
                             RESUME_AMOUNT=${R_RAW_AMT:-0}
@@ -262,7 +339,7 @@ start)
                     if [ -n "$R_LIVE" ]; then
                         _coin_alert "RESUME_SIG_MISMATCH" "SID=${LOCK_SID} response received but HMAC invalid — PSK mismatch or tampered reply"
                     else
-                        _coin_alert "RESUME_NODEMCU_OFFLINE" "SID=${LOCK_SID} no response from NodeMCU at ${NODEMCU_IP}:${NODEMCU_PORT} during resume check — stale lock dropped"
+                        _coin_alert "RESUME_NODEMCU_OFFLINE" "SID=${LOCK_SID} no response from NodeMCU (node ${NODE_ID}) at ${_N_IP}:${_N_PORT} during resume check — stale lock dropped"
                     fi
                     rm -f "$LOCK_FILE" "/tmp/coin_sessions/${LOCK_SID}" \
                         "/tmp/coin_sessions/${LOCK_SID}.miss" "/tmp/coin_sessions/${LOCK_SID}.amt" \
@@ -309,14 +386,16 @@ start)
         "$CLIENT_MAC" "$$" "$RANDOM" \
         | md5sum | awk '{print substr($1,1,16)}')
 
-    START_SIG=$(_md5 "${COIN_PSK}:${SID}:start")
+    START_SIG=$(_md5 "${_N_PSK}:${SID}:start")
 
-    # Bind this SID to the client's MAC + creation time + last-seen heartbeat.
-    # last_seen starts equal to creation time and gets refreshed on every poll
-    # that gets a verified live response from NodeMCU — this is what lets a
-    # rolling (per-coin-reset) session run past the original window without
-    # being treated as abandoned.
-    printf '%s %s %s\n' "$CLIENT_MAC" "$NOW" "$NOW" > "/tmp/coin_sessions/${SID}"
+    # Bind this SID to the client's MAC + creation time + last-seen heartbeat
+    # + which node it belongs to. last_seen starts equal to creation time and
+    # gets refreshed on every poll that gets a verified live response from
+    # NodeMCU — this is what lets a rolling (per-coin-reset) session run past
+    # the original window without being treated as abandoned. The node id is
+    # what lets poll/cancel (which only ever see the sid) find their way back
+    # to the right unit's IP/PORT/PSK.
+    printf '%s %s %s %s\n' "$CLIENT_MAC" "$NOW" "$NOW" "$NODE_ID" > "/tmp/coin_sessions/${SID}"
 
     # Write a PENDING lock. Prevents parallel requests, but ignores automatic UI page reloads.
     printf '%s %s %s %s\n' "$SID" "$NOW" "$CLIENT_MAC" "PENDING" > "$LOCK_FILE"
@@ -330,7 +409,7 @@ start)
     # and can't manufacture coins, while coin_result.sh still verifies the PSK
     # signature before granting anything.
     RESP=$(wget -q -T 5 -O - \
-        "http://${NODEMCU_IP}:${NODEMCU_PORT}/start?sid=${SID}&sig=${START_SIG}&timeout=${COIN_TIMEOUT}&mac=${CLIENT_MAC}" \
+        "http://${_N_IP}:${_N_PORT}/start?sid=${SID}&sig=${START_SIG}&timeout=${COIN_TIMEOUT}&mac=${CLIENT_MAC}" \
         2>/dev/null)
 
     if printf '%s' "$RESP" | grep -q '"ok"'; then
@@ -346,7 +425,7 @@ start)
         
         _ok "{\"sid\":\"$SID\",\"timeout\":$COIN_TIMEOUT}"
     else
-        _coin_alert "NODEMCU_OFFLINE" "SID=${SID} no response from NodeMCU at ${NODEMCU_IP}:${NODEMCU_PORT}/start"
+        _coin_alert "NODEMCU_OFFLINE" "SID=${SID} no response from NodeMCU (node ${NODE_ID}) at ${_N_IP}:${_N_PORT}/start"
         rm -f "/tmp/coin_sessions/${SID}" "$LOCK_FILE"
         _err "Coinslot Offline, notify the vendo owner if this persists."
     fi
@@ -378,6 +457,15 @@ poll)
     LAST_SEEN=$(awk '{print ($3==""?$2:$3)}' "$SESSION_PATH")
     SINCE_SEEN=$(( NOW - LAST_SEEN ))
 
+    # Which unit this particular session is talking to — read from the
+    # session file rather than the query string, since the client only ever
+    # hands this action a sid. Falls back to node 1 for a session file
+    # written before this field existed (mid-upgrade edge case).
+    SESSION_NODE=$(awk '{print ($4==""?1:$4)}' "$SESSION_PATH")
+    _N_IP=$(_node_field "$SESSION_NODE" 3)
+    _N_PORT=$(_node_field "$SESSION_NODE" 5)
+    _N_PSK=$(_node_field "$SESSION_NODE" 6)
+
     # How long we keep a session alive while NodeMCU is unreachable before
     # finally giving up. During this window the poll reports "reconnecting"
     # (coins preserved, countdown frozen) instead of throwing the session away.
@@ -403,15 +491,15 @@ poll)
     # elapsed, and even then hand back the preserved amount rather than zero.
     if [ "$SINCE_SEEN" -gt $(( COIN_TIMEOUT + 25 + RECONNECT_GRACE )) ]; then
         GIVEUP_AMT=$(cat "$AMT_PATH" 2>/dev/null); GIVEUP_AMT=${GIVEUP_AMT:-0}
-        rm -f "$SESSION_PATH" "$MISS_PATH" "$AMT_PATH" "$REM_PATH" "/tmp/coin_lock"
+        rm -f "$SESSION_PATH" "$MISS_PATH" "$AMT_PATH" "$REM_PATH" "/tmp/coin_lock_${SESSION_NODE}"
         _clear_pending "$SID"   # session abandoned → drop the non-volatile mirror
         _ok "{\"status\":\"expired\",\"amount\":${GIVEUP_AMT},\"minutes\":$(_calc_time "$GIVEUP_AMT")}"
     fi
 
     # Query NodeMCU for live coin count — verify its response signature
-    POLL_SIG=$(_md5 "${COIN_PSK}:${SID}:poll")
+    POLL_SIG=$(_md5 "${_N_PSK}:${SID}:poll")
     LIVE=$(wget -q -T 2 -O - \
-        "http://${NODEMCU_IP}:${NODEMCU_PORT}/status?sid=${SID}&sig=${POLL_SIG}" \
+        "http://${_N_IP}:${_N_PORT}/status?sid=${SID}&sig=${POLL_SIG}" \
         2>/dev/null)
 
     LIVE_AMOUNT=$(cat "$AMT_PATH" 2>/dev/null)
@@ -420,7 +508,7 @@ poll)
     if [ -n "$LIVE" ]; then
         RAW_AMT=$(printf '%s' "$LIVE" | grep -o '"amount":[0-9]*' | grep -o '[0-9]*$')
         RAW_SIG=$(printf '%s' "$LIVE" | grep -o '"sig":"[^"]*"' | awk -F'"' '{print $4}')
-        EXP_SIG=$(_md5 "${COIN_PSK}:${SID}:${RAW_AMT}:status")
+        EXP_SIG=$(_md5 "${_N_PSK}:${SID}:${RAW_AMT}:status")
         # Only trust the amount if NodeMCU signed it with the PSK
         if [ -n "$RAW_SIG" ] && [ "$RAW_SIG" = "$EXP_SIG" ]; then
             LIVE_OK=1
@@ -438,11 +526,14 @@ poll)
             # we don't want to just relocate the ESP8266's flash-wear problem
             # onto the router. A zero total has nothing to recover, so skip it.
             if [ "${LIVE_AMOUNT:-0}" -gt 0 ] && [ "${LIVE_AMOUNT:-0}" != "${PREV_AMOUNT:-0}" ]; then
-                _persist_pending "$SID" "$SESSION_MAC" "$LIVE_AMOUNT" "$CREATED_AT"
+                _persist_pending "$SID" "$SESSION_MAC" "$LIVE_AMOUNT" "$CREATED_AT" "$SESSION_NODE"
             fi
             # NodeMCU is alive and confirms this session is still active there
             # — refresh the heartbeat so a long rolling session stays open.
-            printf '%s %s %s\n' "$SESSION_MAC" "$CREATED_AT" "$NOW" \
+            # NODE_ID is carried through unchanged: this is a heartbeat
+            # refresh, not a re-bind, and dropping it here would silently
+            # fall back to node 1 on every poll after the first.
+            printf '%s %s %s %s\n' "$SESSION_MAC" "$CREATED_AT" "$NOW" "$SESSION_NODE" \
                 > "/tmp/coin_sessions/${SID}.tmp" 2>/dev/null \
                 && mv "/tmp/coin_sessions/${SID}.tmp" "$SESSION_PATH"
             RAW_REM=$(printf '%s' "$LIVE" | grep -o '"remaining":[0-9]*' | grep -o '[0-9]*$')
@@ -484,11 +575,15 @@ poll)
 cancel)
     NOW=$(awk '{print int($1)}' /proc/uptime)
 
-    # Always remove the user from the waiting queue first
-    if [ -f "/tmp/coin_queue.txt" ]; then
-        $BB grep -v "^$CLIENT_MAC " /tmp/coin_queue.txt > /tmp/cq.tmp 2>/dev/null
-        $BB mv /tmp/cq.tmp /tmp/coin_queue.txt
-    fi
+    # Always remove the user from every node's waiting queue first — at this
+    # point (no sid parsed yet) we don't know, and don't need to know, which
+    # one they might have been queued for.
+    for _nid in $(_node_ids); do
+        _qf="/tmp/coin_queue_${_nid}.txt"
+        [ -f "$_qf" ] || continue
+        $BB grep -v "^$CLIENT_MAC " "$_qf" > /tmp/cq.tmp 2>/dev/null
+        $BB mv /tmp/cq.tmp "$_qf"
+    done
 
     SID=$(get_qs "sid")
     if [ -z "$SID" ]; then
@@ -506,6 +601,12 @@ cancel)
     SESSION_MAC=$(awk '{print $1}' "$SESSION_PATH")
     [ "$SESSION_MAC" = "$CLIENT_MAC" ] || _err "Session mismatch"
 
+    # Which unit this session belongs to (see poll's SESSION_NODE comment).
+    SESSION_NODE=$(awk '{print ($4==""?1:$4)}' "$SESSION_PATH")
+    _N_IP=$(_node_field "$SESSION_NODE" 3)
+    _N_PORT=$(_node_field "$SESSION_NODE" 5)
+    _N_PSK=$(_node_field "$SESSION_NODE" 6)
+
     # Signed cancel request — NodeMCU verifies md5(PSK:SID:cancel) before
     # ending the session. The NodeMCU finalizes asynchronously (its own
     # loop() picks this up, not this handler) and POSTs the result to
@@ -522,19 +623,19 @@ cancel)
     # producing a resumed session with a countdown for something that's
     # actually being cancelled. CANCELLING makes start-action tell the
     # client to wait a beat instead of resuming.
-    LOCK_FILE="/tmp/coin_lock"
+    LOCK_FILE="/tmp/coin_lock_${SESSION_NODE}"
     if [ -f "$LOCK_FILE" ]; then
         L_SID=$(awk '{print $1}' "$LOCK_FILE")
         [ "$L_SID" = "$SID" ] && \
             printf '%s %s %s %s\n' "$SID" "$NOW" "$CLIENT_MAC" "CANCELLING" > "$LOCK_FILE"
     fi
 
-    CANCEL_SIG=$(_md5 "${COIN_PSK}:${SID}:cancel")
+    CANCEL_SIG=$(_md5 "${_N_PSK}:${SID}:cancel")
     CANCEL_RESP=$(wget -q -T 5 -O - \
-        "http://${NODEMCU_IP}:${NODEMCU_PORT}/cancel?sid=${SID}&sig=${CANCEL_SIG}" \
+        "http://${_N_IP}:${_N_PORT}/cancel?sid=${SID}&sig=${CANCEL_SIG}" \
         2>/dev/null)
     [ -z "$CANCEL_RESP" ] && \
-        _coin_alert "CANCEL_NO_RESPONSE" "SID=${SID} NodeMCU did not respond to /cancel — may be offline or mid-reboot"
+        _coin_alert "CANCEL_NO_RESPONSE" "SID=${SID} NodeMCU (node ${SESSION_NODE}) did not respond to /cancel — may be offline or mid-reboot"
 
     _ok '{"ok":true}'    ;;
 

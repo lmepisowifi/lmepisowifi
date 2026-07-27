@@ -721,6 +721,10 @@
     .rates-row:hover { border-color: var(--coin-val-color) !important; background: var(--bg-surface-hover); }
     .rates-row .rp { color: var(--coin-val-color) !important; font-weight: 700; font-size: 15px; font-family: 'SFMono-Regular', Consolas, monospace; }
     .rates-row .rt { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+    .nodemcu-row { display: flex; align-items: center; justify-content: space-between; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px 16px; transition: border-color 0.2s, background-color 0.2s; cursor: pointer; }
+    .nodemcu-row:hover, .nodemcu-row:active { border-color: var(--coin-val-color) !important; background: var(--bg-surface-hover); }
+    .nodemcu-row .nm-name { color: var(--text-primary); font-size: 15px; font-weight: 700; }
+    .nodemcu-row .nm-arrow { color: var(--coin-val-color) !important; font-size: 17px; font-weight: 700; }
     .rates-empty { color: var(--text-secondary); font-size: 12px; text-align: center; padding: 14px 0; }
 
     /* ======================================= INSERT COIN MODAL ======================================= */
@@ -903,7 +907,7 @@
 
         <!-- Flexbox container perfectly spaces visible buttons by 8px without interfering margins -->
         <div class="d-flex flex-column gap-2">
-          <button class="btn btn-coin" id="btn-coin-login" onclick="doCoinStart(false)" style="display:none;">Insert Coin</button>
+          <button class="btn btn-coin" id="btn-coin-login" onclick="startCoinFlow(false)" style="display:none;">Insert Coin</button>
           <button class="btn btn-primary" id="btn-resume" onclick="doResume()" style="display:none;">Resume Time</button>
           <button class="btn btn-rates" id="btn-rates-login" onclick="openRatesModal()" style="display:none;">WiFi Rates</button>
         </div>
@@ -957,7 +961,7 @@
         </div>
 
         <div class="d-flex flex-column gap-2">
-          <button class="btn btn-coin" id="btn-coin-status" onclick="doCoinStart(true)" style="display:none;">Insert Coin</button>
+          <button class="btn btn-coin" id="btn-coin-status" onclick="startCoinFlow(true)" style="display:none;">Insert Coin</button>
           <button class="btn btn-danger" id="btn-pause" onclick="doLogout()">Pause Time</button>
           <button class="btn btn-rates" id="btn-rates-status" onclick="openRatesModal()" style="display:none;">WiFi Rates</button>
         </div>
@@ -975,7 +979,7 @@
 
       <div id="v-queue">
         <h1 class="view-title">Waiting in Line</h1>
-        <p class="view-subtitle">Someone else is currently using the coin slot.</p>
+        <p class="view-subtitle" id="queue-sub">Someone else is currently using the coin slot.</p>
 
         <div class="d-flex flex-column align-items-center justify-content-center py-4 gap-3">
           <div class="portal-spinner"></div>
@@ -1007,6 +1011,19 @@
     <div class="rates-modal-body">
       <p class="rates-modal-sub">Amount | Time </p>
       <div class="rates-list" id="rates-list"></div>
+    </div>
+  </div>
+</div>
+
+<div class="rates-modal-overlay" id="nodemcu-modal-overlay" onclick="if (event.target === this) closeNodemcuModal();">
+  <div class="rates-modal">
+    <div class="rates-modal-header">
+      <span class="rates-modal-title">&middot; Select Coin Slot</span>
+      <button class="rates-modal-close" onclick="closeNodemcuModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="rates-modal-body">
+      <p class="rates-modal-sub">Choose which coin slot to insert into.</p>
+      <div class="rates-list" id="nodemcu-list"></div>
     </div>
   </div>
 </div>
@@ -1368,6 +1385,9 @@ var _coinPendingWait  = false;
 var _cachedRates      = '';      
 var _coinSuspended    = false;
 var _coinCooldownRemaining = 0;
+var _coinNodemcus     = [];      // [{id,title}, ...] from coin.sh's config action — only >1 entry shows the picker
+var _coinNodeID       = null;    // which unit the in-flight/active session targets
+var _pendingFromStatus = false;  // fromStatus flag stashed while the picker is open
 var _wlanRefreshID    = null;    // polls WLAN signal stats while the Connection dropdown is open
 var _wlanRefreshPrefix = null;   // which view ('s'/'l') owns the open dropdown
 
@@ -1804,6 +1824,10 @@ function checkCoinEnabled(pendingRetries) {
       if (hasRates) {
         _cachedRates = d.rates;
       }
+      // Which coin slots exist right now — used by startCoinFlow() to decide
+      // whether a picker is even needed (0 or 1 entries: same one-tap flow
+      // as before this feature existed).
+      _coinNodemcus = (on && Array.isArray(d.nodemcus)) ? d.nodemcus : [];
 
       // --- Suspension state ---
       _coinSuspended = !!(on && d.suspended);
@@ -1827,6 +1851,9 @@ function checkCoinEnabled(pendingRetries) {
 
       if (on && d.resume) {
         _coinPendingWait = false;
+        // Server already knows which lock is ours — skip the picker entirely
+        // on resume, exactly like the single-NodeMCU flow always has.
+        _coinNodeID = d.resume_nodemcu || 1;
         doCoinStart(false, false);
         return;
       }
@@ -1945,6 +1972,61 @@ function closeCoinModal() {
 }
 
 /* ────────────────────────────────────────────────────────────────
+   Coin — NodeMCU picker (only ever shown when more than one exists)
+──────────────────────────────────────────────────────────────── */
+function renderNodemcuList() {
+  var list = document.getElementById('nodemcu-list');
+  if (!list) return;
+  list.innerHTML = '';
+  _coinNodemcus.forEach(function(n) {
+    var row = document.createElement('div');
+    row.className = 'nodemcu-row';
+    row.onclick = function() { selectNodemcu(n.id); };
+    var nameEl = document.createElement('span');
+    nameEl.className = 'nm-name';
+    nameEl.textContent = n.title;
+    var arrowEl = document.createElement('span');
+    arrowEl.className = 'nm-arrow';
+    arrowEl.textContent = '\u203a';
+    row.appendChild(nameEl);
+    row.appendChild(arrowEl);
+    list.appendChild(row);
+  });
+}
+
+function closeNodemcuModal() {
+  var overlay = document.getElementById('nodemcu-modal-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+function selectNodemcu(id) {
+  _coinNodeID = id;
+  closeNodemcuModal();
+  doCoinStart(_pendingFromStatus, false);
+}
+
+// Entry point for both Insert Coin buttons. With one (or zero — config
+// hasn't loaded yet) coin slots configured this goes straight to
+// doCoinStart exactly as it always has; the picker only ever appears when
+// there's an actual choice to make.
+function startCoinFlow(fromStatus) {
+  if (_coinSuspended) {
+    // Let doCoinStart's own suspended check produce the toastr message —
+    // no point asking which slot when the user can't use any of them.
+    doCoinStart(fromStatus, false);
+    return;
+  }
+  if (_coinNodemcus.length > 1) {
+    _pendingFromStatus = !!fromStatus;
+    renderNodemcuList();
+    document.getElementById('nodemcu-modal-overlay').classList.add('open');
+    return;
+  }
+  _coinNodeID = (_coinNodemcus[0] && _coinNodemcus[0].id) || 1;
+  doCoinStart(fromStatus, false);
+}
+
+/* ────────────────────────────────────────────────────────────────
    Coin — session flow
 ──────────────────────────────────────────────────────────────── */
 function doCoinStart(fromStatus, isPolling) {
@@ -1979,7 +2061,7 @@ function doCoinStart(fromStatus, isPolling) {
     if (pauseBtn) pauseBtn.disabled = true;
   }
 
-  fetch('/cgi-bin/coin.sh?action=start', { cache: 'no-store' })
+  fetch('/cgi-bin/coin.sh?action=start&nodemcu=' + encodeURIComponent(_coinNodeID || 1), { cache: 'no-store' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (!isPolling && btn) { 
@@ -2008,6 +2090,13 @@ function doCoinStart(fromStatus, isPolling) {
       if (d.queued) {
         show('v-queue');
         document.getElementById('queue-pos').textContent = d.position;
+        var qSub = document.getElementById('queue-sub');
+        if (qSub) {
+          var qNode = _coinNodemcus.filter(function(n) { return n.id === _coinNodeID; })[0];
+          qSub.textContent = (qNode && _coinNodemcus.length > 1)
+            ? ('Someone else is currently using ' + qNode.title + '.')
+            : 'Someone else is currently using the coin slot.';
+        }
         if (!_queuePollID) {
           _queuePollID = setInterval(function() {
             doCoinStart(_coinFromStatus, true);

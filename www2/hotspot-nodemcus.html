@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="/css/bootstrap.min.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/style.css?v=1.0.0" rel="stylesheet">
+    <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
+    <style>
+        .field-hint { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
+        .empty-state { color:var(--text-secondary); font-size:13px; text-align:center; padding:28px 0; }
+
+        /* ── NodeMCU cards ──────────────────────────────────────── */
+        .nm-grid {
+            display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; padding:12px;
+        }
+        .nm-card {
+            background:var(--bg-input); border:1px solid var(--border-color);
+            border-radius:8px; padding:13px 14px; position:relative;
+        }
+        .nm-card.is-primary { border-color:#3d6fd6; }
+        .nm-card.is-disabled { opacity:.55; }
+        .nm-title { font-size:15px; font-weight:700; display:flex; align-items:center; gap:6px; }
+        .nm-meta  { font-size:12px; color:var(--text-secondary); margin-top:4px; line-height:1.6; font-family:monospace; }
+        .nm-tag   {
+            display:inline-block; padding:1px 7px; border-radius:3px; font-size:10px;
+            font-weight:700; background:rgba(255,255,255,.08); color:#aaa;
+        }
+        .nm-tag.primary  { background:rgba(61,111,214,.18); color:#7fa3ec; }
+        .nm-tag.off      { background:rgba(220,53,69,.18); color:#e17e88; }
+        .nm-actions { display:flex; gap:6px; margin-top:10px; }
+    </style>
+</head>
+<body>
+
+<div id="overlay">
+    <div id="overlay-blur"></div>
+    <div id="overlay-msg">
+        <div id="overlay-spinner"></div>
+        <span id="overlay-text"></span>
+    </div>
+</div>
+
+<script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
+
+<div class="container mt-4" style="max-width:900px;">
+
+    <!-- ── Add / edit NodeMCU ──────────────────────────────────── -->
+    <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span id="nm-form-title">Add NodeMCU</span>
+            <a href="#" id="nm-cancel-edit" style="display:none;font-size:12px;" onclick="cancelEdit();return false;">Cancel edit</a>
+        </div>
+        <div class="card-body">
+            <div class="field-hint mb-3">
+                Each additional unit needs its own IP and MAC (a static DHCP lease is created automatically,
+                the same way the primary NodeMCU on the Hotspot page works) and its own PSK. The primary
+                NodeMCU's title and in-service status are edited on the
+                <a href="/hotspot.html">Hotspot page</a> instead — this page only manages units #2 and up.
+            </div>
+            <div class="row g-3 align-items-end">
+                <div class="col-sm-6">
+                    <label class="form-label">Title</label>
+                    <input type="text" class="form-control" id="n-title" placeholder="Coin Slot 2" maxlength="40">
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label">IP</label>
+                    <input type="text" class="form-control" id="n-ip" placeholder="10.0.0.3">
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label">MAC <span class="field-hint d-inline">(no colons)</span></label>
+                    <input type="text" class="form-control" id="n-mac" placeholder="001122334455" maxlength="12">
+                </div>
+                <div class="col-sm-3">
+                    <label class="form-label">Port</label>
+                    <input type="number" class="form-control" id="n-port" placeholder="8080" min="1" max="65535">
+                </div>
+                <div class="col-sm-3 d-flex align-items-end">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="n-enabled" checked>
+                        <label class="form-check-label" for="n-enabled">In service</label>
+                    </div>
+                </div>
+                <div class="col-sm-12">
+                    <label class="form-label">PSK <span class="field-hint d-inline">(shared secret, must match the unit's own config)</span></label>
+                    <div style="position:relative;">
+                        <input type="password" class="form-control" id="n-psk" style="padding-right:36px !important;">
+                        <button type="button" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:13px;" onclick="togglePsk()">Show</button>
+                    </div>
+                </div>
+                <div class="col-sm-12">
+                    <button class="btn btn-primary" id="n-submit-btn" onclick="submitNodemcu()">Add NodeMCU</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── NodeMCU list ─────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span>NodeMCU Units</span>
+            <div class="d-flex gap-2">
+                <span id="nm-count" style="font-size:12px;color:var(--text-secondary);"></span>
+                <button class="btn btn-sm btn-outline-secondary" onclick="loadNodemcus()">Refresh</button>
+            </div>
+        </div>
+        <div id="nm-wrap">
+            <div class="empty-state" id="nm-empty">Loading…</div>
+            <div class="nm-grid" id="nm-cards" style="display:none;"></div>
+        </div>
+    </div>
+
+</div>
+
+<script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
+<script src="/js/jquery-3.7.1.min.js?v=1.0.0"></script>
+<script src="/js/toastr.min.js?v=1.0.0"></script>
+<script>
+toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
+function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
+function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
+function togglePsk(){
+    var f=document.getElementById('n-psk');
+    f.type = f.type==='password' ? 'text' : 'password';
+}
+
+var _editingId = null;
+
+function loadNodemcus(){
+    var empty = document.getElementById('nm-empty');
+    var cards = document.getElementById('nm-cards');
+    var cnt   = document.getElementById('nm-count');
+    empty.textContent='Loading…'; empty.style.display='block'; cards.style.display='none';
+    fetch('/cgi-bin/hotspot.cgi?action=nodemcus_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (!d.ok||!d.nodemcus.length){
+                empty.textContent='No NodeMCUs configured'; empty.style.display='block'; cards.style.display='none'; cnt.textContent=''; return;
+            }
+            cnt.textContent = d.nodemcus.length + ' unit'+(d.nodemcus.length>1?'s':'');
+            cards.innerHTML='';
+            d.nodemcus.forEach(function(n){
+                var card=document.createElement('div');
+                card.className='nm-card'+(n.primary?' is-primary':'')+(!n.enabled?' is-disabled':'');
+                var tags = '';
+                if (n.primary) tags += '<span class="nm-tag primary">Primary</span> ';
+                if (!n.enabled) tags += '<span class="nm-tag off">Out of service</span>';
+                var actions = n.primary
+                    ? '<a href="/hotspot.html" class="btn btn-sm btn-outline-secondary w-100">Edit on Hotspot page</a>'
+                    : '<button class="btn btn-sm btn-outline-secondary" onclick=\'editNodemcu('+JSON.stringify(n)+')\'>Edit</button>'
+                    + '<button class="btn btn-sm btn-outline-danger" onclick="delNodemcu('+n.id+',this)">Delete</button>';
+                card.innerHTML=
+                    '<div class="nm-title">'+escHtml(n.title||('Slot '+n.id))+'</div>'+
+                    '<div class="nm-meta">'+escHtml(n.ip)+':'+escHtml(String(n.port))+'<br>'+escHtml(formatMac(n.mac))+'</div>'+
+                    '<div class="mt-2">'+tags+'</div>'+
+                    '<div class="nm-actions">'+actions+'</div>';
+                cards.appendChild(card);
+            });
+            empty.style.display='none'; cards.style.display='grid';
+        })
+        .catch(function(){ empty.textContent='Failed to load NodeMCUs'; });
+}
+
+function formatMac(m){
+    m = String(m||'');
+    return m.length===12 ? m.replace(/(..)(?=.)/g,'$1:') : m;
+}
+
+function resetForm(){
+    document.getElementById('n-title').value='';
+    document.getElementById('n-ip').value='';
+    document.getElementById('n-mac').value='';
+    document.getElementById('n-port').value='';
+    document.getElementById('n-psk').value='';
+    document.getElementById('n-enabled').checked=true;
+}
+
+function editNodemcu(n){
+    _editingId = n.id;
+    document.getElementById('n-title').value = n.title||'';
+    document.getElementById('n-ip').value    = n.ip||'';
+    document.getElementById('n-mac').value   = n.mac||'';
+    document.getElementById('n-port').value  = n.port||'';
+    document.getElementById('n-psk').value   = n.psk||'';
+    document.getElementById('n-enabled').checked = !!n.enabled;
+    document.getElementById('nm-form-title').textContent = 'Edit ' + (n.title||('Slot '+n.id));
+    document.getElementById('n-submit-btn').textContent = 'Save Changes';
+    document.getElementById('nm-cancel-edit').style.display = 'inline';
+    window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function cancelEdit(){
+    _editingId = null;
+    resetForm();
+    document.getElementById('nm-form-title').textContent = 'Add NodeMCU';
+    document.getElementById('n-submit-btn').textContent = 'Add NodeMCU';
+    document.getElementById('nm-cancel-edit').style.display = 'none';
+}
+
+function submitNodemcu(){
+    var title = document.getElementById('n-title').value.trim();
+    var ip    = document.getElementById('n-ip').value.trim();
+    var mac   = document.getElementById('n-mac').value.trim().replace(/:/g,'').toLowerCase();
+    var port  = document.getElementById('n-port').value.trim() || '8080';
+    var psk   = document.getElementById('n-psk').value;
+    var enabled = document.getElementById('n-enabled').checked ? '1' : '0';
+
+    if (!ip){ toastr.warning('Enter an IP address'); return; }
+    if (!/^[0-9a-f]{12}$/.test(mac)){ toastr.warning('MAC must be 12 hex characters, no colons'); return; }
+    if (!psk){ toastr.warning('Enter a PSK'); return; }
+
+    var action = _editingId ? 'nodemcu_edit' : 'nodemcu_add';
+    var body = 'title='+encodeURIComponent(title)
+        + '&ip='+encodeURIComponent(ip)
+        + '&mac='+encodeURIComponent(mac)
+        + '&port='+encodeURIComponent(port)
+        + '&psk='+encodeURIComponent(psk)
+        + '&enabled='+enabled;
+    if (_editingId) body += '&id='+_editingId;
+
+    showOverlay(_editingId ? 'Saving…' : 'Adding…');
+    fetch('/cgi-bin/hotspot.cgi?action='+action,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        hideOverlay();
+        if (d.ok){
+            toastr.success(_editingId ? 'NodeMCU updated' : 'NodeMCU added');
+            cancelEdit();
+            loadNodemcus();
+        } else {
+            toastr.error('Save failed: '+(d.error||''));
+        }
+    })
+    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+}
+
+function delNodemcu(id, btn){
+    if (!confirm('Delete this NodeMCU? Customers using it mid-session may lose their connection.')) return;
+    btn.disabled=true; btn.textContent='…';
+    fetch('/cgi-bin/hotspot.cgi?action=nodemcu_del',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        if (d.ok){ toastr.success('Deleted'); if(_editingId===id) cancelEdit(); loadNodemcus(); }
+        else { toastr.error('Delete failed'); btn.disabled=false; btn.textContent='Delete'; }
+    })
+    .catch(function(){ toastr.error('Network error'); btn.disabled=false; btn.textContent='Delete'; });
+}
+
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+window.addEventListener('DOMContentLoaded', loadNodemcus);
+</script>
+</body>
+</html>

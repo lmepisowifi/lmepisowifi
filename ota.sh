@@ -651,34 +651,107 @@ merge_startup_markers() {
     _MSM_NEW="$ROOT/www2/sh/startup.sh"
     [ -f "$_MSM_OLD" ] && [ -f "$_MSM_NEW" ] || return 0
 
-    for _MSM_NAME in LAN_SPEEDS REBOOT_SCHED WAN_REPURPOSE; do
-        _MSM_CONTENT="/tmp/ota_marker_${_MSM_NAME}.$$"
-        awk -v beg="# --- BEGIN_${_MSM_NAME} ---" -v end="# --- END_${_MSM_NAME} ---" '
-            $0==beg { insec=1; next }
-            $0==end { insec=0; next }
-            insec   { print }
-        ' "$_MSM_OLD" > "$_MSM_CONTENT"
+    # Markers whose content is regenerated boilerplate — rebuilt from MIB or
+    # other persistent state on every boot, never user-set via a CGI — must
+    # always come from the new release, not be carried forward. Everything
+    # else discovered below is treated as persisted per-device runtime state.
+    _MSM_EXCLUDE="IPACL BANDSTEER_WD OTA_CHECK"
 
-        # Nothing was persisted for this marker — leave the new file's default.
-        if [ ! -s "$_MSM_CONTENT" ]; then
-            rm -f "$_MSM_CONTENT"; continue
+    # A marker line is identified by normalizing away ONLY the decorative
+    # characters around it (#, -, space, tab) and requiring what's left to
+    # equal the bare marker name exactly — not merely contain it as a
+    # substring. This tolerates cosmetic reformatting of the real
+    # "# --- BEGIN_X ---" line (dash count, spacing) while refusing to be
+    # fooled by a prose comment that happens to mention the marker name in a
+    # sentence — e.g. this very file's own "The section between
+    # BEGIN_LAN_SPEEDS and END_LAN_SPEEDS is managed automatically..." line.
+    # A plain substring match treats that sentence itself as the anchor and
+    # swallows everything up to the real marker, deleting the wait_for_iface()
+    # helper function in between — found by testing this fix against the
+    # actual file rather than a synthetic snippet.
+    _msm_marker_found() {
+        awk -v want="$1" '
+            { t = $0; gsub(/[-# \t]/, "", t); if (t == want) f = 1 }
+            END { exit (f ? 0 : 1) }
+        ' "$2"
+    }
+
+    # Discover every persisted marker actually present on THIS device's own
+    # prior startup.sh, instead of relying on a fixed, hand-maintained name
+    # list — so a brand-new persisted-state marker a future release adds is
+    # carried forward automatically, the same way WAN_REPURPOSE is here,
+    # without anyone having to remember to register its name in this
+    # function (and in self_heal()'s matching list) by hand.
+    _MSM_NAMES=$(awk '
+        { t = $0; gsub(/[-# \t]/, "", t); if (t ~ /^BEGIN_/) { sub(/^BEGIN_/, "", t); print t } }
+    ' "$_MSM_OLD")
+
+    for _MSM_NAME in $_MSM_NAMES; do
+        case " $_MSM_EXCLUDE " in
+            *" $_MSM_NAME "*) continue ;;
+        esac
+
+        _MSM_BEG="BEGIN_${_MSM_NAME}"
+        _MSM_END="END_${_MSM_NAME}"
+
+        # Require both anchors to be present in the freshly-shipped file
+        # before touching it at all. These markers are the ONLY way this
+        # function addresses a section; if a hand-edit to www2/sh/startup.sh
+        # changed the anchor text badly enough that even the normalized
+        # match above can't find it, we cannot safely locate that section,
+        # let alone edit it. Guessing here is exactly how a live "wlan0-vxd"
+        # WAN-repurpose setting could silently turn into whatever the
+        # tarball's committed content happened to be: a match that finds no
+        # anchor says nothing and just leaves the shipped content in place.
+        if ! _msm_marker_found "$_MSM_BEG" "$_MSM_NEW" || ! _msm_marker_found "$_MSM_END" "$_MSM_NEW"; then
+            log "  ERROR: $_MSM_NAME markers not found in new www2/sh/startup.sh — leaving this device's $_MSM_NAME setting UNVERIFIED, section left as shipped"
+            notify "OTA: could not confirm your $_MSM_NAME setting after the update (startup.sh template changed shape) — please check Admin > System and re-apply if needed"
+            continue
         fi
 
+        _MSM_CONTENT="/tmp/ota_marker_${_MSM_NAME}.$$"
+        awk -v beg="$_MSM_BEG" -v end="$_MSM_END" '
+            function norm(s,   t) { t = s; gsub(/[-# \t]/, "", t); return t }
+            { m = norm($0) }
+            m==beg { insec=1; next }
+            m==end { insec=0; next }
+            insec  { print }
+        ' "$_MSM_OLD" > "$_MSM_CONTENT"
+
+        # $_MSM_CONTENT now holds this device's OWN prior state for this marker
+        # — possibly empty, e.g. WAN-repurpose was never enabled here. Splice it
+        # into the freshly-shipped file EITHER WAY, replacing whatever the release
+        # tarball's own www2/sh/startup.sh happened to carry in that section. These
+        # three markers are pure per-device runtime state; the committed template's
+        # own marker content must never leak onto a device that never set it — if
+        # the repo's copy is ever hand-edited (or generated from someone's own test
+        # unit) with something non-empty checked in, a device with nothing persisted
+        # must end up blank here, not silently inherit it. (Skipping the splice when
+        # $_MSM_CONTENT was empty is exactly what let a committed
+        # "eth0.3.0" WAN-repurpose line leak onto every device that had never
+        # touched the feature.)
         _MSM_TMP="/tmp/ota_startup_sh.$$"
-        awk -v beg="# --- BEGIN_${_MSM_NAME} ---" -v end="# --- END_${_MSM_NAME} ---" \
-            -v contentfile="$_MSM_CONTENT" '
-            $0==beg {
-                print; insec=1
-                while ((getline line < contentfile) > 0) print line
-                close(contentfile)
-                next
+        awk -v beg="$_MSM_BEG" -v end="$_MSM_END" -v contentfile="$_MSM_CONTENT" '
+            function norm(s,   t) { t = s; gsub(/[-# \t]/, "", t); return t }
+            {
+                m = norm($0)
+                if (m == beg) {
+                    print; insec = 1
+                    while ((getline line < contentfile) > 0) print line
+                    close(contentfile)
+                    next
+                }
+                if (m == end) { insec = 0; print; next }
+                if (insec) next
+                print
             }
-            $0==end { insec=0; print; next }
-            insec   { next }
-            { print }
         ' "$_MSM_NEW" > "$_MSM_TMP" && mv "$_MSM_TMP" "$_MSM_NEW"
+        if [ -s "$_MSM_CONTENT" ]; then
+            log "  carried forward $_MSM_NAME from previous www2/sh/startup.sh"
+        else
+            log "  cleared $_MSM_NAME (not configured on this device) — ignored shipped template value"
+        fi
         rm -f "$_MSM_CONTENT"
-        log "  carried forward $_MSM_NAME from previous www2/sh/startup.sh"
     done
     chmod 755 "$_MSM_NEW" 2>/dev/null
 }
