@@ -78,12 +78,3 @@ wait_for_iface() {
 ( sleep 900; [ -x /lmepisowifi/ota.sh ] && sh /lmepisowifi/ota.sh cron >/dev/null 2>&1 ) &
 # --- END_OTA_CHECK ---
 
-
-# ---------------------------------------------------------------------------
-# Tailscale VPN (module) auto-start.
-# Managed automatically by the Tailscale page / tailscale_ctl.sh: the start
-# line below is written when the Tailscale switch is On and cleared when Off.
-# Preserved across OTA by ota.sh's merge_startup_markers. Do NOT edit by hand.
-# ---------------------------------------------------------------------------
-# --- BEGIN_TAILSCALE ---
-# --- END_TAILSCALE ---

@@ -35,17 +35,8 @@
     boa -c /lmepisowifi/httpd &
     sleep 1
     busybox httpd -h /lmepisowifi/www2 -p 8080
-    # Hotspot is now an installable module (see module_ctl.sh + the www2
-    # Modules page). reconcile enforces the saved install/uninstall state and,
-    # on the first boot after this update, migrates an existing built-in
-    # hotspot to "installed" so nothing changes for current operators. Only
-    # launch the hotspot controller when the module is installed.
-    chmod +x /lmepisowifi/module_ctl.sh 2>/dev/null
-    /lmepisowifi/module_ctl.sh reconcile >/dev/null 2>&1
-    if /lmepisowifi/module_ctl.sh is-active hotspot >/dev/null 2>&1; then
-        chmod +x /lmepisowifi/lmehspt.sh 2>/dev/null
-        [ -x /lmepisowifi/lmehspt.sh ] && /lmepisowifi/lmehspt.sh &
-    fi
+    chmod +x /lmepisowifi/lmehspt.sh
+    /lmepisowifi/lmehspt.sh &
     /lmepisowifi/www2/sh/startup.sh &
 
     # --- STEP 1.5b: Replay power-outage coin sessions ---

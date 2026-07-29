@@ -241,7 +241,6 @@
     // share the same card order.  _layout is null until the fetch resolves;
     // buildGrid() is called only after it arrives.
     var _layout = null;
-    var _hotspotInstalled = true;   // gated by the hotspot module (Modules page)
 
     function _defaultLayout() {
         return DEFAULT_ORDER.map(function(id){return {id:id, visible:true};});
@@ -254,7 +253,6 @@
         grid.innerHTML = '';
         layout.forEach(function(entry){
             if (!entry.visible) return;
-            if (entry.id === 'hotspot' && !_hotspotInstalled) return;  // module uninstalled
             var html = CARD_HTML[entry.id];
             if (!html) return;
             var wrap = document.createElement('div');
@@ -422,35 +420,30 @@
         // the card order is correct from the very first paint.  Data fetchers
         // are also deferred until after the grid exists so their set() calls
         // find the right DOM elements on the first response.
-        Promise.all([
-            fetch('/cgi-bin/lme.cgi?action=get_layout', {cache:'no-store'})
-                .then(function(r){ return r.json(); }).catch(function(){ return null; }),
-            fetch('/cgi-bin/modules.cgi?action=status&id=hotspot', {cache:'no-store'})
-                .then(function(r){ return r.json(); }).catch(function(){ return null; })
-        ]).then(function(res){
-            var d = res[0]; var mod = res[1];
-            _hotspotInstalled = (mod && mod.module) ? (mod.module.installed === true) : true;
-            if (Array.isArray(d)) {
-                var ids = d.map(function(c){return c.id;});
-                DEFAULT_ORDER.forEach(function(id){
-                    if (ids.indexOf(id) === -1) d.push({id:id, visible:true});
-                });
-                _layout = d;
-            } else {
-                _layout = _defaultLayout();
-            }
-            buildGrid();
-            fetchStatic();
-            fetchDynamic();
-            fetchLanLink();
-            fetchPon();
-            fetchWanProfiles();
-            if (_hotspotInstalled) fetchHotspotStats();
-            POLLS.forEach(function(p){
-                if (p.fn === fetchHotspotStats && !_hotspotInstalled) return;
-                setInterval(p.fn, p.ms);
+        fetch('/cgi-bin/lme.cgi?action=get_layout', {cache:'no-store'})
+            .then(function(r){ return r.json(); })
+            .then(function(d){
+                if (Array.isArray(d)) {
+                    var ids = d.map(function(c){return c.id;});
+                    DEFAULT_ORDER.forEach(function(id){
+                        if (ids.indexOf(id) === -1) d.push({id:id, visible:true});
+                    });
+                    _layout = d;
+                } else {
+                    _layout = _defaultLayout();
+                }
+            })
+            .catch(function(){ _layout = _defaultLayout(); })
+            .then(function(){
+                buildGrid();
+                fetchStatic();
+                fetchDynamic();
+                fetchLanLink();
+                fetchPon();
+                fetchWanProfiles();
+                fetchHotspotStats();
+                POLLS.forEach(function(p){ setInterval(p.fn, p.ms); });
             });
-        });
     });
     </script>
 

@@ -5,4 +5,3 @@ hotspot_data/
 *.ota_old
 dist/
 build/
-modules/

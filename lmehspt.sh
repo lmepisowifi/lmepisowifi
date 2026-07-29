@@ -10,9 +10,6 @@ HOTSPOT_INTERFACES="eth0.2.0 wlan0 wlan1"
 HOTSPOT_BR="br1"
 PORTAL_IP="10.0.0.1"
 PORTAL_PORT="80"
-DHCP_START="5"      # dynamic DHCP pool first host octet (within PORTAL_IP's /24)
-DHCP_END="254"      # dynamic DHCP pool last host octet
-DHCP_DNS="1.1.1.1"  # space-separated DNS servers pushed to clients (udhcpd "option dns")
 WWW2_PORT="8080"   # busybox httpd -h /lmepisowifi/www2 -p 8080 (admin UI). /admin on the portal redirects here.
 SESSION_FILE="/tmp/active_sessions.txt"
 USERS_FILE="/lmepisowifi/hotspot_data/users.txt"
@@ -648,29 +645,6 @@ kick_iface_stas() {
     done
 }
 
-# Deauthenticate ONE specific station by MAC, on whichever hotspot wlan
-# interface it's currently associated to — unlike kick_iface_stas above,
-# every OTHER connected station (customers included) is left untouched.
-#
-# Used right after (re)writing a NodeMCU's static DHCP lease (coin.sh's
-# NodeMCU config add/edit, and the primary's config_set path in hotspot.cgi).
-# Bouncing udhcpd alone only changes what the *server* will offer next; it
-# does nothing to a station that already holds a lease and has no reason to
-# ask again. Forcing a deauth here makes the device re-associate and issue a
-# fresh DHCPDISCOVER immediately, so it actually picks up the newly-assigned
-# static IP instead of silently sitting on whatever address it already had
-# until its own lease renewal timer (or a manual power-cycle) comes around.
-kick_sta_mac() {
-    local _target _hx _if
-    _target=$(printf '%s' "$1" | $BB tr 'A-Z' 'a-z' | $BB sed 's/[^0-9a-f]//g')
-    [ ${#_target} -eq 12 ] || return 1
-    for _if in $HOTSPOT_INTERFACES; do
-        case "$_if" in wlan*) ;; *) continue ;; esac
-        [ -f "/proc/${_if}/sta_info" ] || continue
-        iwpriv "$_if" del_sta "$_target" >/dev/null 2>&1
-    done
-}
-
 setup_network() {
     $BB brctl addbr $HOTSPOT_BR 2>/dev/null
     # Release any interface still enslaved in HOTSPOT_BR that is no longer
@@ -992,12 +966,12 @@ start_dhcp() {
     _pb=$(printf '%s' "$PORTAL_IP" | $BB sed 's/\.[^.]*$//')
     $BB touch /tmp/udhcpd.leases
     $BB cat > /tmp/hotspot_dhcp.conf << EOF
-start           ${_pb}.${DHCP_START:-5}
-end             ${_pb}.${DHCP_END:-254}
+start           ${_pb}.5
+end             ${_pb}.254
 interface       $HOTSPOT_BR
 option subnet   255.255.255.0
 option router   $PORTAL_IP
-option dns      ${DHCP_DNS:-1.1.1.1}
+option dns      1.1.1.1
 lease_file      /tmp/udhcpd.leases
 pidfile         /tmp/hotspot_dhcp.pid
 EOF
@@ -1336,9 +1310,6 @@ write_coin_config() {
         printf 'AUTO_PAUSE_ENABLED="%s"\n'  "${AUTO_PAUSE_ENABLED:-1}"
         printf 'PORTAL_IP="%s"\n'           "$PORTAL_IP"
         printf 'PORTAL_PORT="%s"\n'         "$PORTAL_PORT"
-        printf 'DHCP_START="%s"\n'          "$DHCP_START"
-        printf 'DHCP_END="%s"\n'            "$DHCP_END"
-        printf 'DHCP_DNS="%s"\n'            "$DHCP_DNS"
         printf 'ANTI_TETHER="%s"\n'         "${ANTI_TETHER:-0}"
         printf 'LAN_ISOLATE="%s"\n'         "${LAN_ISOLATE:-1}"
         printf 'MAC_RANDOMIZATION_FIX="%s"\n' "${MAC_RANDOMIZATION_FIX:-1}"
@@ -1717,33 +1688,6 @@ fi
             rm -f /tmp/hotspot_portal_ip_new /tmp/hotspot_portal_port_new \
                   /tmp/hotspot_portal_ip_old /tmp/hotspot_portal_port_old
             [ -n "$_new_pip" ] && apply_portal_ip_change "$_new_pip" "${_new_ppt:-$PORTAL_PORT}" "$_old_pip" "$_old_ppt"
-        fi
-
-        # DHCP range / DNS change requested by hotspot.cgi (dhcp_set action)
-        # that did NOT move the gateway (a gateway move goes through the
-        # portal_ip_reload path above, which restarts DHCP itself). Rebuild the
-        # lease pool in place: DHCP_START/DHCP_END/DHCP_DNS were already
-        # re-sourced from coin_config.env at the top of this tick. The lease DB
-        # is wiped because the pool boundaries moved - keeping stale leases could
-        # hand an in-pool address to a client now outside it, or collide with a
-        # NodeMCU static lease.
-        if [ -f /tmp/hotspot_dhcp_reload ]; then
-            rm -f /tmp/hotspot_dhcp_reload
-            [ -f /tmp/hotspot_dhcp.pid ] && { kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null; rm -f /tmp/hotspot_dhcp.pid; }
-            for _pid in $($BB ps | $BB grep "hotspot_dhcp.conf" | $BB grep -v grep | $BB awk '{print $1}'); do
-                kill -9 "$_pid" 2>/dev/null
-            done
-            rm -f /tmp/udhcpd.leases
-            start_dhcp
-            # Nudge every NodeMCU to re-DHCP now so a moved pool (new static
-            # IPs) takes effect immediately instead of at its next lease renewal.
-            [ -n "$NODEMCU_MAC" ] && kick_sta_mac "$NODEMCU_MAC"
-            if [ -f "$NODEMCU_EXTRA_FILE" ]; then
-                while IFS='|' read -r _dnid _dnt _dnip _dnmac _dnp _dnk _dne; do
-                    case "$_dnid" in ''|*[!0-9]*) continue ;; esac
-                    [ -n "$_dnmac" ] && kick_sta_mac "$_dnmac"
-                done < "$NODEMCU_EXTRA_FILE"
-            fi
         fi
 
         # Anti-tether hot-toggle: if ANTI_TETHER changed since last tick, apply.

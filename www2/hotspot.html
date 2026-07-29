@@ -181,10 +181,10 @@
         </div>
     </div>
 
-    <!-- ═══ Coin Acceptor ═══ -->
+    <!-- ═══ Coin Acceptor & NodeMCU ═══ -->
     <div class="card">
         <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
-            <span>Coin Acceptor</span>
+            <span>Coin Acceptor &amp; NodeMCU</span>
             <div class="d-flex align-items-center gap-2">
                 <span style="font-size:12px;color:var(--text-secondary);" id="coin-toggle-label">Coin: Off</span>
                 <div class="wlan-toggle" id="coin-toggle" onclick="toggleCoin()" title="Toggle coin acceptor">
@@ -194,6 +194,24 @@
         </div>
         <div class="card-body">
             <div class="row g-3">
+                <div class="col-sm-8">
+                    <label class="form-label">Title <span class="field-hint d-inline">(shown to customers when multiple units exist)</span></label>
+                    <input type="text" class="form-control" id="c-nodemcu-title" placeholder="Coin Slot" maxlength="40">
+                </div>
+                <div class="col-sm-4 d-flex align-items-end">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="c-nodemcu-enabled">
+                        <label class="form-check-label" for="c-nodemcu-enabled">In service</label>
+                    </div>
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label">NodeMCU IP</label>
+                    <input type="text" class="form-control" id="c-nodemcu-ip" placeholder="192.168.99.2">
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label">NodeMCU MAC <span class="field-hint d-inline">(no colons)</span></label>
+                    <input type="text" class="form-control" id="c-nodemcu-mac" placeholder="e868e7c81814" maxlength="12">
+                </div>
                 <div class="col-sm-6">
                     <label class="form-label">Coin Session Timeout <span class="field-hint d-inline">(seconds)</span></label>
                     <input type="number" class="form-control" id="c-coin-timeout" placeholder="30" min="5">
@@ -208,6 +226,13 @@
                     <input type="number" class="form-control" id="c-cooldown" placeholder="300" min="30">
                     <div class="field-hint">Duration of coinslot suspension after strikes reached</div>
                 </div>
+                <div class="col-sm-12">
+                    <label class="form-label">Coin PSK <span class="field-hint d-inline">(shared secret)</span></label>
+                    <div style="position:relative;">
+                        <input type="password" class="form-control" id="c-coin-psk" style="padding-right:36px !important;">
+                        <button type="button" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:13px;" onclick="togglePsk()">Show</button>
+                    </div>
+                </div>
             </div>
 
             <!-- WiFi Rates -->
@@ -220,12 +245,12 @@
                 <a href="/hotspot-rates.html" class="btn btn-outline-primary btn-sm">Manage WiFi Rates &rarr;</a>
             </div>
 
-            <!-- NodeMCU Units -->
+            <!-- Additional NodeMCUs -->
             <hr class="my-3" style="border-color:var(--border-color);">
             <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
                 <div>
-                    <label class="form-label mb-0">NodeMCU Units</label>
-                    <div class="field-hint">Add, edit, reorder, and remove coin acceptor units (including the primary)</div>
+                    <label class="form-label mb-0">Additional NodeMCUs</label>
+                    <div class="field-hint">Run more than one coin acceptor — customers pick a slot by title</div>
                 </div>
                 <a href="/hotspot-nodemcus.html" class="btn btn-outline-primary btn-sm">Manage NodeMCUs &rarr;</a>
             </div>
@@ -234,6 +259,7 @@
             <div class="d-flex gap-2 flex-wrap">
                 <button class="btn btn-primary" onclick="saveCoin()">Save Coin Settings</button>
                 <button class="btn btn-outline-secondary" onclick="loadConfig()">Discard</button>
+                <button class="btn btn-outline-danger ms-sm-auto" onclick="resetCoinAcceptor()" title="Wipes the NodeMCU's WiFi config and drops it into the open setup AP for re-provisioning">Reset NodeMCU</button>
             </div>
         </div>
     </div>
@@ -322,9 +348,14 @@ function loadConfig(){
             setRateField('r-unauth-val','r-unauth-unit',  d.unauth_rate||'256kbit');
             document.getElementById('r-inactivity').value = d.inactivity_timeout||'300';
             setAutoPauseUI(d.auto_pause_enabled===true||d.auto_pause_enabled==='1'||d.auto_pause_enabled===1);
+            document.getElementById('c-nodemcu-ip').value    = d.nodemcu_ip||'';
+            document.getElementById('c-nodemcu-mac').value   = d.nodemcu_mac||'';
+            document.getElementById('c-nodemcu-title').value = d.nodemcu_1_title||'';
+            document.getElementById('c-nodemcu-enabled').checked = !(d.nodemcu_1_enabled===false||d.nodemcu_1_enabled==='0'||d.nodemcu_1_enabled===0);
             document.getElementById('c-coin-timeout').value  = d.coin_timeout||'';
             document.getElementById('c-strike-threshold').value = d.coin_strike_threshold||'';
             document.getElementById('c-cooldown').value       = d.coin_cooldown||'';
+            document.getElementById('c-coin-psk').value      = d.coin_psk||'';
             setCoinToggleUI(d.coin_on);
             setAntiTetherUI(d.anti_tether===true||d.anti_tether==='1'||d.anti_tether===1);
             setLanIsolateUI(d.lan_isolate===true||d.lan_isolate==='1'||d.lan_isolate===1);
@@ -428,6 +459,18 @@ function toggleMacFix(){
 }
 
 /* ── Coin toggle ── */
+function togglePsk(){ var el=document.getElementById('c-coin-psk'); var show=el.type==='password'; el.type=show?'text':'password'; var b=el.parentNode.querySelector('button'); if(b) b.textContent=show?'Hide':'Show'; }
+
+/* ── Reset NodeMCU (wipe WiFi config, drop back to setup AP) ── */
+function resetCoinAcceptor(){
+    if(!confirm('This wipes the NodeMCU\'s WiFi config and drops it back into the open setup AP. It will stop accepting coins until you re-provision it. Continue?')) return;
+    showOverlay('Resetting NodeMCU…');
+    postForm('coin_reset','',function(d){
+        hideOverlay();
+        if(d.ok){ toastr.success(d.msg||'NodeMCU reset'); }
+        else { toastr.error(d.error||'Reset failed'); }
+    });
+}
 function setCoinToggleUI(on){ var tog=document.getElementById('coin-toggle'); var lbl=document.getElementById('coin-toggle-label'); if(on){tog.classList.add('on');lbl.textContent='Coin: On';}else{tog.classList.remove('on');lbl.textContent='Coin: Off';} }
 function toggleCoin(){
     var tog=document.getElementById('coin-toggle'); tog.classList.add('busy');
@@ -441,12 +484,22 @@ function toggleCoin(){
 
 function saveCoin(){
     var p={
+        nodemcu_ip:     document.getElementById('c-nodemcu-ip').value.trim(),
+        nodemcu_mac:    document.getElementById('c-nodemcu-mac').value.trim().replace(/:/g,'').toLowerCase(),
+        nodemcu_1_title:   document.getElementById('c-nodemcu-title').value.trim(),
+        nodemcu_1_enabled: document.getElementById('c-nodemcu-enabled').checked ? '1' : '0',
         coin_timeout:   document.getElementById('c-coin-timeout').value.trim(),
+        coin_psk:       document.getElementById('c-coin-psk').value,
         coin_strike_threshold: document.getElementById('c-strike-threshold').value.trim(),
         coin_cooldown:  document.getElementById('c-cooldown').value.trim()
     };
     showOverlay('Saving coin settings…');
-    var body='coin_timeout='+encodeURIComponent(p.coin_timeout)
+    var body='nodemcu_ip='+encodeURIComponent(p.nodemcu_ip)
+        +'&nodemcu_mac='+encodeURIComponent(p.nodemcu_mac)
+        +'&nodemcu_1_title='+encodeURIComponent(p.nodemcu_1_title)
+        +'&nodemcu_1_enabled='+encodeURIComponent(p.nodemcu_1_enabled)
+        +'&coin_timeout='+encodeURIComponent(p.coin_timeout)
+        +'&coin_psk='+encodeURIComponent(p.coin_psk)
         +'&coin_strike_threshold='+encodeURIComponent(p.coin_strike_threshold)
         +'&coin_cooldown='+encodeURIComponent(p.coin_cooldown);
     postForm('config_set',body,function(d){hideOverlay();if(d.ok)toastr.success('Coin settings saved');else toastr.error('Save failed: '+(d.error||''));});

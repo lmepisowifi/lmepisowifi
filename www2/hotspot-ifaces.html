@@ -140,15 +140,20 @@
         <div class="card-header">Bridge Interface</div>
         <div class="card-body">
             <div class="row g-3">
-                <div class="col-12 col-sm-8">
+                <div class="col-12 col-sm-5">
                     <label class="form-label">Bridge Device Name</label>
                     <input type="text" class="form-control" id="bridge-name" placeholder="br1">
                     <div class="field-hint">The bridge device that enslaves hotspot ports (e.g. <code>br1</code>)</div>
                 </div>
                 <div class="col-12 col-sm-4">
+                    <label class="form-label">Portal IP Address</label>
+                    <input type="text" class="form-control" id="portal-ip" placeholder="192.168.99.1">
+                    <div class="field-hint">IP assigned to the bridge / captive portal</div>
+                </div>
+                <div class="col-12 col-sm-3">
                     <label class="form-label">Portal Port</label>
                     <input type="number" class="form-control" id="portal-port" placeholder="808" min="1" max="65535" oninput="checkPortalPort()">
-                    <div class="field-hint">HTTP port for the portal. The gateway IP and DHCP range are set on the <a href="/hotspot-dhcp.html">DHCP Settings</a> page.</div>
+                    <div class="field-hint">HTTP port for the portal</div>
                 </div>
             </div>
             <div class="field-hint mt-2" id="port80-warning" style="display:none;color:var(--bs-danger,#dc3545);">
@@ -218,6 +223,7 @@ function loadIfaces(){
             _selected = (d.hotspot_interfaces || '').split(/\s+/).filter(Boolean);
 
             document.getElementById('bridge-name').value  = d.hotspot_br   || '';
+            document.getElementById('portal-ip').value    = d.portal_ip    || '';
             document.getElementById('portal-port').value  = d.portal_port  || '';
             checkPortalPort();
             document.getElementById('bridge-name-label').textContent = '(' + (d.hotspot_br||'br1') + ')';
@@ -301,6 +307,7 @@ function toggleIface(name){
 
 function saveIfaces(){
     var br     = document.getElementById('bridge-name').value.trim();
+    var pip    = document.getElementById('portal-ip').value.trim();
     var pport  = document.getElementById('portal-port').value.trim();
     var ifaces = _selected.join(' ');
 
@@ -313,6 +320,7 @@ function saveIfaces(){
         headers:{'Content-Type':'application/x-www-form-urlencoded'},
         body: 'hotspot_br='         + encodeURIComponent(br)
             + '&hotspot_interfaces='+ encodeURIComponent(ifaces)
+            + '&portal_ip='         + encodeURIComponent(pip)
             + '&portal_port='       + encodeURIComponent(pport)
     })
     .then(function(r){ return r.json(); })

@@ -43,7 +43,7 @@ BB="busybox"
 # replaced on every update. globals.env (user settings) is NOT a component, so
 # it is preserved; lmehspt.sh's seed_globals() merges any new default keys into
 # it on boot after the swap.
-COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh module_ctl.sh"
+COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh"
 # NOTE: portal images (hotspot/img/promo1..5.* and portal_logo.*) are NOT
 # listed here as fixed paths, because hotspot.cgi lets the admin upload any
 # of jpg/jpeg/png/ico/gif/webp per slot — a fixed "promo1.jpg" entry would
@@ -340,19 +340,12 @@ do_apply() {
             _do_rollback_set "$_swapped"; set_status "rolledback"; rm -rf "$STAGE"; return 1
         fi
     done
-    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" "$ROOT/startup.sh" "$ROOT/module_ctl.sh" 2>/dev/null
+    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" "$ROOT/startup.sh" 2>/dev/null
     chmod +x "$ROOT"/hotspot/cgi-bin/*.sh "$ROOT"/www2/cgi-bin/* "$ROOT"/www2/sh/*.sh 2>/dev/null
 
     # Restore runtime-persisted WAN-repurpose/reboot-sched/LAN-speed settings
     # into the freshly-swapped www2/sh/startup.sh (see function comment).
     case "$_swapped" in *www2*) merge_startup_markers ;; esac
-
-    # Re-assert module install/uninstall state after the swap: the base bundle
-    # always ships the hotspot files, so a device that had the hotspot module
-    # UNINSTALLED would otherwise silently get it back on every update. reconcile
-    # removes the re-laid hotspot files again (keeping hotspot_data + settings)
-    # when the saved state is "uninstalled", and is a no-op when it's installed.
-    [ -x "$ROOT/module_ctl.sh" ] && "$ROOT/module_ctl.sh" reconcile >/dev/null 2>&1
 
     # record new version early so health-checked processes see it
     # (back up the old VERSION so a failed health check can restore it)
