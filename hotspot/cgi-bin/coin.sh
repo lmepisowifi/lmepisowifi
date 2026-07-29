@@ -24,14 +24,34 @@ _md5() { printf '%s' "$1" | md5sum | awk '{print $1}'; }
 # above) rather than through a /tmp cache — one extra flash *read* per request
 # is negligible, and it means there's nothing here that can go stale.
 NODEMCU_EXTRA_FILE="${NODEMCU_EXTRA_FILE:-/lmepisowifi/hotspot_data/nodemcus_extra.txt}"
+NODEMCU_ORDER_FILE="${NODEMCU_ORDER_FILE:-/lmepisowifi/hotspot_data/nodemcus_order.txt}"
 
 _esc_json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-# Every configured node id, primary first, space-separated.
+# Every configured node id in display order, space-separated. Natural order is
+# primary (#1) first - but only while it is still configured; a primary that
+# was deleted from the admin has an empty IP and MAC, so it is skipped here too
+# - then the extras file. That natural list is then reordered by the shared
+# nodemcus_order.txt (written by hotspot.cgi's nodemcu_reorder), with any id not
+# named in the order file kept in its natural position at the end.
 _node_ids() {
-    printf '1'
-    [ -f "$NODEMCU_EXTRA_FILE" ] && $BB awk -F'|' '$1 ~ /^[0-9]+$/ {printf " %s", $1}' "$NODEMCU_EXTRA_FILE"
-    printf '\n'
+    _nat=""
+    [ -n "$NODEMCU_IP" ] || [ -n "$NODEMCU_MAC" ] && _nat="1"
+    if [ -f "$NODEMCU_EXTRA_FILE" ]; then
+        _nat="$_nat $($BB awk -F'|' '$1 ~ /^[0-9]+$/ {printf " %s", $1}' "$NODEMCU_EXTRA_FILE")"
+    fi
+    $BB awk -v nat="$_nat" -v orderfile="$NODEMCU_ORDER_FILE" '
+    BEGIN{
+        ne=split(nat, a, " "); nn=0;
+        for(i=1;i<=ne;i++){ if(a[i]!=""){ have[a[i]]=1; natl[nn++]=a[i]; } }
+        n=0;
+        while((getline l < orderfile) > 0){ gsub(/[^0-9]/,"",l); if(l!="") ord[n++]=l; }
+        close(orderfile);
+        out=""; sep="";
+        for(i=0;i<n;i++){ id=ord[i]; if(have[id] && !done[id]){ out=out sep id; sep=" "; done[id]=1; } }
+        for(i=0;i<nn;i++){ id=natl[i]; if(!done[id]){ out=out sep id; sep=" "; done[id]=1; } }
+        print out;
+    }'
 }
 
 # One field of a node's row. $1=node id, $2=column per the schema above
@@ -206,7 +226,10 @@ if [ "$ACTION" = "config" ]; then
         fi
         _ok "{\"enabled\":true,\"timeout\":${COIN_TIMEOUT},\"rates\":\"${COIN_RATES}\",\"resume\":${RESUME_FLAG},\"resume_nodemcu\":${RESUME_NODE},\"pending\":${PENDING_FLAG},\"suspended\":${SUSPENDED_FLAG},\"cooldown_remaining\":${COOLDOWN_REMAINING},\"nodemcus\":$(_node_list_json)}"
     else
-        _ok '{"enabled":false}'
+        # Coin acceptor toggled off. Still expose the configured rates so the
+        # portal can keep showing the WiFi Rates button independently of the
+        # coin toggle (nodemcus/resume/etc. are coin-only and stay omitted).
+        _ok "{\"enabled\":false,\"rates\":\"${COIN_RATES}\"}"
     fi
 fi
 

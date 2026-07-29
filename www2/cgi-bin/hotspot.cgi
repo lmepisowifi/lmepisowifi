@@ -213,6 +213,89 @@ _fmt_secs() {
 }
 VOUCHER_FILE="$HDATA/vouchers.txt"
 NODEMCU_EXTRA_FILE="$HDATA/nodemcus_extra.txt"
+NODEMCU_ORDER_FILE="$HDATA/nodemcus_order.txt"
+# Drop a node id from the saved display-order file (best effort - the order
+# file is advisory; nodemcus_get and coin.sh both re-filter it against the
+# live set of ids, so a stale entry can never hide or duplicate a unit).
+_order_remove_id() {
+    [ -f "$NODEMCU_ORDER_FILE" ] || return 0
+    $BB grep -vx "$1" "$NODEMCU_ORDER_FILE" > "${NODEMCU_ORDER_FILE}.tmp" 2>/dev/null \
+        && $BB mv "${NODEMCU_ORDER_FILE}.tmp" "$NODEMCU_ORDER_FILE"
+    rm -f "${NODEMCU_ORDER_FILE}.tmp" 2>/dev/null
+}
+
+# ── DHCP pool / NodeMCU IP helpers ──────────────────────────────────────────
+# NodeMCU static IPs occupy the addresses BELOW the DHCP dynamic pool: from one
+# past the gateway up to one before the pool start. e.g. gateway .1 + DHCP
+# start .5  =>  usable NodeMCU IPs .2 .3 .4  (so at most 3 units).
+_valid_ipv4() {
+    printf '%s' "$1" | $BB awk -F. '
+        NF!=4 { exit 1 }
+        { for(i=1;i<=4;i++){ if($i!~/^[0-9]+$/ || $i+0>255) exit 1 } exit 0 }'
+}
+_dhcp_prefix()   { printf '%s' "${PORTAL_IP:-$(read_lmehspt_var PORTAL_IP)}" | $BB sed 's/\.[^.]*$//'; }
+_dhcp_gw_octet() { printf '%s' "${PORTAL_IP:-$(read_lmehspt_var PORTAL_IP)}" | $BB sed 's/.*\.//'; }
+_dhcp_start_octet() {
+    _v="${DHCP_START:-$(read_lmehspt_var DHCP_START)}"
+    case "$_v" in ''|*[!0-9]*) _v=5 ;; esac
+    printf '%s' "$_v"
+}
+# Usable NodeMCU slot count = start - gateway - 1  (clamped at 0).
+_nodemcu_pool_size() {
+    _gw=$(_dhcp_gw_octet); _st=$(_dhcp_start_octet)
+    _n=$(( _st - _gw - 1 )); [ "$_n" -lt 0 ] && _n=0
+    printf '%s' "$_n"
+}
+# Usable NodeMCU IPs, ascending, one per line.
+_nodemcu_pool_ips() {
+    _pfx=$(_dhcp_prefix); _gw=$(_dhcp_gw_octet); _st=$(_dhcp_start_octet)
+    _o=$(( _gw + 1 ))
+    while [ "$_o" -lt "$_st" ]; do printf '%s.%s\n' "$_pfx" "$_o"; _o=$(( _o + 1 )); done
+}
+# IPs already taken by configured NodeMCUs (primary + extras), one per line.
+_nodemcu_used_ips() {
+    _pip="${NODEMCU_IP:-$(read_lmehspt_var NODEMCU_IP)}"
+    [ -n "$_pip" ] && printf '%s\n' "$_pip"
+    [ -f "$NODEMCU_EXTRA_FILE" ] && $BB awk -F'|' '$1 ~ /^[0-9]+$/ && $3!="" {print $3}' "$NODEMCU_EXTRA_FILE"
+}
+# Lowest usable pool IP not in use; empty when the pool is full.
+_next_free_nodemcu_ip() {
+    _used=$(_nodemcu_used_ips)
+    for _ip in $(_nodemcu_pool_ips); do
+        printf '%s\n' "$_used" | $BB grep -qx "$_ip" || { printf '%s' "$_ip"; return 0; }
+    done
+}
+# Count of configured NodeMCUs (primary counts only when it has an IP).
+_nodemcu_count() {
+    _c=0
+    _pip="${NODEMCU_IP:-$(read_lmehspt_var NODEMCU_IP)}"
+    [ -n "$_pip" ] && _c=1
+    [ -f "$NODEMCU_EXTRA_FILE" ] && _c=$(( _c + $($BB awk -F'|' '$1 ~ /^[0-9]+$/ {n++} END{print n+0}' "$NODEMCU_EXTRA_FILE") ))
+    printf '%s' "$_c"
+}
+# Reassign every NodeMCU a pool IP (lowest-first, primary then extras order) so
+# they stay valid after the pool moves. Caller must have confirmed count <=
+# pool size and set the in-memory PORTAL_IP / DHCP_START to the NEW values.
+_dhcp_renormalize_ips() {
+    set -- $(_nodemcu_pool_ips)
+    _i=1
+    _pip="${NODEMCU_IP:-$(read_lmehspt_var NODEMCU_IP)}"
+    if [ -n "$_pip" ]; then
+        eval "_new=\${$_i}"
+        save_coin_env_var NODEMCU_IP "$_new"; set_lmehspt_var NODEMCU_IP "$_new"; set_globals_var NODEMCU_IP "$_new"
+        _i=$(( _i + 1 ))
+    fi
+    if [ -f "$NODEMCU_EXTRA_FILE" ]; then
+        : > /tmp/nm_renorm.tmp
+        while IFS='|' read -r _rid _rt _rip _rm _rp _rk _re; do
+            case "$_rid" in ''|*[!0-9]*) continue ;; esac
+            eval "_new=\${$_i}"
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$_rid" "$_rt" "$_new" "$_rm" "$_rp" "$_rk" "$_re" >> /tmp/nm_renorm.tmp
+            _i=$(( _i + 1 ))
+        done < "$NODEMCU_EXTRA_FILE"
+        $BB mv /tmp/nm_renorm.tmp "$NODEMCU_EXTRA_FILE"; sync
+    fi
+}
 LMEHSPT="/lmepisowifi/lmehspt.sh"
 COIN_CONFIG="/tmp/coin_config.env"
 GLOBALS_ENV="/lmepisowifi/globals.env"
@@ -482,6 +565,12 @@ if echo "$QS" | $BB grep -q "action=config_set"; then
         load_coin_env
         LMEHSPT_LIB_ONLY=1
         . /lmepisowifi/lmehspt.sh --lib
+        # busybox udhcpd re-issues whatever a MAC's leases-file entry already
+        # says regardless of a freshly (re)written static_lease line — wipe
+        # its memory so the restarted daemon has no stale record to fall
+        # back on. Same fix apply_portal_ip_change already relies on for
+        # subnet changes; this is the same class of staleness on a MAC swap.
+        rm -f /tmp/udhcpd.leases
         start_dhcp
 
         # Flush the kernel's ARP/neighbor cache for the old and new NodeMCU
@@ -501,6 +590,10 @@ if echo "$QS" | $BB grep -q "action=config_set"; then
             ip neigh del "$NEW_NIP" dev "$HOTSPOT_BR" 2>/dev/null
             $BB arp -d "$NEW_NIP" 2>/dev/null
         fi
+        # Force the device off its current association so it re-DHCPs against
+        # the just-restarted daemon right away instead of only picking up the
+        # new static lease whenever its own renewal timer next fires.
+        kick_sta_mac "$NEW_NMC"
         # Proactively re-resolve so the cache already reflects the new device
         # by the time it makes its first request, rather than relying solely
         # on Guard 2's own on-demand ping-and-retry.
@@ -1175,18 +1268,61 @@ if echo "$QS" | $BB grep -q "action=nodemcus_get"; then
     N1_PSK="${COIN_PSK:-$(read_lmehspt_var COIN_PSK)}"
     N1_EN_BOOL="true"; [ "${N1_EN:-1}" = "0" ] && N1_EN_BOOL="false"
 
-    OUT="[{\"id\":1,\"title\":\"$(esc_json "${N1_TITLE:-Coin Slot}")\",\"ip\":\"$(esc_json "$N1_IP")\",\"mac\":\"$(esc_json "$N1_MAC")\",\"port\":\"$(esc_json "$N1_PORT")\",\"psk\":\"$(esc_json "$N1_PSK")\",\"enabled\":$N1_EN_BOOL,\"primary\":true}"
+    # Build "id<TAB>{json}" rows for every unit, then emit them in the saved
+    # display order (nodemcus_order.txt). The primary (#1) is only included
+    # while it is still configured - after a primary delete its IP and MAC are
+    # both cleared, and that empty state is the signal that there is no primary
+    # any more (so it drops out of the table entirely).
+    NM_MAP="/tmp/nm_map.$$"
+    : > "$NM_MAP"
+    if [ -n "$N1_IP" ] || [ -n "$N1_MAC" ]; then
+        printf '1\t{"id":1,"title":"%s","ip":"%s","mac":"%s","port":"%s","psk":"%s","enabled":%s,"primary":true}\n' \
+            "$(esc_json "${N1_TITLE:-Coin Slot}")" "$(esc_json "$N1_IP")" "$(esc_json "$N1_MAC")" "$(esc_json "$N1_PORT")" "$(esc_json "$N1_PSK")" "$N1_EN_BOOL" >> "$NM_MAP"
+    fi
 
     if [ -f "$NODEMCU_EXTRA_FILE" ]; then
         while IFS='|' read -r nid ntitle nip nmac nport npsk nen; do
             case "$nid" in ''|*[!0-9]*) continue ;; esac
             EN_BOOL="true"; [ "${nen:-1}" = "0" ] && EN_BOOL="false"
-            OUT="${OUT},{\"id\":$nid,\"title\":\"$(esc_json "$ntitle")\",\"ip\":\"$(esc_json "$nip")\",\"mac\":\"$(esc_json "$nmac")\",\"port\":\"$(esc_json "$nport")\",\"psk\":\"$(esc_json "$npsk")\",\"enabled\":$EN_BOOL,\"primary\":false}"
+            printf '%s\t{"id":%s,"title":"%s","ip":"%s","mac":"%s","port":"%s","psk":"%s","enabled":%s,"primary":false}\n' \
+                "$nid" "$nid" "$(esc_json "$ntitle")" "$(esc_json "$nip")" "$(esc_json "$nmac")" "$(esc_json "$nport")" "$(esc_json "$npsk")" "$EN_BOOL" >> "$NM_MAP"
         done < "$NODEMCU_EXTRA_FILE"
     fi
-    ok_json "{\"ok\":true,\"nodemcus\":${OUT}]}"
+
+    OUT=$($BB awk -F'\t' -v orderfile="$NODEMCU_ORDER_FILE" '
+        BEGIN{
+            n=0;
+            while((getline l < orderfile) > 0){ gsub(/[^0-9]/,"",l); if(l!="") ord[n++]=l; }
+            close(orderfile);
+        }
+        { obj[$1]=$2; nat[nn++]=$1; have[$1]=1; }
+        END{
+            out=""; sep="";
+            for(i=0;i<n;i++){ id=ord[i]; if(have[id] && !done[id]){ out=out sep obj[id]; sep=","; done[id]=1; } }
+            for(i=0;i<nn;i++){ id=nat[i]; if(!done[id]){ out=out sep obj[id]; sep=","; done[id]=1; } }
+            printf "[%s]", out;
+        }' "$NM_MAP")
+    rm -f "$NM_MAP"
+    NMAX=$(_nodemcu_pool_size)
+    ok_json "{\"ok\":true,\"nodemcus\":${OUT},\"max_nodemcus\":$NMAX}"
 fi
 
+# ================================================================
+# POST ?action=nodemcu_reorder  body: order=1,3,2
+# Persists the display order shared by the NodeMCUs admin table and the
+# captive portal's coin-slot picker (coin.sh reads the same file). Any id not
+# listed here falls back to its natural position (primary first, then the
+# extras file), so a partial list can never drop a unit.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=nodemcu_reorder"; then
+    read -n "$CONTENT_LENGTH" POST_DATA
+    ORD=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*order=\([^&]*\).*/\1/p' | urldecode)
+    mkdir -p "$HDATA"
+    printf '%s' "$ORD" | $BB tr ',' '\n' | $BB tr -cd '0-9\n' | $BB grep -v '^$' > "${NODEMCU_ORDER_FILE}.tmp" 2>/dev/null
+    $BB mv "${NODEMCU_ORDER_FILE}.tmp" "$NODEMCU_ORDER_FILE" 2>/dev/null
+    sync
+    ok_json "{\"ok\":true}"
+fi
 # ================================================================
 # POST ?action=nodemcu_add  body: title,ip,mac,port,psk,enabled
 # Adds an additional coin acceptor unit (#2+). The primary (#1) is managed
@@ -1195,20 +1331,20 @@ fi
 if echo "$QS" | $BB grep -q "action=nodemcu_add"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     NTITLE=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*title=\([^&]*\).*/\1/p' | urldecode | $BB tr -d '|\r\n')
-    NIPV=$(printf '%s'   "$POST_DATA" | $BB sed -n 's/.*ip=\([^&]*\).*/\1/p'    | urldecode)
     NMACV=$(printf '%s'  "$POST_DATA" | $BB sed -n 's/.*mac=\([^&]*\).*/\1/p'   | urldecode | $BB tr 'A-F' 'a-f' | $BB tr -cd '0-9a-f')
-    NPORTV=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*port=\([^&]*\).*/\1/p'  | $BB tr -cd '0-9')
     NPSKV=$(printf '%s'  "$POST_DATA" | $BB sed -n 's/.*psk=\([^&]*\).*/\1/p'   | urldecode | $BB tr -d '|\r\n')
     NENV=$(printf '%s'   "$POST_DATA" | $BB sed -n 's/.*enabled=\([^&]*\).*/\1/p')
 
     [ -z "$NTITLE" ] && NTITLE="Coin Slot"
-    [ -z "$NIPV" ]   && err_json "missing_ip"
     printf '%s' "$NMACV" | grep -qE '^[0-9a-f]{12}$' || err_json "invalid_mac"
-    [ -z "$NPORTV" ] && NPORTV=8080
     [ -z "$NPSKV" ]  && err_json "missing_psk"
     [ "$NENV" = "0" ] && NENV=0 || NENV=1
+    NPORTV=8080   # fixed: NodeMCU firmware always listens on 8080
     load_coin_env
-    _nodemcu_ip_in_use "$NIPV" "0" && err_json "ip_in_use"
+    # IP is auto-assigned from the pool below the DHCP start; adding is refused
+    # once every usable address is taken (that cap IS the NodeMCU limit).
+    NIPV=$(_next_free_nodemcu_ip)
+    [ -z "$NIPV" ] && err_json "pool_full"
 
     mkdir -p "$HDATA"; touch "$NODEMCU_EXTRA_FILE"
 
@@ -1228,8 +1364,21 @@ if echo "$QS" | $BB grep -q "action=nodemcu_add"; then
     LMEHSPT_LIB_ONLY=1
     . /lmepisowifi/lmehspt.sh --lib
     [ -f /tmp/hotspot_dhcp.pid ] && kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null
+    # This unit's MAC almost always already holds a DYNAMIC lease from before
+    # it was registered here — seeing it associate with SOME address is
+    # usually how its MAC got noticed in the first place. busybox udhcpd
+    # keeps re-issuing whatever a MAC's existing leases-file entry says
+    # regardless of the static_lease line we just added, so wipe the lease
+    # DB before restarting: same fix apply_portal_ip_change relies on for
+    # subnet changes.
+    rm -f /tmp/udhcpd.leases
     start_dhcp
     apply_extra_nodemcu_fw
+    # Force this unit to drop its current association so it re-DHCPs right
+    # away instead of sitting on its old address until its own lease/renewal
+    # timer happens to fire. Only this MAC is kicked — other connected
+    # customers on wlan1 are untouched.
+    kick_sta_mac "$NMACV"
     ping -c 1 -W 1 "$NIPV" >/dev/null 2>&1
 
     ok_json "{\"ok\":true,\"id\":$NEXT_ID}"
@@ -1242,29 +1391,63 @@ if echo "$QS" | $BB grep -q "action=nodemcu_edit"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     NID=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*id=\([^&]*\).*/\1/p' | $BB tr -cd '0-9')
     [ -z "$NID" ] && err_json "missing_id"
-    [ "$NID" = "1" ] && err_json "use_config_set_for_primary"
 
     NTITLE=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*title=\([^&]*\).*/\1/p' | urldecode | $BB tr -d '|\r\n')
-    NIPV=$(printf '%s'   "$POST_DATA" | $BB sed -n 's/.*ip=\([^&]*\).*/\1/p'    | urldecode)
     NMACV=$(printf '%s'  "$POST_DATA" | $BB sed -n 's/.*mac=\([^&]*\).*/\1/p'   | urldecode | $BB tr 'A-F' 'a-f' | $BB tr -cd '0-9a-f')
-    NPORTV=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*port=\([^&]*\).*/\1/p'  | $BB tr -cd '0-9')
     NPSKV=$(printf '%s'  "$POST_DATA" | $BB sed -n 's/.*psk=\([^&]*\).*/\1/p'   | urldecode | $BB tr -d '|\r\n')
     NENV=$(printf '%s'   "$POST_DATA" | $BB sed -n 's/.*enabled=\([^&]*\).*/\1/p')
 
-    [ -z "$NTITLE" ] && NTITLE="Coin Slot $NID"
-    [ -z "$NIPV" ]   && err_json "missing_ip"
     printf '%s' "$NMACV" | grep -qE '^[0-9a-f]{12}$' || err_json "invalid_mac"
-    [ -z "$NPORTV" ] && NPORTV=8080
     [ -z "$NPSKV" ]  && err_json "missing_psk"
     [ "$NENV" = "0" ] && NENV=0 || NENV=1
+    NPORTV=8080   # fixed: NodeMCU firmware always listens on 8080
     load_coin_env
-    _nodemcu_ip_in_use "$NIPV" "$NID" && err_json "ip_in_use"
 
+    # The IP is auto-assigned (from the DHCP pool at add time) and is NOT
+    # user-editable, so an edit keeps whatever IP the unit already holds.
+
+    # ---- Primary (#1): config vars, not the extras file ----
+    if [ "$NID" = "1" ]; then
+        [ -z "$NTITLE" ] && NTITLE="Coin Slot"
+        OLD_NIP=$(read_lmehspt_var NODEMCU_IP)
+        OLD_NMC=$(read_lmehspt_var NODEMCU_MAC)
+        OLD_NEN=$(read_lmehspt_var NODEMCU_1_ENABLED)
+
+        # NODEMCU_IP is intentionally left untouched.
+        for _kv in "NODEMCU_MAC=$NMACV" "NODEMCU_PORT=$NPORTV" "NODEMCU_1_TITLE=$NTITLE" "NODEMCU_1_ENABLED=$NENV" "COIN_PSK=$NPSKV"; do
+            _k=${_kv%%=*}; _v=${_kv#*=}
+            save_coin_env_var "$_k" "$_v"
+            set_lmehspt_var  "$_k" "$_v"
+            set_globals_var  "$_k" "$_v"
+        done
+
+        NEW_NMC=$(read_lmehspt_var NODEMCU_MAC)
+        NEW_NEN=$(read_lmehspt_var NODEMCU_1_ENABLED)
+        if [ "$OLD_NMC" != "$NEW_NMC" ] || [ "${OLD_NEN:-1}" != "${NEW_NEN:-1}" ]; then
+            [ -f /tmp/hotspot_dhcp.pid ] && kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null
+            load_coin_env
+            LMEHSPT_LIB_ONLY=1
+            . /lmepisowifi/lmehspt.sh --lib
+            rm -f /tmp/udhcpd.leases
+            start_dhcp
+            ip neigh del "$OLD_NIP" dev "$HOTSPOT_BR" 2>/dev/null
+            $BB arp -d "$OLD_NIP" 2>/dev/null
+            kick_sta_mac "$NEW_NMC"
+            ping -c 1 -W 1 "$OLD_NIP" >/dev/null 2>&1
+        fi
+        touch /tmp/hotspot_qos_reload
+        ok_json "{\"ok\":true}"
+    fi
+
+    # ---- Additional units (#2+): rows in NODEMCU_EXTRA_FILE ----
+    [ -z "$NTITLE" ] && NTITLE="Coin Slot $NID"
     [ -f "$NODEMCU_EXTRA_FILE" ] && $BB grep -q "^${NID}|" "$NODEMCU_EXTRA_FILE" || err_json "not_found"
 
     _lock
     OLD_ROW=$($BB grep "^${NID}|" "$NODEMCU_EXTRA_FILE" | head -1)
     OLD_IPV=$(printf '%s' "$OLD_ROW" | awk -F'|' '{print $3}')
+    OLD_MACV=$(printf '%s' "$OLD_ROW" | awk -F'|' '{print $4}')
+    NIPV="$OLD_IPV"   # keep the unit's existing (auto-assigned) IP
 
     NM_RC=0
     $BB grep -v "^${NID}|" "$NODEMCU_EXTRA_FILE" > /tmp/nm_edit.tmp 2>/dev/null || NM_RC=$?
@@ -1281,20 +1464,110 @@ if echo "$QS" | $BB grep -q "action=nodemcu_edit"; then
     LMEHSPT_LIB_ONLY=1
     . /lmepisowifi/lmehspt.sh --lib
     [ -f /tmp/hotspot_dhcp.pid ] && kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null
+    rm -f /tmp/udhcpd.leases
     start_dhcp
     apply_extra_nodemcu_fw
-    # Same stale-ARP concern as config_set's primary-node path above.
-    if [ -n "$OLD_IPV" ] && [ "$OLD_IPV" != "$NIPV" ]; then
-        ip neigh del "$OLD_IPV" dev "$HOTSPOT_BR" 2>/dev/null
-        $BB arp -d "$OLD_IPV" 2>/dev/null
-    fi
     ip neigh del "$NIPV" dev "$HOTSPOT_BR" 2>/dev/null
     $BB arp -d "$NIPV" 2>/dev/null
+    if [ "$OLD_MACV" != "$NMACV" ]; then
+        kick_sta_mac "$NMACV"
+    fi
     ping -c 1 -W 1 "$NIPV" >/dev/null 2>&1
 
     ok_json "{\"ok\":true}"
 fi
 
+# ================================================================
+# GET ?action=dhcp_get  -> gateway, DHCP range, DNS, NodeMCU pool info
+# ================================================================
+if echo "$QS" | $BB grep -q "action=dhcp_get"; then
+    load_coin_env
+    D_PIP="${PORTAL_IP:-$(read_lmehspt_var PORTAL_IP)}"
+    D_PFX=$(_dhcp_prefix)
+    D_DS=$(_dhcp_start_octet)
+    D_DE="${DHCP_END:-$(read_lmehspt_var DHCP_END)}"; case "$D_DE" in ''|*[!0-9]*) D_DE=254 ;; esac
+    D_DNS="${DHCP_DNS:-$(read_lmehspt_var DHCP_DNS)}"; [ -z "$D_DNS" ] && D_DNS="1.1.1.1"
+    D_MAX=$(_nodemcu_pool_size)
+    D_CNT=$(_nodemcu_count)
+    D_POOL=$(_nodemcu_pool_ips | $BB awk 'BEGIN{s="";sep=""}{s=s sep "\"" $0 "\"";sep=","}END{printf "[%s]", s}')
+    ok_json "{\"ok\":true,\"gateway\":\"$(esc_json "$D_PIP")\",\"prefix\":\"$(esc_json "$D_PFX")\",\"dhcp_start\":\"$(esc_json "$D_PFX.$D_DS")\",\"dhcp_end\":\"$(esc_json "$D_PFX.$D_DE")\",\"dns\":\"$(esc_json "$D_DNS")\",\"nodemcu_pool\":$D_POOL,\"max_nodemcus\":$D_MAX,\"nodemcu_count\":$D_CNT}"
+fi
+
+# ================================================================
+# POST ?action=dhcp_set  body: gateway, dhcp_start, dhcp_end, dns
+# Writes the gateway (PORTAL_IP), the dynamic DHCP range, and DNS servers, then
+# re-normalises every NodeMCU into the (possibly moved) usable pool and applies
+# live. A gateway move reuses the portal-IP reload path (full rebuild); a
+# range/DNS-only change uses the lighter hotspot_dhcp_reload path.
+# ================================================================
+if echo "$QS" | $BB grep -q "action=dhcp_set"; then
+    read -n "$CONTENT_LENGTH" POST_DATA
+    dget() { printf '%s' "$POST_DATA" | $BB tr '&' '\n' | $BB grep "^$1=" | $BB sed 's/^[^=]*=//' | urldecode | head -1; }
+    D_GW=$(dget gateway    | $BB tr -cd '0-9.')
+    D_S=$(dget dhcp_start  | $BB tr -cd '0-9.')
+    D_E=$(dget dhcp_end    | $BB tr -cd '0-9.')
+    D_DNS_RAW=$(dget dns)
+
+    _valid_ipv4 "$D_GW" || err_json "bad_gateway"
+    _valid_ipv4 "$D_S"  || err_json "bad_dhcp_start"
+    _valid_ipv4 "$D_E"  || err_json "bad_dhcp_end"
+
+    NEW_PFX=$(printf '%s' "$D_GW" | $BB sed 's/\.[^.]*$//')
+    GW_OCT=$(printf '%s'  "$D_GW" | $BB sed 's/.*\.//')
+    S_PFX=$(printf '%s'   "$D_S"  | $BB sed 's/\.[^.]*$//'); S_OCT=$(printf '%s' "$D_S" | $BB sed 's/.*\.//')
+    E_PFX=$(printf '%s'   "$D_E"  | $BB sed 's/\.[^.]*$//'); E_OCT=$(printf '%s' "$D_E" | $BB sed 's/.*\.//')
+
+    [ "$S_PFX" = "$NEW_PFX" ] && [ "$E_PFX" = "$NEW_PFX" ] || err_json "range_wrong_subnet"
+    [ "$GW_OCT" -ge 1 ] && [ "$GW_OCT" -le 254 ] || err_json "bad_gateway"
+    [ "$S_OCT" -gt "$GW_OCT" ] || err_json "start_le_gateway"
+    [ "$S_OCT" -le "$E_OCT" ]  || err_json "start_gt_end"
+    [ "$E_OCT" -le 254 ]       || err_json "end_out_of_range"
+
+    load_coin_env
+    OLD_PIP=$(read_lmehspt_var PORTAL_IP)
+    OLD_PPT=$(read_lmehspt_var PORTAL_PORT)
+
+    NEW_POOL=$(( S_OCT - GW_OCT - 1 )); [ "$NEW_POOL" -lt 0 ] && NEW_POOL=0
+    CUR_CNT=$(_nodemcu_count)
+    if [ "$CUR_CNT" -gt "$NEW_POOL" ]; then
+        ok_json "{\"ok\":false,\"error\":\"pool_too_small\",\"max\":$NEW_POOL,\"count\":$CUR_CNT}"
+    fi
+
+    # Normalise DNS: commas/newlines -> spaces, keep only valid IPv4 tokens.
+    D_DNS=$(printf '%s' "$D_DNS_RAW" | $BB tr ',\r\n' '   ' | $BB tr -s ' ')
+    _dns_ok=""
+    for _d in $D_DNS; do _valid_ipv4 "$_d" && _dns_ok="${_dns_ok:+$_dns_ok }$_d"; done
+    [ -z "$_dns_ok" ] && _dns_ok="1.1.1.1"
+    D_DNS="$_dns_ok"
+
+    for _kv in "DHCP_START=$S_OCT" "DHCP_END=$E_OCT" "DHCP_DNS=$D_DNS"; do
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        save_coin_env_var "$_k" "$_v"; set_lmehspt_var "$_k" "$_v"; set_globals_var "$_k" "$_v"
+    done
+
+    GW_CHANGED=0; [ "$D_GW" != "$OLD_PIP" ] && GW_CHANGED=1
+    if [ "$GW_CHANGED" = "1" ]; then
+        save_coin_env_var PORTAL_IP "$D_GW"; set_lmehspt_var PORTAL_IP "$D_GW"; set_globals_var PORTAL_IP "$D_GW"
+    fi
+
+    # Update in-memory values so the pool helpers compute against the NEW
+    # gateway/start when re-normalising the NodeMCU IPs.
+    PORTAL_IP="$D_GW"; DHCP_START="$S_OCT"; DHCP_END="$E_OCT"
+    _dhcp_renormalize_ips
+
+    if hotspot_running; then
+        if [ "$GW_CHANGED" = "1" ]; then
+            printf '%s\n' "$D_GW"    > /tmp/hotspot_portal_ip_new
+            printf '%s\n' "$OLD_PPT" > /tmp/hotspot_portal_port_new
+            printf '%s\n' "$OLD_PIP" > /tmp/hotspot_portal_ip_old
+            printf '%s\n' "$OLD_PPT" > /tmp/hotspot_portal_port_old
+            touch /tmp/hotspot_portal_ip_reload
+        else
+            touch /tmp/hotspot_dhcp_reload
+        fi
+    fi
+    ok_json "{\"ok\":true,\"max_nodemcus\":$NEW_POOL}"
+fi
 # ================================================================
 # POST ?action=nodemcu_del  body: id
 # ================================================================
@@ -1302,7 +1575,37 @@ if echo "$QS" | $BB grep -q "action=nodemcu_del"; then
     read -n "$CONTENT_LENGTH" POST_DATA
     NID=$(printf '%s' "$POST_DATA" | $BB sed -n 's/.*id=\([^&]*\).*/\1/p' | $BB tr -cd '0-9')
     [ -z "$NID" ] && err_json "missing_id"
-    [ "$NID" = "1" ] && err_json "cannot_delete_primary"
+
+    # ---- Deleting the primary (#1): there is no separate row to drop, so wipe
+    # its config vars. No promotion happens - the box is simply left with no
+    # primary coin acceptor until one is configured again (the "allow empty"
+    # behaviour chosen for this build). ----
+    if [ "$NID" = "1" ]; then
+        load_coin_env
+        OLD_NIP=$(read_lmehspt_var NODEMCU_IP)
+        for _k in NODEMCU_IP NODEMCU_MAC NODEMCU_1_TITLE COIN_PSK; do
+            save_coin_env_var "$_k" ""
+            set_lmehspt_var  "$_k" ""
+            set_globals_var  "$_k" ""
+        done
+        save_coin_env_var "NODEMCU_1_ENABLED" "0"
+        set_lmehspt_var  "NODEMCU_1_ENABLED" "0"
+        set_globals_var  "NODEMCU_1_ENABLED" "0"
+
+        [ -f /tmp/hotspot_dhcp.pid ] && kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null
+        load_coin_env
+        LMEHSPT_LIB_ONLY=1
+        . /lmepisowifi/lmehspt.sh --lib
+        rm -f /tmp/udhcpd.leases
+        start_dhcp
+        if [ -n "$OLD_NIP" ]; then
+            ip neigh del "$OLD_NIP" dev "$HOTSPOT_BR" 2>/dev/null
+            $BB arp -d "$OLD_NIP" 2>/dev/null
+        fi
+        touch /tmp/hotspot_qos_reload
+        _order_remove_id "1"
+        ok_json "{\"ok\":true,\"id\":1}"
+    fi
 
     _lock
     if [ -f "$NODEMCU_EXTRA_FILE" ] && ! _nodemcu_file_replace_excl "$NID"; then
@@ -1315,12 +1618,13 @@ if echo "$QS" | $BB grep -q "action=nodemcu_del"; then
     LMEHSPT_LIB_ONLY=1
     . /lmepisowifi/lmehspt.sh --lib
     [ -f /tmp/hotspot_dhcp.pid ] && kill -9 "$(cat /tmp/hotspot_dhcp.pid)" 2>/dev/null
+    rm -f /tmp/udhcpd.leases
     start_dhcp
     apply_extra_nodemcu_fw
 
+    _order_remove_id "$NID"
     ok_json "{\"ok\":true,\"id\":$NID}"
 fi
-
 # ================================================================
 # POST ?action=coin_toggle  body: enabled=1|0
 # ================================================================
