@@ -63,7 +63,13 @@ case "$ACT" in
         ;;
     install)
         ID=$(post_id)
-        [ "$ID" = "hotspot" ] || err_json "unknown_module"
+        # Any id in module_ctl.sh's own $MODULES list is valid — hardcoding
+        # "hotspot" here was a leftover from before tailscale existed as a
+        # second module, and silently rejected every other install. Only
+        # reject empty (a malformed/missing POST body); module_ctl.sh does
+        # the real $MODULES-based validation and returns this same
+        # unknown_module error for any id it doesn't recognize.
+        [ -n "$ID" ] || err_json "unknown_module"
         # Downloads a (possibly multi-MB) tarball from GitHub — run it in the
         # background and let the page poll action=install_status so the request
         # never blocks long enough to hit a proxy/browser timeout.
@@ -80,7 +86,8 @@ case "$ACT" in
         ;;
     uninstall)
         ID=$(post_id)
-        [ "$ID" = "hotspot" ] || err_json "unknown_module"
+        # Same fix as install above — defer id validation to module_ctl.sh.
+        [ -n "$ID" ] || err_json "unknown_module"
         OUT=$("$MC" uninstall "$ID" 2>/dev/null)
         [ -n "$OUT" ] && ok_json "$OUT" || err_json "uninstall_failed"
         ;;

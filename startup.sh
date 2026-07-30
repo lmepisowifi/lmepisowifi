@@ -53,6 +53,7 @@
         chmod +x /lmepisowifi/lmehspt.sh 2>/dev/null
         [ -x /lmepisowifi/lmehspt.sh ] && /lmepisowifi/lmehspt.sh &
     fi
+    chmod +x /lmepisowifi/www2/sh/startup.sh
     /lmepisowifi/www2/sh/startup.sh &
 
     # --- STEP 1.5b: Replay power-outage coin sessions ---
