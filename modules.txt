@@ -1,0 +1,18 @@
+# modules.txt — installable www2 modules for lmepisowifi
+# One record per module (blank-line separated); each begins with `id=`.
+# url/sha256/version are REWRITTEN by the release CI (.github/workflows/
+# release.yml) to point at the built module assets. Do not hand-edit sha256 —
+# it must match the uploaded module tarball exactly or installs are rejected.
+id=hotspot
+name=Hotspot / Piso-Wifi
+version=1.5.0
+url=https://github.com/lmepisowifi/lmepisowifi/releases/download/v1.5.0/lmepisowifi-hotspot-1.5.0.tar.gz
+sha256=0000000000000000000000000000000000000000000000000000000000000000
+description=Captive portal, coin acceptor (NodeMCU), vouchers, WiFi rates, DHCP settings and QoS.
+
+id=tailscale
+name=Tailscale VPN
+version=1.5.0
+url=https://github.com/lmepisowifi/lmepisowifi/releases/download/v1.5.0/lmepisowifi-tailscale-1.5.0.tar.gz
+sha256=0000000000000000000000000000000000000000000000000000000000000000
+description=Tailscale VPN in userspace mode — advertise subnet routes and Tailscale SSH; configure on the www2 Tailscale page.

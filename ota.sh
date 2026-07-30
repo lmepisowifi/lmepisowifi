@@ -43,7 +43,7 @@ BB="busybox"
 # replaced on every update. globals.env (user settings) is NOT a component, so
 # it is preserved; lmehspt.sh's seed_globals() merges any new default keys into
 # it on boot after the swap.
-COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh"
+COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh module_ctl.sh"
 # NOTE: portal images (hotspot/img/promo1..5.* and portal_logo.*) are NOT
 # listed here as fixed paths, because hotspot.cgi lets the admin upload any
 # of jpg/jpeg/png/ico/gif/webp per slot — a fixed "promo1.jpg" entry would
@@ -152,6 +152,49 @@ ensure_default_favicon() {
     return 1
 }
 
+# Same class of gap as ensure_default_favicon(), but for module_ctl.sh itself.
+# module_ctl.sh is a brand-new top-level component (introduced alongside the
+# www2 Modules page) — it has no .ota_old backup to rescue from like the
+# startup.sh markers or portal images above, because it never existed in any
+# prior release. The OLD ota.sh that ran THIS delivering update doesn't have
+# "module_ctl.sh" in its COMPONENTS list yet, so even though the downloaded
+# bundle contains it, that old swap loop never lays it down — it's simply
+# dropped when $STAGE is cleared. Fetching it directly from GitHub (same
+# idiom as the favicon) sidesteps needing another release: called from
+# self_heal(), so a device nobody can walk up to heals itself within one
+# cron tick, and both the Modules page (modules.cgi hard-requires this file)
+# and startup.sh's hotspot-launch gate (STEP 1.5, "is-active hotspot") start
+# working again without waiting on a new version.
+ensure_module_ctl() {
+    [ -x "$ROOT/module_ctl.sh" ] && return 0
+    [ -n "$OTA_REPO" ] || return 0
+    _mc_branch="${OTA_BRANCH:-main}"
+    _mc_url="https://raw.githubusercontent.com/$OTA_REPO/$_mc_branch/module_ctl.sh"
+    _mc_tmp="$DL/module_ctl.sh.tmp"
+    mkdir -p "$DL"
+    if fetch "$_mc_url" "$_mc_tmp" && [ -s "$_mc_tmp" ]; then
+        # Same error-page guard as ensure_default_favicon: a shell script this
+        # size won't ever legitimately match these patterns.
+        if grep -Eqi '<html|rate.limit|Too Many Requests|404: Not Found' "$_mc_tmp" 2>/dev/null; then
+            log "ensure_module_ctl: fetch returned an error page — leaving module_ctl.sh missing (will retry)"
+            rm -f "$_mc_tmp"
+            return 1
+        fi
+        mv "$_mc_tmp" "$ROOT/module_ctl.sh"
+        chmod +x "$ROOT/module_ctl.sh"
+        log "ensure_module_ctl: fetched module_ctl.sh from GitHub ($OTA_REPO@$_mc_branch) — a pre-fix OTA run never delivered it"
+        notify "OTA: restored module_ctl.sh — a previous update failed to deliver it; the Modules page and hotspot autostart work again"
+        # First run on this device: persist install state immediately. list/status
+        # already fall back to migrate_installed() on the fly, but reconcile makes
+        # it durable right away instead of only for this one request.
+        "$ROOT/module_ctl.sh" reconcile >/dev/null 2>&1
+        return 0
+    fi
+    rm -f "$_mc_tmp"
+    log "ensure_module_ctl: could not fetch module_ctl.sh (will retry next cron tick)"
+    return 1
+}
+
 # parse a key=value line from the manifest (strips CR)
 mval() { sed -n "s/^$1=//p" "$DL/manifest.txt" | tr -d '\r' | head -1; }
 
@@ -207,6 +250,17 @@ do_check() {
     printf '{"current":"%s","latest":"%s","update_available":%s,"notes":"%s"}\n' \
         "$(json_esc "$_cur")" "$(json_esc "$_lat")" "$_upd" "$(json_esc "$_notes")"
     return 0
+}
+
+# Block until a currently-running `ota.sh apply` has fully exited (its lock
+# file is gone), or until the safety cap elapses. Only used by the self-
+# relaunch at the end of do_apply(): that relaunch starts life while the
+# *original* apply is still finishing up (restart_services/health_ok/
+# sync_nodemcu/notify), and must not touch $DL/$STAGE — or run a second
+# do_apply() — until the original process, and its lock, are completely gone.
+_wait_for_unlock() {
+    _wfu_i=0
+    while [ -f "$LOCK" ] && [ "$_wfu_i" -lt 90 ]; do sleep 1; _wfu_i=$((_wfu_i + 1)); done
 }
 
 # ---- apply -----------------------------------------------------------------
@@ -340,12 +394,19 @@ do_apply() {
             _do_rollback_set "$_swapped"; set_status "rolledback"; rm -rf "$STAGE"; return 1
         fi
     done
-    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" "$ROOT/startup.sh" 2>/dev/null
+    chmod +x "$ROOT/lmehspt.sh" "$ROOT/ota.sh" "$ROOT/startup.sh" "$ROOT/module_ctl.sh" 2>/dev/null
     chmod +x "$ROOT"/hotspot/cgi-bin/*.sh "$ROOT"/www2/cgi-bin/* "$ROOT"/www2/sh/*.sh 2>/dev/null
 
     # Restore runtime-persisted WAN-repurpose/reboot-sched/LAN-speed settings
     # into the freshly-swapped www2/sh/startup.sh (see function comment).
     case "$_swapped" in *www2*) merge_startup_markers ;; esac
+
+    # Re-assert module install/uninstall state after the swap: the base bundle
+    # always ships the hotspot files, so a device that had the hotspot module
+    # UNINSTALLED would otherwise silently get it back on every update. reconcile
+    # removes the re-laid hotspot files again (keeping hotspot_data + settings)
+    # when the saved state is "uninstalled", and is a no-op when it's installed.
+    [ -x "$ROOT/module_ctl.sh" ] && "$ROOT/module_ctl.sh" reconcile >/dev/null 2>&1
 
     # record new version early so health-checked processes see it
     # (back up the old VERSION so a failed health check can restore it)
@@ -368,6 +429,25 @@ do_apply() {
         # Coin-slot firmware: version-gated, so a portal-only release that didn't
         # bump nodemcu_version is a no-op here. Never fails the portal OTA.
         sync_nodemcu
+
+        # If THIS apply swapped in a different ota.sh, any new self-heal fixes it
+        # carries (like ensure_module_ctl above) ran under the OLD script for
+        # this apply's own self_heal call at the top — they don't take effect
+        # until ota.sh executes again, normally up to a 6h wait for the next
+        # cron tick. Skip the wait: relaunch the just-installed ota.sh's own
+        # `cron` path (via _postapply_cron, which waits for this process's lock
+        # to clear first) so it self-heals under its own new code right away.
+        # Gated on ota.sh actually differing, so a release that doesn't touch
+        # ota.sh doesn't do a pointless extra relaunch.
+        if [ -f "$ROOT/ota.sh$BAK_SUFFIX" ]; then
+            _pac_new=$(sha256sum "$ROOT/ota.sh" 2>/dev/null | awk '{print $1}')
+            _pac_old=$(sha256sum "$ROOT/ota.sh$BAK_SUFFIX" 2>/dev/null | awk '{print $1}')
+            if [ -n "$_pac_new" ] && [ "$_pac_new" != "$_pac_old" ]; then
+                log "ota.sh changed by this update — relaunching it for an immediate post-apply cron tick"
+                ( setsid "$ROOT/ota.sh" _postapply_cron >/dev/null 2>&1 & ) 2>/dev/null || \
+                    ( "$ROOT/ota.sh" _postapply_cron >/dev/null 2>&1 & )
+            fi
+        fi
         return 0
     fi
 
@@ -508,6 +588,11 @@ self_heal() {
     # canonical default straight from the GitHub repo instead of leaving the
     # portal without a tab icon / PORTAL_LOGO target.
     ensure_default_favicon
+
+    # Same last-resort tier as the favicon: module_ctl.sh has never existed on
+    # this device before, so there's no .ota_old copy anywhere to rescue it
+    # from — fetch it straight from GitHub instead (see ensure_module_ctl()).
+    ensure_module_ctl
 
     # Audio rescue: recover user-uploaded audio stranded in hotspot.ota_old/audio/
     # by a pre-fix OTA run that either lacked hotspot/audio in PRESERVE or had the
@@ -1003,6 +1088,12 @@ case "$1" in
     apply)    do_apply "$2" ;;
     rollback) do_rollback ;;
     cron)     do_cron ;;
+    # Internal only: do_apply() relaunches a freshly-swapped ota.sh under this
+    # verb for an immediate self-heal pass once the apply that installed it has
+    # fully exited. Deliberately left out of the usage line below — it's
+    # plumbing, not a command an operator needs — but harmless to run by hand:
+    # it just waits out any in-progress lock, then does the same thing `cron` does.
+    _postapply_cron) _wait_for_unlock; do_cron ;;
     changelog) do_changelog ;;
     get_auto) do_get_auto ;;
     set_auto) do_set_auto "$2" ;;

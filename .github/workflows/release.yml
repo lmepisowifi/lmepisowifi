@@ -45,15 +45,39 @@ jobs:
           FW=$(sed -n 's/.*#define[[:space:]]\+FW_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' hotspot/nodemcucodeholder)
           mkdir -p dist
           TAR="dist/lmepisowifi-$VER.tar.gz"
-          tar -czf "$TAR" startup.sh hotspot www2 lmehspt.sh ota.sh defaults.env
+          # Base bundle: still ships the hotspot files (so the ota.sh sanity
+          # check and existing installs keep working). The Modules layer just
+          # controls whether the hotspot is present/running; module_ctl.sh is a
+          # new base component that enforces that state after every update.
+          # Exclude the tailscale module's www2 files from the BASE bundle — they
+          # ship only inside the tailscale module asset, not the base (tailscale
+          # is opt-in and never auto-installed). hotspot pages stay in the base
+          # because the hotspot module auto-installs on existing devices.
+          tar -czf "$TAR" \
+            --exclude='www2/tailscale.html' \
+            --exclude='www2/cgi-bin/tailscale.cgi' \
+            startup.sh hotspot www2 lmehspt.sh ota.sh defaults.env module_ctl.sh
           MD5=$(md5sum hotspot/firmware/coin_nodemcu.bin | awk '{print $1}')
 
+          # Hotspot MODULE bundle: exactly the files the Modules page installs
+          # from GitHub / removes on uninstall. hotspot_data/ and globals.env are
+          # intentionally excluded (operator data + settings, preserved on-device).
+          MODTAR="dist/lmepisowifi-hotspot-$VER.tar.gz"
+          tar -czf "$MODTAR" hotspot lmehspt.sh www2/hotspot*.html www2/cgi-bin/hotspot.cgi
+
+          # Tailscale MODULE bundle: daemon+CLI binaries, its control script and
+          # its www2 page + cgi. /config state is device-local (never shipped).
+          MODTAR_TS="dist/lmepisowifi-tailscale-$VER.tar.gz"
+          tar -czf "$MODTAR_TS" tailscale www2/tailscale.html www2/cgi-bin/tailscale.cgi
+
           ASSET_URL="https://github.com/$REPO/releases/download/v$VER/lmepisowifi-$VER.tar.gz"
+          MOD_ASSET_URL="https://github.com/$REPO/releases/download/v$VER/lmepisowifi-hotspot-$VER.tar.gz"
+          MOD_TS_ASSET_URL="https://github.com/$REPO/releases/download/v$VER/lmepisowifi-tailscale-$VER.tar.gz"
 
           # --- Step 1: publish the release + tarball FIRST ---
           # manifest.txt is not committed yet, so no device can see an sha256
           # that references a tarball that is not uploaded yet.
-          gh release create "v$VER" "$TAR" --title "v$VER" --notes "Release $VER"
+          gh release create "v$VER" "$TAR" "$MODTAR" "$MODTAR_TS" --title "v$VER" --notes "Release $VER"
 
           # --- Step 2: re-download from the actual release URL and hash THAT ---
           # Hashing what GitHub actually serves (not the local $TAR) guarantees
@@ -68,7 +92,29 @@ jobs:
             exit 1
           fi
 
-          # --- Step 3: commit manifest.txt with the verified sha256 ---
+          # --- Step 2b: verify the served MODULE asset the same way ---
+          curl -fsSL -L "$MOD_ASSET_URL" -o /tmp/verify-mod.tar.gz
+          MOD_SHA=$(sha256sum /tmp/verify-mod.tar.gz | awk '{print $1}')
+          MOD_LOCAL_SHA=$(sha256sum "$MODTAR" | awk '{print $1}')
+          if [ "$MOD_SHA" != "$MOD_LOCAL_SHA" ]; then
+            echo "ERROR: GitHub served a different module file than uploaded!"
+            echo "  uploaded sha256: $MOD_LOCAL_SHA"
+            echo "  served sha256:   $MOD_SHA"
+            exit 1
+          fi
+
+          # --- Step 2c: verify the served TAILSCALE module asset ---
+          curl -fsSL -L "$MOD_TS_ASSET_URL" -o /tmp/verify-ts.tar.gz
+          MOD_TS_SHA=$(sha256sum /tmp/verify-ts.tar.gz | awk '{print $1}')
+          MOD_TS_LOCAL_SHA=$(sha256sum "$MODTAR_TS" | awk '{print $1}')
+          if [ "$MOD_TS_SHA" != "$MOD_TS_LOCAL_SHA" ]; then
+            echo "ERROR: GitHub served a different tailscale module file than uploaded!"
+            echo "  uploaded sha256: $MOD_TS_LOCAL_SHA"
+            echo "  served sha256:   $MOD_TS_SHA"
+            exit 1
+          fi
+
+          # --- Step 3: commit manifest.txt (base) + modules.txt (hotspot module) ---
           {
             echo "version=$VER"
             echo "url=$ASSET_URL"
@@ -77,9 +123,25 @@ jobs:
             echo "nodemcu_version=$FW"
             echo "nodemcu_md5=$MD5"
           } > manifest.txt
+          {
+            echo "# modules.txt — installable www2 modules (written by release CI)"
+            echo "id=hotspot"
+            echo "name=Hotspot / Piso-Wifi"
+            echo "version=$VER"
+            echo "url=$MOD_ASSET_URL"
+            echo "sha256=$MOD_SHA"
+            echo "description=Captive portal, coin acceptor (NodeMCU), vouchers, WiFi rates, DHCP settings and QoS."
+            echo ""
+            echo "id=tailscale"
+            echo "name=Tailscale VPN"
+            echo "version=$VER"
+            echo "url=$MOD_TS_ASSET_URL"
+            echo "sha256=$MOD_TS_SHA"
+            echo "description=Tailscale VPN in userspace mode — advertise subnet routes and Tailscale SSH; configure on the www2 Tailscale page."
+          } > modules.txt
           git config user.name  github-actions
           git config user.email github-actions@github.com
-          git add manifest.txt hotspot/firmware/coin_nodemcu.bin
+          git add manifest.txt modules.txt hotspot/firmware/coin_nodemcu.bin
           git commit -m "release $VER (nodemcu fw $FW)" || echo "nothing to commit"
           git push origin HEAD:main
           
@@ -89,3 +151,5 @@ jobs:
           curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/CHANGELOG.md
           echo -e "\nPurging manifest.txt..."
           curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/manifest.txt
+          echo -e "\nPurging modules.txt..."
+          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/modules.txt

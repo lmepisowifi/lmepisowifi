@@ -7,28 +7,47 @@
     <link href="/css/style.css?v=1.0.0" rel="stylesheet">
     <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
     <style>
-        .field-hint { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
+        .field-hint  { font-size:11.5px; color:var(--text-secondary); margin-top:3px; }
         .empty-state { color:var(--text-secondary); font-size:13px; text-align:center; padding:28px 0; }
 
-        /* ── NodeMCU cards ──────────────────────────────────────── */
-        .nm-grid {
-            display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:10px; padding:12px;
+        /* ── NodeMCU table ─────────────────────────────────────────────────── */
+        .nm-table { width:100%; border-collapse:collapse; font-size:13px; }
+        .nm-table th {
+            color:var(--text-secondary); font-size:11px; text-transform:uppercase;
+            letter-spacing:.06em; padding:6px 12px; border-bottom:1px solid var(--border-color); text-align:left;
         }
-        .nm-card {
-            background:var(--bg-input); border:1px solid var(--border-color);
-            border-radius:8px; padding:13px 14px; position:relative;
+        .nm-table td { padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.04); vertical-align:middle; }
+        .nm-table tr:last-child td { border-bottom:none; }
+        .nm-table tr:hover td { background:var(--bg-surface-hover); }
+        .nm-table tr.nm-dragging td { background:var(--bg-surface-hover); opacity:.5; }
+        .nm-table tr.nm-drop-target td { border-top:2px solid var(--accent-color); }
+        .nm-table code { color:#ccc; font-size:12px; }
+        .status-pill {
+            display:inline-block; padding:2px 9px; border-radius:3px; font-size:11px; font-weight:700; margin-right:4px;
         }
-        .nm-card.is-primary { border-color:#3d6fd6; }
-        .nm-card.is-disabled { opacity:.55; }
-        .nm-title { font-size:15px; font-weight:700; display:flex; align-items:center; gap:6px; }
-        .nm-meta  { font-size:12px; color:var(--text-secondary); margin-top:4px; line-height:1.6; font-family:monospace; }
-        .nm-tag   {
-            display:inline-block; padding:1px 7px; border-radius:3px; font-size:10px;
-            font-weight:700; background:rgba(255,255,255,.08); color:#aaa;
+        .status-pill.primary { background:rgba(61,111,214,.18); color:#7fa3ec; }
+        .status-pill.active  { background:rgba(76,175,80,.2);  color:#81c784; }
+        .status-pill.off     { background:rgba(220,53,69,.18); color:#e17e88; }
+
+        /* Reorder controls */
+        .nm-handle-cell { white-space:nowrap; width:1%; }
+        .nm-drag { color:var(--text-secondary); font-size:16px; cursor:grab; user-select:none; margin-right:4px; }
+        .nm-drag:active { cursor:grabbing; }
+        .nm-move-btn {
+            background:none; border:1px solid var(--border-color); color:var(--text-secondary);
+            border-radius:4px; width:22px; height:22px; font-size:11px; line-height:1; padding:0; cursor:pointer;
         }
-        .nm-tag.primary  { background:rgba(61,111,214,.18); color:#7fa3ec; }
-        .nm-tag.off      { background:rgba(220,53,69,.18); color:#e17e88; }
-        .nm-actions { display:flex; gap:6px; margin-top:10px; }
+        .nm-move-btn:hover:not(:disabled) { border-color:#888; color:var(--text-primary); }
+        .nm-move-btn:disabled { opacity:.25; cursor:default; }
+
+        /* Toolbar: Add NodeMCU / Refresh */
+        .nm-toolbar { margin-bottom:14px; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; align-items:center; }
+        .nm-toolbar .btn { white-space:nowrap; }
+        @media (max-width:576px) {
+            .nm-toolbar { display:grid; grid-template-columns:1fr 1fr; justify-content:stretch; }
+            .nm-toolbar #nm-count { grid-column:1 / -1; text-align:left; }
+            .nm-toolbar .btn { width:100%; overflow:hidden; text-overflow:ellipsis; }
+        }
     </style>
 </head>
 <body>
@@ -43,73 +62,83 @@
 
 <script>document.write('<script src="/js/nav.js?t=' + Date.now() + '"><\/script>');</script>
 
-<div class="container mt-4" style="max-width:900px;">
+<div class="container mt-4" style="max-width:960px;">
 
-    <!-- ── Add / edit NodeMCU ──────────────────────────────────── -->
-    <div class="card mb-3">
-        <div class="card-header d-flex align-items-center justify-content-between">
-            <span id="nm-form-title">Add NodeMCU</span>
-            <a href="#" id="nm-cancel-edit" style="display:none;font-size:12px;" onclick="cancelEdit();return false;">Cancel edit</a>
-        </div>
-        <div class="card-body">
-            <div class="field-hint mb-3">
-                Each additional unit needs its own IP and MAC (a static DHCP lease is created automatically,
-                the same way the primary NodeMCU on the Hotspot page works) and its own PSK. The primary
-                NodeMCU's title and in-service status are edited on the
-                <a href="/hotspot.html">Hotspot page</a> instead — this page only manages units #2 and up.
-            </div>
-            <div class="row g-3 align-items-end">
-                <div class="col-sm-6">
-                    <label class="form-label">Title</label>
-                    <input type="text" class="form-control" id="n-title" placeholder="Coin Slot 2" maxlength="40">
-                </div>
-                <div class="col-sm-6">
-                    <label class="form-label">IP</label>
-                    <input type="text" class="form-control" id="n-ip" placeholder="10.0.0.3">
-                </div>
-                <div class="col-sm-6">
-                    <label class="form-label">MAC <span class="field-hint d-inline">(no colons)</span></label>
-                    <input type="text" class="form-control" id="n-mac" placeholder="001122334455" maxlength="12">
-                </div>
-                <div class="col-sm-3">
-                    <label class="form-label">Port</label>
-                    <input type="number" class="form-control" id="n-port" placeholder="8080" min="1" max="65535">
-                </div>
-                <div class="col-sm-3 d-flex align-items-end">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="n-enabled" checked>
-                        <label class="form-check-label" for="n-enabled">In service</label>
-                    </div>
-                </div>
-                <div class="col-sm-12">
-                    <label class="form-label">PSK <span class="field-hint d-inline">(shared secret, must match the unit's own config)</span></label>
-                    <div style="position:relative;">
-                        <input type="password" class="form-control" id="n-psk" style="padding-right:36px !important;">
-                        <button type="button" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:13px;" onclick="togglePsk()">Show</button>
-                    </div>
-                </div>
-                <div class="col-sm-12">
-                    <button class="btn btn-primary" id="n-submit-btn" onclick="submitNodemcu()">Add NodeMCU</button>
-                </div>
-            </div>
-        </div>
+    <div class="nm-toolbar">
+        <span id="nm-count" style="font-size:13px;color:var(--text-secondary);"></span>
+        <button class="btn btn-sm btn-outline-primary" id="nm-add-btn" onclick="openAddModal()">+ Add NodeMCU</button>
+        <button class="btn btn-sm btn-outline-secondary" onclick="loadNodemcus()">Refresh</button>
     </div>
 
-    <!-- ── NodeMCU list ─────────────────────────────────────────── -->
     <div class="card">
-        <div class="card-header d-flex align-items-center justify-content-between">
-            <span>NodeMCU Units</span>
-            <div class="d-flex gap-2">
-                <span id="nm-count" style="font-size:12px;color:var(--text-secondary);"></span>
-                <button class="btn btn-sm btn-outline-secondary" onclick="loadNodemcus()">Refresh</button>
+        <div class="card-header">NodeMCU Units</div>
+        <div class="card-body p-0">
+            <div style="padding:10px 14px 0;font-size:12px;color:var(--text-secondary);" id="nm-reorder-hint" hidden>
+                Drag <span style="color:var(--text-primary);">&#10303;</span> or use &#9650; &#9660; to set the order customers see in the coin-slot picker on the portal.
             </div>
-        </div>
-        <div id="nm-wrap">
-            <div class="empty-state" id="nm-empty">Loading…</div>
-            <div class="nm-grid" id="nm-cards" style="display:none;"></div>
+            <div style="overflow-x:auto; min-height:80px;" id="nm-wrap">
+                <div class="empty-state" id="nm-empty">Loading…</div>
+                <table class="nm-table" id="nm-table" style="display:none;">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>Title</th>
+                            <th>IP</th>
+                            <th>MAC</th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="nm-tbody"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
+</div>
+
+<!-- ── Add / Edit NodeMCU Modal ── -->
+<div class="modal fade" id="nmModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:360px;margin-left:auto;margin-right:auto;">
+        <div class="modal-content" style="border:1px solid var(--border-color);">
+            <div class="modal-header py-2 px-3">
+                <div class="fw-semibold" id="nm-modal-title" style="font-size:14px;">Add NodeMCU</div>
+                <button type="button" class="btn-close btn-close-white ms-auto" data-bs-dismiss="modal" style="font-size:12px;"></button>
+            </div>
+            <div class="modal-body px-3 pb-2 pt-3">
+                <div class="field-hint mb-3">
+                    Each unit needs its own IP and MAC (a static DHCP lease is created
+                    automatically) and its own PSK. The unit marked <b>Primary</b> is the
+                    box's built-in coin acceptor; it can be edited or removed here just like
+                    any additional unit.
+                </div>
+
+                <label class="form-label" style="font-size:11px;color:var(--text-secondary);">Title</label>
+                <input id="nm-title" type="text" class="form-control form-control-sm mb-2" placeholder="Coin Slot 2" maxlength="40">
+
+                <div id="nm-ip-note" class="field-hint mb-2">IP is assigned automatically from the DHCP pool (the addresses below the range start — see DHCP Settings).</div>
+
+                <label class="form-label" style="font-size:11px;color:var(--text-secondary);">MAC Address</label>
+                <input id="nm-mac" type="text" class="form-control form-control-sm mb-2" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off" maxlength="17">
+
+                <label class="form-label" style="font-size:11px;color:var(--text-secondary);">PSK <span>(shared secret, must match the unit's own config)</span></label>
+                <div style="position:relative;" class="mb-2">
+                    <input id="nm-psk" type="password" class="form-control form-control-sm" style="padding-right:40px;">
+                    <button type="button" id="nm-psk-toggle" onclick="toggleNmPsk(this)"
+                            style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:12px;">Show</button>
+                </div>
+
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" id="nm-enabled" checked>
+                    <label class="form-check-label" for="nm-enabled" style="font-size:13px;">In service</label>
+                </div>
+            </div>
+            <div class="modal-footer py-2 px-3" style="border-top:1px solid var(--border-color);">
+                <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-sm btn-primary" id="nm-confirm" onclick="submitNodemcu()">Add NodeMCU</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script src="/js/bootstrap.bundle.min.js?v=1.0.0"></script>
@@ -119,46 +148,11 @@
 toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
 function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
 function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
-function togglePsk(){
-    var f=document.getElementById('n-psk');
+
+function toggleNmPsk(btn){
+    var f=document.getElementById('nm-psk');
     f.type = f.type==='password' ? 'text' : 'password';
-}
-
-var _editingId = null;
-
-function loadNodemcus(){
-    var empty = document.getElementById('nm-empty');
-    var cards = document.getElementById('nm-cards');
-    var cnt   = document.getElementById('nm-count');
-    empty.textContent='Loading…'; empty.style.display='block'; cards.style.display='none';
-    fetch('/cgi-bin/hotspot.cgi?action=nodemcus_get', { cache:'no-store' })
-        .then(function(r){ return r.json(); })
-        .then(function(d){
-            if (!d.ok||!d.nodemcus.length){
-                empty.textContent='No NodeMCUs configured'; empty.style.display='block'; cards.style.display='none'; cnt.textContent=''; return;
-            }
-            cnt.textContent = d.nodemcus.length + ' unit'+(d.nodemcus.length>1?'s':'');
-            cards.innerHTML='';
-            d.nodemcus.forEach(function(n){
-                var card=document.createElement('div');
-                card.className='nm-card'+(n.primary?' is-primary':'')+(!n.enabled?' is-disabled':'');
-                var tags = '';
-                if (n.primary) tags += '<span class="nm-tag primary">Primary</span> ';
-                if (!n.enabled) tags += '<span class="nm-tag off">Out of service</span>';
-                var actions = n.primary
-                    ? '<a href="/hotspot.html" class="btn btn-sm btn-outline-secondary w-100">Edit on Hotspot page</a>'
-                    : '<button class="btn btn-sm btn-outline-secondary" onclick=\'editNodemcu('+JSON.stringify(n)+')\'>Edit</button>'
-                    + '<button class="btn btn-sm btn-outline-danger" onclick="delNodemcu('+n.id+',this)">Delete</button>';
-                card.innerHTML=
-                    '<div class="nm-title">'+escHtml(n.title||('Slot '+n.id))+'</div>'+
-                    '<div class="nm-meta">'+escHtml(n.ip)+':'+escHtml(String(n.port))+'<br>'+escHtml(formatMac(n.mac))+'</div>'+
-                    '<div class="mt-2">'+tags+'</div>'+
-                    '<div class="nm-actions">'+actions+'</div>';
-                cards.appendChild(card);
-            });
-            empty.style.display='none'; cards.style.display='grid';
-        })
-        .catch(function(){ empty.textContent='Failed to load NodeMCUs'; });
+    btn.textContent = f.type==='password' ? 'Show' : 'Hide';
 }
 
 function formatMac(m){
@@ -166,87 +160,233 @@ function formatMac(m){
     return m.length===12 ? m.replace(/(..)(?=.)/g,'$1:') : m;
 }
 
-function resetForm(){
-    document.getElementById('n-title').value='';
-    document.getElementById('n-ip').value='';
-    document.getElementById('n-mac').value='';
-    document.getElementById('n-port').value='';
-    document.getElementById('n-psk').value='';
-    document.getElementById('n-enabled').checked=true;
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+var _nodemcus  = [];
+var _editingId = null;
+var _nmModal   = null;
+var _maxUnits  = 0;
+
+function loadNodemcus(){
+    var empty = document.getElementById('nm-empty');
+    var tbl   = document.getElementById('nm-table');
+    var cnt   = document.getElementById('nm-count');
+    empty.textContent='Loading…'; empty.style.display='block'; tbl.style.display='none';
+
+    fetch('/cgi-bin/hotspot.cgi?action=nodemcus_get', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            _maxUnits = (typeof d.max_nodemcus === 'number') ? d.max_nodemcus : 0;
+            if (!d.ok || !d.nodemcus.length){
+                _nodemcus = [];
+                empty.textContent='No NodeMCUs configured'; empty.style.display='block';
+                tbl.style.display='none';
+                cnt.textContent = _maxUnits ? ('0 of ' + _maxUnits + ' units') : '';
+                document.getElementById('nm-reorder-hint').hidden = true;
+                updateAddBtn();
+                return;
+            }
+            _nodemcus = d.nodemcus;
+            cnt.textContent = d.nodemcus.length + (_maxUnits ? (' of ' + _maxUnits) : '') + ' unit'+((_maxUnits||d.nodemcus.length)>1?'s':'');
+            renderNodemcus();
+            updateAddBtn();
+            empty.style.display='none'; tbl.style.display='table';
+        })
+        .catch(function(){ empty.textContent='Failed to load NodeMCUs'; tbl.style.display='none'; });
 }
 
-function editNodemcu(n){
-    _editingId = n.id;
-    document.getElementById('n-title').value = n.title||'';
-    document.getElementById('n-ip').value    = n.ip||'';
-    document.getElementById('n-mac').value   = n.mac||'';
-    document.getElementById('n-port').value  = n.port||'';
-    document.getElementById('n-psk').value   = n.psk||'';
-    document.getElementById('n-enabled').checked = !!n.enabled;
-    document.getElementById('nm-form-title').textContent = 'Edit ' + (n.title||('Slot '+n.id));
-    document.getElementById('n-submit-btn').textContent = 'Save Changes';
-    document.getElementById('nm-cancel-edit').style.display = 'inline';
-    window.scrollTo({top:0, behavior:'smooth'});
+// ── Render the table from the in-memory _nodemcus array ──────────────────────
+function renderNodemcus(){
+    var tbody = document.getElementById('nm-tbody');
+    // Reorder is only meaningful with more than one unit.
+    document.getElementById('nm-reorder-hint').hidden = _nodemcus.length < 2;
+    tbody.innerHTML='';
+
+    _nodemcus.forEach(function(n, idx){
+        var pills = '';
+        if (n.primary) pills += '<span class="status-pill primary">Primary</span>';
+        pills += n.enabled
+            ? '<span class="status-pill active">In service</span>'
+            : '<span class="status-pill off">Out of service</span>';
+
+        // Every unit (primary included) gets the same Edit + Delete controls.
+        var actions =
+              '<div style="display:flex;gap:3px;min-width:130px;">'
+            +   '<button class="btn btn-sm btn-outline-secondary flex-fill" onclick=\'openEditModal(' + JSON.stringify(n) + ')\'>Edit</button>'
+            +   '<button class="btn btn-sm btn-outline-danger flex-fill" onclick="delNodemcu(' + n.id + ',this)">Delete</button>'
+            + '</div>';
+
+        var handle =
+              '<div style="display:flex;align-items:center;gap:2px;">'
+            +   '<span class="nm-drag" title="Drag to reorder">&#10303;</span>'
+            +   '<div style="display:flex;flex-direction:column;gap:2px;">'
+            +     '<button class="nm-move-btn" title="Move up" onclick="moveNode(' + idx + ',-1)"' + (idx===0?' disabled':'') + '>&#9650;</button>'
+            +     '<button class="nm-move-btn" title="Move down" onclick="moveNode(' + idx + ',1)"' + (idx===_nodemcus.length-1?' disabled':'') + '>&#9660;</button>'
+            +   '</div>'
+            + '</div>';
+
+        var tr=document.createElement('tr');
+        tr.setAttribute('data-id', n.id);
+        tr.setAttribute('draggable','true');
+        tr.innerHTML=
+            '<td class="nm-handle-cell">'+handle+'</td>'+
+            '<td>'+escHtml(n.title||('Slot '+n.id))+'</td>'+
+            '<td><code>'+escHtml(n.ip)+'</code></td>'+
+            '<td><code>'+escHtml(formatMac(n.mac))+'</code></td>'+
+            '<td>'+pills+'</td>'+
+            '<td>'+actions+'</td>';
+        tbody.appendChild(tr);
+    });
+
+    attachDragHandlers();
 }
 
-function cancelEdit(){
+// ── Reorder: up/down buttons + drag-and-drop, persisted to the server ────────
+function moveNode(idx, dir){
+    var j = idx + dir;
+    if (j < 0 || j >= _nodemcus.length) return;
+    var tmp = _nodemcus[idx]; _nodemcus[idx] = _nodemcus[j]; _nodemcus[j] = tmp;
+    renderNodemcus();
+    saveOrder();
+}
+
+function saveOrder(){
+    var order = _nodemcus.map(function(n){ return n.id; }).join(',');
+    fetch('/cgi-bin/hotspot.cgi?action=nodemcu_reorder',{
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'order='+encodeURIComponent(order)
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d.ok) toastr.success('Order saved'); else toastr.error('Save failed'); })
+    .catch(function(){ toastr.error('Network error'); });
+}
+
+var _dragId = null;
+function attachDragHandlers(){
+    var rows = document.querySelectorAll('#nm-tbody tr');
+    rows.forEach(function(el){
+        el.addEventListener('dragstart', function(){ _dragId = el.getAttribute('data-id'); el.classList.add('nm-dragging'); });
+        el.addEventListener('dragend',   function(){ el.classList.remove('nm-dragging'); rows.forEach(function(r){ r.classList.remove('nm-drop-target'); }); });
+        el.addEventListener('dragover',  function(e){ e.preventDefault(); el.classList.add('nm-drop-target'); });
+        el.addEventListener('dragleave', function(){ el.classList.remove('nm-drop-target'); });
+        el.addEventListener('drop', function(e){
+            e.preventDefault(); el.classList.remove('nm-drop-target');
+            var dstId = el.getAttribute('data-id');
+            if (_dragId === null || _dragId === dstId) return;
+            var srcIdx = _nodemcus.findIndex(function(n){ return String(n.id) === String(_dragId); });
+            var dstIdx = _nodemcus.findIndex(function(n){ return String(n.id) === String(dstId); });
+            if (srcIdx < 0 || dstIdx < 0) return;
+            var moved = _nodemcus.splice(srcIdx, 1)[0];
+            _nodemcus.splice(dstIdx, 0, moved);
+            renderNodemcus();
+            saveOrder();
+        });
+    });
+}
+
+function _resetNmForm(){
+    document.getElementById('nm-title').value='';
+    document.getElementById('nm-mac').value='';
+    document.getElementById('nm-psk').value='';
+    document.getElementById('nm-psk').type='password';
+    document.getElementById('nm-psk-toggle').textContent='Show';
+    document.getElementById('nm-enabled').checked=true;
+}
+
+function updateAddBtn(){
+    var btn = document.getElementById('nm-add-btn');
+    if (!btn) return;
+    var full = _maxUnits && _nodemcus.length >= _maxUnits;
+    btn.disabled = !!full;
+    btn.title = full ? ('Maximum ' + _maxUnits + ' NodeMCUs (limited by the DHCP range)') : '';
+}
+
+function openAddModal(){
+    if (_maxUnits && _nodemcus.length >= _maxUnits){
+        toastr.warning('Maximum of ' + _maxUnits + ' NodeMCU' + (_maxUnits>1?'s':'') + ' reached (limited by the DHCP range). Free an address on the DHCP Settings page to add more.');
+        return;
+    }
     _editingId = null;
-    resetForm();
-    document.getElementById('nm-form-title').textContent = 'Add NodeMCU';
-    document.getElementById('n-submit-btn').textContent = 'Add NodeMCU';
-    document.getElementById('nm-cancel-edit').style.display = 'none';
+    _resetNmForm();
+    document.getElementById('nm-ip-note').textContent = 'IP is assigned automatically from the DHCP pool (the addresses below the range start — see DHCP Settings).';
+    document.getElementById('nm-modal-title').textContent = 'Add NodeMCU';
+    document.getElementById('nm-confirm').textContent = 'Add NodeMCU';
+    if (!_nmModal) _nmModal = new bootstrap.Modal(document.getElementById('nmModal'));
+    _nmModal.show();
+    document.getElementById('nmModal').addEventListener('shown.bs.modal', function focusTitle() {
+        document.getElementById('nm-title').focus();
+        document.getElementById('nmModal').removeEventListener('shown.bs.modal', focusTitle);
+    });
+}
+
+function openEditModal(n){
+    _editingId = n.id;
+    document.getElementById('nm-title').value = n.title||'';
+    document.getElementById('nm-ip-note').textContent = 'Assigned IP: ' + (n.ip||'(none)') + ' — managed automatically from the DHCP pool.';
+    document.getElementById('nm-mac').value   = formatMac(n.mac||'');
+    document.getElementById('nm-psk').value   = n.psk||'';
+    document.getElementById('nm-psk').type='password';
+    document.getElementById('nm-psk-toggle').textContent='Show';
+    document.getElementById('nm-enabled').checked = !!n.enabled;
+    document.getElementById('nm-modal-title').textContent = 'Edit ' + (n.title||('Slot '+n.id)) + (n.primary ? ' (Primary)' : '');
+    document.getElementById('nm-confirm').textContent = 'Save Changes';
+    if (!_nmModal) _nmModal = new bootstrap.Modal(document.getElementById('nmModal'));
+    _nmModal.show();
 }
 
 function submitNodemcu(){
-    var title = document.getElementById('n-title').value.trim();
-    var ip    = document.getElementById('n-ip').value.trim();
-    var mac   = document.getElementById('n-mac').value.trim().replace(/:/g,'').toLowerCase();
-    var port  = document.getElementById('n-port').value.trim() || '8080';
-    var psk   = document.getElementById('n-psk').value;
-    var enabled = document.getElementById('n-enabled').checked ? '1' : '0';
+    var title = document.getElementById('nm-title').value.trim();
+    var mac   = document.getElementById('nm-mac').value.trim().replace(/[:-]/g,'').toLowerCase();
+    var psk   = document.getElementById('nm-psk').value;
+    var enabled = document.getElementById('nm-enabled').checked ? '1' : '0';
 
-    if (!ip){ toastr.warning('Enter an IP address'); return; }
-    if (!/^[0-9a-f]{12}$/.test(mac)){ toastr.warning('MAC must be 12 hex characters, no colons'); return; }
+    if (!/^[0-9a-f]{12}$/.test(mac)){ toastr.warning('MAC must be 12 hex characters'); return; }
     if (!psk){ toastr.warning('Enter a PSK'); return; }
 
     var action = _editingId ? 'nodemcu_edit' : 'nodemcu_add';
     var body = 'title='+encodeURIComponent(title)
-        + '&ip='+encodeURIComponent(ip)
         + '&mac='+encodeURIComponent(mac)
-        + '&port='+encodeURIComponent(port)
         + '&psk='+encodeURIComponent(psk)
         + '&enabled='+enabled;
     if (_editingId) body += '&id='+_editingId;
 
-    showOverlay(_editingId ? 'Saving…' : 'Adding…');
+    var btn = document.getElementById('nm-confirm');
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = '…';
+
     fetch('/cgi-bin/hotspot.cgi?action='+action,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})
     .then(function(r){ return r.json(); })
     .then(function(d){
-        hideOverlay();
+        btn.disabled = false; btn.textContent = orig;
         if (d.ok){
             toastr.success(_editingId ? 'NodeMCU updated' : 'NodeMCU added');
-            cancelEdit();
+            if (_nmModal) _nmModal.hide();
             loadNodemcus();
+        } else if (d.error === 'pool_full') {
+            toastr.error('No free IP left — the DHCP range only allows ' + (_maxUnits||0) + ' NodeMCU' + ((_maxUnits||0)>1?'s':'') + '. Widen the range on the DHCP Settings page to add more.');
         } else {
             toastr.error('Save failed: '+(d.error||''));
         }
     })
-    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+    .catch(function(){ btn.disabled = false; btn.textContent = orig; toastr.error('Network error'); });
 }
 
 function delNodemcu(id, btn){
-    if (!confirm('Delete this NodeMCU? Customers using it mid-session may lose their connection.')) return;
+    var n = _nodemcus.filter(function(x){ return String(x.id)===String(id); })[0];
+    var msg = (n && n.primary)
+        ? 'Delete the PRIMARY NodeMCU? This clears the box\'s built-in coin acceptor config entirely — it will stop accepting coins until a unit is configured again.'
+        : 'Delete this NodeMCU? Customers using it mid-session may lose their connection.';
+    if (!confirm(msg)) return;
     btn.disabled=true; btn.textContent='…';
     fetch('/cgi-bin/hotspot.cgi?action=nodemcu_del',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'id='+id})
     .then(function(r){ return r.json(); })
     .then(function(d){
-        if (d.ok){ toastr.success('Deleted'); if(_editingId===id) cancelEdit(); loadNodemcus(); }
-        else { toastr.error('Delete failed'); btn.disabled=false; btn.textContent='Delete'; }
+        if (d.ok){ toastr.success('Deleted'); if(_editingId===id){ _editingId=null; if(_nmModal) _nmModal.hide(); } loadNodemcus(); }
+        else { toastr.error('Delete failed: '+(d.error||'')); btn.disabled=false; btn.textContent='Delete'; }
     })
     .catch(function(){ toastr.error('Network error'); btn.disabled=false; btn.textContent='Delete'; });
 }
-
-function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 window.addEventListener('DOMContentLoaded', loadNodemcus);
 </script>

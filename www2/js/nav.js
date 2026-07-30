@@ -49,9 +49,10 @@ setInterval(function () {
         ]},
         { label: 'LAN',     href: '/lan.html' },
         { label: 'IP ACL',  href: '/ipacl.html' },
-        { label: 'Hotspot', children: [
+        { label: 'Hotspot', module: 'hotspot', children: [
             { label: 'Overview',        href: '/hotspot.html',           hotspot: 'always'  },
             { label: 'Interfaces',      href: '/hotspot-ifaces.html',    hotspot: 'always'  },
+            { label: 'DHCP Settings',   href: '/hotspot-dhcp.html',      hotspot: 'always'  },
             { label: 'Income & Alerts', href: '/hotspot-income.html',    hotspot: 'always'  },
             { label: 'Portal',          href: '/hotspot-portal.html',    hotspot: 'always'  },
             { label: 'WiFi Rates',      href: '/hotspot-rates.html',     hotspot: 'enabled' },
@@ -67,6 +68,8 @@ setInterval(function () {
             { label: 'GPON Settings',    href: '/gpon.html'          },
             { label: 'Repurpose as WAN', href: '/wan-repurpose.html' },
             { label: 'Dashboard Layout', href: '/dashboard-layout.html' },
+            { label: 'Modules',          href: '/modules.html'       },
+            { label: 'Tailscale',        href: '/tailscale.html', module: 'tailscale' },
             { label: 'Software Update',  href: '/ota.html'           },
             { label: 'MIB Configuration', href: '/mibconfig.html'    },
             { label: 'Reboot',           href: '/reboot.html'        },
@@ -158,14 +161,19 @@ setInterval(function () {
         ].join('\n');
     }
 
-    function renderNav(showGpon, hotspotRunning) {
-        var filteredNAV = NAV.map(function(item) {
-            if (!item.children) return item;
-            var fc = item.children.filter(function(c) {
-                return c.href !== '/gpon.html' || showGpon;
+    function renderNav(showGpon, hotspotRunning, installedMap) {
+        function modOk(m){ return !m || (installedMap && installedMap[m]); }
+        var filteredNAV = NAV
+            // Hide whole groups (e.g. Hotspot) whose module isn't installed.
+            .filter(function(item) { return modOk(item.module); })
+            .map(function(item) {
+                if (!item.children) return item;
+                var fc = item.children.filter(function(c) {
+                    if (!modOk(c.module)) return false;   // hide pages (e.g. Tailscale) whose module isn't installed
+                    return c.href !== '/gpon.html' || showGpon;
+                });
+                return { label: item.label, href: item.href, module: item.module, children: fc };
             });
-            return { label: item.label, href: item.href, children: fc };
-        });
         _script.insertAdjacentHTML('beforebegin', buildNavHtml(filteredNAV, hotspotRunning));
     }
 
@@ -177,12 +185,22 @@ setInterval(function () {
             .catch(function() { return {}; }),
         fetch('/cgi-bin/hotspot.cgi?action=config_get', { cache: 'no-store' })
             .then(function(r) { return r.json(); })
-            .catch(function() { return {}; })
+            .catch(function() { return {}; }),
+        fetch('/cgi-bin/modules.cgi?action=list', { cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .catch(function() { return null; })
     ]).then(function(results) {
-        var sys = results[0]; var hsp = results[1];
+        var sys = results[0]; var hsp = results[1]; var mod = results[2];
         var isGpon       = (String(sys.pon_auto) === '1' || String(sys.pon_mode) === '1');
         var hotspotRunning = (hsp.hotspot_running === true);
-        renderNav(isGpon, hotspotRunning);
-    }).catch(function() { renderNav(true, false); });
+        // Safe defaults: keep an existing hotspot visible on a transient error;
+        // tailscale is opt-in so it stays hidden unless the registry confirms it.
+        var installedMap = { hotspot: true, tailscale: false };
+        if (mod && mod.ok && mod.modules) {
+            installedMap = {};
+            mod.modules.forEach(function(m){ installedMap[m.id] = (m.installed === true); });
+        }
+        renderNav(isGpon, hotspotRunning, installedMap);
+    }).catch(function() { renderNav(true, false, { hotspot: true, tailscale: false }); });
 }());
 

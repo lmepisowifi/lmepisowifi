@@ -1812,10 +1812,15 @@ function checkCoinEnabled(pendingRetries) {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       var on = d.enabled === true;
-      var hasRates = on && !!(d.rates && d.rates.trim());
+      // Insert Coin: needs the coin acceptor ON *and* at least one configured
+      // NodeMCU (nothing to insert a coin into otherwise).
+      var haveNodes = Array.isArray(d.nodemcus) && d.nodemcus.length > 0;
+      // WiFi Rates: shown whenever rates are configured, independent of the
+      // coin on/off toggle (coin.sh returns the rates string in both states).
+      var hasRates = !!(d.rates && d.rates.trim());
       ['btn-coin-login', 'btn-coin-status'].forEach(function(id) {
         var el = document.getElementById(id);
-        if (el) el.style.display = on ? 'block' : 'none';
+        if (el) el.style.display = (on && haveNodes) ? 'block' : 'none';
       });
       ['btn-rates-login', 'btn-rates-status'].forEach(function(id) {
         var el = document.getElementById(id);
