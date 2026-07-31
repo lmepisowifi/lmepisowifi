@@ -49,7 +49,22 @@ COMPONENTS="hotspot www2 lmehspt.sh ota.sh defaults.env startup.sh module_ctl.sh
 # of jpg/jpeg/png/ico/gif/webp per slot — a fixed "promo1.jpg" entry would
 # silently fail to match a "promo1.png" upload. See the glob-based preserve
 # step below (preserve_portal_images) instead.
-PRESERVE="www2/data/dashboard_layout.json www2/uploads hotspot/audio"
+# www2/tailscale.html + www2/cgi-bin/tailscale.cgi: the tailscale MODULE's own
+# www2 files. The base bundle deliberately excludes them (see release.yml) so
+# a device that never opted into the module doesn't get a Tailscale page it
+# can't use — module_ctl.sh install lays them down instead. But "www2" above
+# is still swapped wholesale on every base OTA, and the freshly-downloaded
+# bundle's www2 never contains these two files, so without preserving them
+# here a device that HAS the module installed loses the page + its cgi to
+# every base update (nav.js still shows "Tailscale", since that reads the
+# module's install state, not these files — hence the page 404ing while the
+# nav item stays). reconcile() doesn't catch this either: tailscale's sentinel
+# is the daemon binary (tailscale/tailscaled-small), which lives outside www2
+# and is untouched by this swap, so reconcile never sees these two as
+# missing. On a device that never installed the module, $ROOT/$rel doesn't
+# exist, so the preserve loop below is a no-op for both — they only get
+# carried forward when they were actually there to begin with.
+PRESERVE="www2/data/dashboard_layout.json www2/uploads hotspot/audio www2/tailscale.html www2/cgi-bin/tailscale.cgi"
 
 # ---- config ----------------------------------------------------------------
 OTA_REPO=""
@@ -192,6 +207,33 @@ ensure_module_ctl() {
     fi
     rm -f "$_mc_tmp"
     log "ensure_module_ctl: could not fetch module_ctl.sh (will retry next cron tick)"
+    return 1
+}
+
+# Same class of gap as ensure_default_favicon()/ensure_module_ctl(), but for
+# the tailscale MODULE's own www2 files (www2/tailscale.html +
+# www2/cgi-bin/tailscale.cgi). PRESERVE (above) stops a device from losing
+# them to any FUTURE base OTA, but that's no help to a device that already
+# lost both to an older do_apply() before PRESERVE covered this — and
+# there's no .ota_old backup left to rescue from like the startup.sh
+# markers or portal images get, because do_apply() rotates those backups
+# away on every subsequent run. Reinstalling the module is the only way
+# back for a device already in that state, so hand it to module_ctl.sh,
+# which already knows how to fetch+verify+lay its files down again. Same
+# "heals within one cron tick, no reboot, no visit to the Modules page
+# needed" idiom as ensure_module_ctl.
+ensure_tailscale_www2() {
+    [ -x "$ROOT/module_ctl.sh" ] || return 0
+    "$ROOT/module_ctl.sh" is-active tailscale >/dev/null 2>&1 || return 0
+    [ -f "$ROOT/www2/tailscale.html" ] && [ -f "$ROOT/www2/cgi-bin/tailscale.cgi" ] && return 0
+    log "ensure_tailscale_www2: tailscale installed but www2 page/cgi missing — reinstalling module"
+    if "$ROOT/module_ctl.sh" install tailscale >/dev/null 2>&1 && \
+       [ -f "$ROOT/www2/tailscale.html" ] && [ -f "$ROOT/www2/cgi-bin/tailscale.cgi" ]; then
+        log "ensure_tailscale_www2: restored www2/tailscale.html + cgi-bin/tailscale.cgi"
+        notify "OTA: restored the Tailscale page — an earlier update had removed it"
+        return 0
+    fi
+    log "ensure_tailscale_www2: reinstall failed (will retry next cron tick)"
     return 1
 }
 
@@ -593,6 +635,11 @@ self_heal() {
     # this device before, so there's no .ota_old copy anywhere to rescue it
     # from — fetch it straight from GitHub instead (see ensure_module_ctl()).
     ensure_module_ctl
+
+    # Repair a device whose tailscale module www2 page/cgi were wiped by an
+    # older do_apply() that pre-dates PRESERVE covering them (see PRESERVE
+    # above and ensure_tailscale_www2()).
+    ensure_tailscale_www2
 
     # Audio rescue: recover user-uploaded audio stranded in hotspot.ota_old/audio/
     # by a pre-fix OTA run that either lacked hotspot/audio in PRESERVE or had the
