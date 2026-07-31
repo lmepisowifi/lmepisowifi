@@ -8,11 +8,22 @@
     <link href="/css/toastr.min.css?v=1.0.0" rel="stylesheet">
     <style>
         .field-hint { font-size:12px; color:var(--text-secondary); margin-top:4px; line-height:1.5; }
-        .ts-toggle { width:46px; height:26px; border-radius:13px; background:#555; position:relative; cursor:pointer; transition:background .2s; flex-shrink:0; }
-        .ts-toggle.on { background:#4caf50; }
-        .ts-toggle.busy { opacity:.5; pointer-events:none; }
-        .ts-knob { position:absolute; width:18px; height:18px; border-radius:50%; background:#fff; top:4px; left:4px; transition:left .2s; }
-        .ts-toggle.on .ts-knob { left:24px; }
+        /* ── Toggle switch (matches other pages) ── */
+        .wlan-toggle {
+            width: 50px; height: 28px; border-radius: 14px;
+            background: #555; position: relative; cursor: pointer;
+            transition: background 0.25s; flex-shrink: 0; user-select: none;
+        }
+        .wlan-toggle.on { background: #ffffff; }
+        .wlan-toggle.disabled-ui { opacity: 0.35; pointer-events: none; }
+        .wlan-toggle-knob {
+            position: absolute; width: 20px; height: 20px;
+            border-radius: 50%; background: #fff;
+            top: 4px; left: 4px;
+            transition: left 0.25s, background 0.25s;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .wlan-toggle.on .wlan-toggle-knob { left: 26px; background: #555; }
         .ts-stat { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
         .ts-badge { display:inline-block; padding:2px 9px; border-radius:3px; font-size:11px; font-weight:700; }
         .ts-badge.on  { background:rgba(76,175,80,.2);  color:#81c784; }
@@ -21,6 +32,46 @@
         .setup-box { border:1px solid var(--accent-color,#3d6fd6); background:rgba(61,111,214,.10);
                      border-radius:8px; padding:12px 14px; margin-top:14px; font-size:13px; }
         .setup-box a { word-break:break-all; }
+
+        /* ── Route list (mirrors wlanmac.html's MAC list box) ── */
+        .route-list-box {
+            min-height: 38px; max-height: 180px; overflow-y: auto;
+            border: 1px solid var(--border-color); border-radius: 4px;
+            background: var(--bg-input);
+            scrollbar-width: thin; scrollbar-color: var(--border-color) var(--bg-input);
+        }
+        .route-entry { border-bottom: 1px solid var(--border-color); padding: 4px 8px; min-height: 32px; }
+        .route-entry:last-child { border-bottom: none; }
+        .route-cidr { font-family: "Nunito", monospace !important; font-size: 12px; color: var(--text-primary); letter-spacing: 0.04em; }
+        .route-del-btn {
+            padding: 0 6px !important; height: 22px !important; font-size: 11px !important; line-height: 1 !important;
+            color: #ff6b6b !important; border-color: rgba(255,107,107,0.3) !important;
+            background: transparent !important; border-radius: 3px !important; flex-shrink: 0;
+        }
+        .route-del-btn:hover { background: rgba(255,107,107,0.12) !important; border-color: #ff6b6b !important; }
+        .route-empty { font-size: 12px; color: var(--text-secondary); text-align: center; padding: 8px 0; }
+        .inline-err {
+            font-size: 11px; color: #ff6b6b; background: rgba(255,107,107,0.08);
+            border: 1px solid rgba(255,107,107,0.25); border-radius: 3px; padding: 3px 8px;
+            margin-top: 5px; display: none;
+        }
+
+        /* ── Account block ── */
+        .ts-account { display:flex; align-items:center; gap:10px; }
+        .ts-avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; background:#3a3a3a; flex-shrink:0; }
+        .ts-account-name { font-weight:600; font-size:14px; }
+        .ts-account-email { font-size:12px; color:var(--text-secondary); }
+
+        /* ── Node details grid ── */
+        .ts-kv { font-size:12px; color:var(--text-secondary); display:grid; grid-template-columns:auto 1fr; gap:4px 10px; margin-top:10px; }
+        .ts-kv b { color:var(--text-primary); font-weight:600; }
+        .ts-kv code { font-size:11px; word-break:break-all; }
+
+        /* ── Health warnings from tailscaled ── */
+        .ts-health-item {
+            font-size:12px; padding:6px 10px; border-radius:6px; margin-top:6px;
+            background:rgba(255,193,7,.12); border:1px solid rgba(255,193,7,.3); color:#ffd54f;
+        }
     </style>
 </head>
 <body>
@@ -38,7 +89,7 @@
             <span>Tailscale</span>
             <div class="d-flex align-items-center gap-2">
                 <span id="ts-switch-label" style="font-size:12px;color:var(--text-secondary);">Off</span>
-                <div class="ts-toggle" id="ts-switch" onclick="toggleEnabled()" title="Start / stop Tailscale"><div class="ts-knob"></div></div>
+                <div class="wlan-toggle" id="ts-switch" onclick="toggleEnabled()" role="switch" title="Start / stop Tailscale"><div class="wlan-toggle-knob"></div></div>
             </div>
         </div>
         <div class="card-body">
@@ -46,7 +97,20 @@
                 <span id="ts-run-badge" class="ts-badge off">Stopped</span>
                 <span id="ts-backend" style="font-size:12px;color:var(--text-secondary);"></span>
                 <span id="ts-ip" class="ts-ip"></span>
+                <span id="ts-ipv6" class="ts-ip"></span>
             </div>
+
+            <div id="ts-health"></div>
+
+            <div class="ts-account mb-2" id="ts-account" style="display:none;">
+                <img id="ts-avatar" class="ts-avatar" alt="" referrerpolicy="no-referrer" style="display:none;">
+                <div class="flex-grow-1">
+                    <div class="ts-account-name" id="ts-account-name"></div>
+                    <div class="ts-account-email" id="ts-account-email"></div>
+                </div>
+                <button class="btn btn-sm btn-outline-danger" onclick="doLogout()">Log out</button>
+            </div>
+
             <p class="field-hint">
                 Runs in userspace-networking mode (this device has no TUN module), so it works as a
                 subnet router and Tailscale SSH target. When the switch is On it starts automatically on
@@ -60,16 +124,61 @@
                 <a id="ts-setup-url" href="#" target="_blank" rel="noopener">—</a>
             </div>
 
+            <div class="ts-kv" id="ts-details" style="display:none;"></div>
+
             <hr class="my-3" style="border-color:var(--border-color);">
 
-            <label class="form-label">Advertised subnet routes <span class="field-hint d-inline">(comma-separated CIDRs)</span></label>
-            <input type="text" class="form-control" id="ts-routes" placeholder="192.168.8.0/24,10.0.0.0/24">
-            <div class="field-hint">Routes this node advertises to your tailnet. Approve them in the Tailscale admin console. Leave blank for none.</div>
-
-            <div class="form-check form-switch mt-3">
-                <input class="form-check-input" type="checkbox" id="ts-ssh">
-                <label class="form-check-label" for="ts-ssh">Enable Tailscale SSH <span class="field-hint d-inline">(allow SSH to this node over the tailnet)</span></label>
+            <div class="mb-2">
+                <label class="form-label">Advertised subnet routes
+                    <span id="ts-routes-count" class="field-hint d-inline">(0)</span>
+                </label>
+                <div class="route-list-box" id="ts-routes-list">
+                    <div class="route-empty">No routes configured</div>
+                </div>
             </div>
+            <div>
+                <label for="ts-route-input" class="form-label">Add subnet route</label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="ts-route-input" placeholder="192.168.8.0/24"
+                        autocomplete="off" spellcheck="false"
+                        onkeydown="if(event.key==='Enter'){event.preventDefault();addRoute();}" oninput="clearRouteErr()">
+                    <button class="btn btn-primary" onclick="addRoute()">Add</button>
+                </div>
+                <div class="inline-err" id="ts-route-err"></div>
+                <div class="field-hint">Routes this node advertises to your tailnet. Approve them in the Tailscale admin console.</div>
+            </div>
+
+            <hr class="my-3" style="border-color:var(--border-color);">
+
+            <div class="d-flex align-items-center gap-2 mt-2">
+                <div class="wlan-toggle" id="ts-accept-routes" onclick="this.classList.toggle('on')" role="switch" title="Accept routes advertised by other tailnet devices"><div class="wlan-toggle-knob"></div></div>
+                <span>Accept routes from other devices <span class="field-hint d-inline">(use subnet routes other devices advertise on your tailnet)</span></span>
+            </div>
+
+            <div class="d-flex align-items-center gap-2 mt-3">
+                <div class="wlan-toggle" id="ts-accept-dns" onclick="this.classList.toggle('on')" role="switch" title="Accept DNS settings from tailnet"><div class="wlan-toggle-knob"></div></div>
+                <span>Accept DNS settings <span class="field-hint d-inline">(use MagicDNS / nameservers pushed by your tailnet)</span></span>
+            </div>
+
+            <div class="d-flex align-items-center gap-2 mt-3">
+                <div class="wlan-toggle" id="ts-ssh" onclick="this.classList.toggle('on')" role="switch" title="Enable Tailscale SSH"><div class="wlan-toggle-knob"></div></div>
+                <span>Enable Tailscale SSH <span class="field-hint d-inline">(allow SSH to this node over the tailnet)</span></span>
+            </div>
+
+            <div class="d-flex align-items-center gap-2 mt-3">
+                <div class="wlan-toggle" id="ts-exit" onclick="this.classList.toggle('on')" role="switch" title="Advertise as exit node"><div class="wlan-toggle-knob"></div></div>
+                <span>Advertise as exit node <span class="field-hint d-inline">(lets tailnet devices route all traffic through this device — approve in Tailscale admin console)</span></span>
+            </div>
+
+            <hr class="my-3" style="border-color:var(--border-color);">
+
+            <label class="form-label">Node hostname <span class="field-hint d-inline">(optional override)</span></label>
+            <input type="text" class="form-control" id="ts-hostname" placeholder="rtkgw" maxlength="63" autocomplete="off" spellcheck="false">
+            <div class="field-hint mb-3">Letters, numbers, and hyphens only. Leave blank to use this device's default hostname.</div>
+
+            <label class="form-label">ACL tags <span class="field-hint d-inline">(comma-separated)</span></label>
+            <input type="text" class="form-control" id="ts-tags" placeholder="tag:hotspot" autocomplete="off" spellcheck="false">
+            <div class="field-hint">e.g. <code>tag:hotspot</code> — the tag(s) must already exist in your tailnet's ACL policy.</div>
 
             <div class="d-flex gap-2 flex-wrap mt-3">
                 <button class="btn btn-primary" onclick="saveConfig()">Save &amp; Apply</button>
@@ -84,10 +193,22 @@
 <script src="/js/toastr.min.js?v=1.0.0"></script>
 <script>
 toastr.options = { positionClass:'toast-bottom-right', timeOut:3500, progressBar:true, closeButton:true };
-function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
-function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
+function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').classList.add('visible'); }
+function hideOverlay(){ document.getElementById('overlay').classList.remove('visible'); }
 
 var _pollTimer = null;
+var currentRoutes = [];
+
+function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatExpiry(iso){
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+}
 
 function applyStatus(d){
     var badge = document.getElementById('ts-run-badge');
@@ -96,15 +217,67 @@ function applyStatus(d){
     badge.textContent = running ? 'Running' : 'Stopped';
     document.getElementById('ts-backend').textContent = d.backend ? ('· ' + d.backend) : '';
     document.getElementById('ts-ip').textContent = d.ip || '';
+    document.getElementById('ts-ipv6').textContent = d.ipv6 || '';
 
     var sw = document.getElementById('ts-switch');
-    sw.classList.remove('busy');
+    sw.classList.remove('disabled-ui');
     if (d.enabled) sw.classList.add('on'); else sw.classList.remove('on');
     document.getElementById('ts-switch-label').textContent = d.enabled ? 'On' : 'Off';
 
-    document.getElementById('ts-ssh').checked = !!d.ssh;
-    if (document.activeElement !== document.getElementById('ts-routes')) {
-        document.getElementById('ts-routes').value = d.routes || '';
+    document.getElementById('ts-ssh').classList.toggle('on', !!d.ssh);
+    document.getElementById('ts-exit').classList.toggle('on', !!d.exit_node);
+    document.getElementById('ts-accept-routes').classList.toggle('on', !!d.accept_routes);
+    document.getElementById('ts-accept-dns').classList.toggle('on', !!d.accept_dns);
+
+    var hostnameEl = document.getElementById('ts-hostname');
+    if (document.activeElement !== hostnameEl) hostnameEl.value = d.hostname || '';
+    var tagsEl = document.getElementById('ts-tags');
+    if (document.activeElement !== tagsEl) tagsEl.value = d.tags || '';
+
+    // Routes list: server sends one comma-separated string. Keep our local
+    // array in sync with it unless the add-route input is currently
+    // focused, same guard the old single text field used to avoid
+    // clobbering an in-progress edit on every 5s poll.
+    if (document.activeElement !== document.getElementById('ts-route-input')) {
+        currentRoutes = (d.routes || '').split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+        renderRoutesList();
+    }
+
+    // Account block — only meaningful once actually logged in
+    var acct = document.getElementById('ts-account');
+    var avatar = document.getElementById('ts-avatar');
+    if (d.email) {
+        acct.style.display = 'flex';
+        document.getElementById('ts-account-name').textContent = d.username || d.email;
+        document.getElementById('ts-account-email').textContent = d.email;
+        if (d.profile_pic_url) { avatar.src = d.profile_pic_url; avatar.style.display = 'inline-block'; }
+        else { avatar.removeAttribute('src'); avatar.style.display = 'none'; }
+    } else {
+        acct.style.display = 'none';
+        avatar.removeAttribute('src');
+    }
+
+    // Node details — hostname/DNS/relay/version/key expiry
+    var kv = document.getElementById('ts-details');
+    var rows = [];
+    if (d.device_hostname) rows.push('<b>Hostname</b><span>' + esc(d.device_hostname) + '</span>');
+    if (d.dns_name) rows.push('<b>MagicDNS</b><code>' + esc(d.dns_name) + '</code>');
+    if (d.relay) rows.push('<b>Relay</b><span>' + esc(d.relay) + '</span>');
+    if (d.version) rows.push('<b>Version</b><span>' + esc(d.version) + '</span>');
+    if (d.key_expiry) rows.push('<b>Key expiry</b><span>' + esc(formatExpiry(d.key_expiry)) + '</span>');
+    kv.innerHTML = rows.join('');
+    kv.style.display = rows.length ? 'grid' : 'none';
+
+    // Health warnings from tailscaled itself
+    var healthBox = document.getElementById('ts-health');
+    healthBox.innerHTML = '';
+    if (Array.isArray(d.health)) {
+        d.health.forEach(function(msg){
+            var div = document.createElement('div');
+            div.className = 'ts-health-item';
+            div.textContent = msg;
+            healthBox.appendChild(div);
+        });
     }
 
     var setup = document.getElementById('ts-setup');
@@ -117,17 +290,104 @@ function applyStatus(d){
     }
 }
 
-function loadStatus(){
+// ============================================================
+// Subnet routes list — mirrors wlanmac.html's MAC address list
+// (list box of entries with a delete button, plus an add input).
+// Routes are still applied as one comma-separated string via
+// Save & Apply, same CGI field as before.
+// ============================================================
+function renderRoutesList(){
+    var box = document.getElementById('ts-routes-list');
+    var count = document.getElementById('ts-routes-count');
+    box.innerHTML = '';
+    count.textContent = '(' + currentRoutes.length + ')';
+    if (!currentRoutes.length) {
+        var empty = document.createElement('div');
+        empty.className = 'route-empty';
+        empty.textContent = 'No routes configured';
+        box.appendChild(empty);
+        return;
+    }
+    currentRoutes.forEach(function(cidr, i){
+        var div = document.createElement('div');
+        div.className = 'route-entry d-flex align-items-center justify-content-between';
+        var code = document.createElement('span');
+        code.className = 'route-cidr';
+        code.textContent = cidr;
+        var btn = document.createElement('button');
+        btn.className = 'btn route-del-btn';
+        btn.title = 'Remove ' + cidr;
+        btn.textContent = '\u2715';
+        (function(idx){ btn.onclick = function(){ delRoute(idx); }; }(i));
+        div.appendChild(code);
+        div.appendChild(btn);
+        box.appendChild(div);
+    });
+}
+
+function isValidCIDR(str){
+    var m = str.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+    if (!m) return false;
+    for (var i = 1; i <= 4; i++) { if (+m[i] > 255) return false; }
+    return +m[5] <= 32;
+}
+
+function showRouteErr(msg){
+    var el = document.getElementById('ts-route-err');
+    el.textContent = msg; el.style.display = 'block';
+}
+function clearRouteErr(){
+    var el = document.getElementById('ts-route-err');
+    el.style.display = 'none'; el.textContent = '';
+}
+
+function addRoute(){
+    var input = document.getElementById('ts-route-input');
+    var raw = input.value.trim();
+    clearRouteErr();
+    if (!raw) return;
+    if (!isValidCIDR(raw)) {
+        showRouteErr('Invalid format. Use CIDR notation, e.g. 192.168.8.0/24.');
+        return;
+    }
+    if (currentRoutes.indexOf(raw) !== -1) {
+        showRouteErr('That route is already in the list.');
+        return;
+    }
+    currentRoutes.push(raw);
+    renderRoutesList();
+    input.value = '';
+}
+
+function delRoute(idx){
+    currentRoutes.splice(idx, 1);
+    renderRoutesList();
+}
+
+function doLogout(){
+    if (!confirm('Log out of this Tailscale account?\n\nThe device will disconnect from the tailnet and need a fresh login before it can reconnect.')) return;
+    showOverlay('Logging out…');
+    fetch('/cgi-bin/tailscale.cgi?action=logout', { method:'POST' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+        hideOverlay();
+        if (d.ok){ toastr.success('Logged out'); loadStatus(); }
+        else { toastr.error('Failed: ' + (d.error||'unknown')); }
+    })
+    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+}
+
+function loadStatus(firstLoad){
     fetch('/cgi-bin/tailscale.cgi?action=status', { cache:'no-store' })
         .then(function(r){ return r.json(); })
-        .then(function(d){ if (d.ok) applyStatus(d); })
-        .catch(function(){});
+        .then(function(d){ if (d.ok) applyStatus(d); if (firstLoad) hideOverlay(); })
+        .catch(function(){ if (firstLoad) hideOverlay(); });
 }
 
 function toggleEnabled(){
     var sw = document.getElementById('ts-switch');
     var turnOn = !sw.classList.contains('on');
-    sw.classList.add('busy');
+    sw.classList.add('disabled-ui');
     showOverlay(turnOn ? 'Starting Tailscale…' : 'Stopping Tailscale…');
     fetch('/cgi-bin/tailscale.cgi?action=set_enabled', {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -143,12 +403,19 @@ function toggleEnabled(){
 }
 
 function saveConfig(){
-    var routes = document.getElementById('ts-routes').value.trim();
-    var ssh = document.getElementById('ts-ssh').checked ? '1' : '0';
+    var routes = currentRoutes.join(',');
+    var ssh = document.getElementById('ts-ssh').classList.contains('on') ? '1' : '0';
+    var exit_node = document.getElementById('ts-exit').classList.contains('on') ? '1' : '0';
+    var accept_routes = document.getElementById('ts-accept-routes').classList.contains('on') ? '1' : '0';
+    var accept_dns = document.getElementById('ts-accept-dns').classList.contains('on') ? '1' : '0';
+    var hostname = document.getElementById('ts-hostname').value.trim();
+    var tags = document.getElementById('ts-tags').value.trim();
     showOverlay('Applying Tailscale settings…');
     fetch('/cgi-bin/tailscale.cgi?action=set_config', {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:'routes=' + encodeURIComponent(routes) + '&ssh=' + ssh
+        body:'routes=' + encodeURIComponent(routes) + '&ssh=' + ssh + '&exit_node=' + exit_node +
+             '&accept_routes=' + accept_routes + '&accept_dns=' + accept_dns +
+             '&hostname=' + encodeURIComponent(hostname) + '&tags=' + encodeURIComponent(tags)
     })
     .then(function(r){ return r.json(); })
     .then(function(d){
@@ -160,7 +427,8 @@ function saveConfig(){
 }
 
 window.addEventListener('DOMContentLoaded', function(){
-    loadStatus();
+    showOverlay('Loading…');
+    loadStatus(true);
     _pollTimer = setInterval(loadStatus, 5000);  // refresh so the login URL / IP appear when ready
 });
 </script>

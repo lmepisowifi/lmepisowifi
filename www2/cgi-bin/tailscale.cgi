@@ -46,7 +46,17 @@ case "$ACT" in
         ROUTES=$(field "$BODY" routes | urldec | $BB tr -cd '0-9./,')
         SSH=$(field "$BODY" ssh | $BB tr -cd '01' | cut -c1)
         [ "$SSH" = "1" ] || SSH=0
-        OUT=$("$CTL" set-config "$ROUTES" "$SSH" 2>/dev/null)
+        EXIT_NODE=$(field "$BODY" exit_node | $BB tr -cd '01' | cut -c1)
+        [ "$EXIT_NODE" = "1" ] || EXIT_NODE=0
+        ACCEPT_ROUTES=$(field "$BODY" accept_routes | $BB tr -cd '01' | cut -c1)
+        [ "$ACCEPT_ROUTES" = "1" ] || ACCEPT_ROUTES=0
+        ACCEPT_DNS=$(field "$BODY" accept_dns | $BB tr -cd '01' | cut -c1)
+        [ "$ACCEPT_DNS" = "1" ] || ACCEPT_DNS=0
+        # hostname: DNS label chars only, lowercased, capped at 63 (max label length)
+        HOST_NAME=$(field "$BODY" hostname | urldec | $BB tr 'A-Z' 'a-z' | $BB tr -cd 'a-z0-9-' | cut -c1-63)
+        # tags: comma-separated "tag:name" entries per Tailscale ACL syntax
+        TAGS=$(field "$BODY" tags | urldec | $BB tr 'A-Z' 'a-z' | $BB tr -cd 'a-z0-9:,-')
+        OUT=$("$CTL" set-config "$ROUTES" "$SSH" "$EXIT_NODE" "$ACCEPT_ROUTES" "$ACCEPT_DNS" "$HOST_NAME" "$TAGS" 2>/dev/null)
         [ -n "$OUT" ] && ok_json "$OUT" || err_json "set_config_failed"
         ;;
     set_enabled)
@@ -54,6 +64,10 @@ case "$ACT" in
         EN=$(field "$BODY" enabled | $BB tr -cd '01' | cut -c1); [ "$EN" = "1" ] || EN=0
         OUT=$("$CTL" set-enabled "$EN" 2>/dev/null)
         [ -n "$OUT" ] && ok_json "$OUT" || err_json "set_enabled_failed"
+        ;;
+    logout)
+        OUT=$("$CTL" logout 2>/dev/null)
+        [ -n "$OUT" ] && ok_json "$OUT" || err_json "logout_failed"
         ;;
     refresh)
         OUT=$("$CTL" up 2>/dev/null)
