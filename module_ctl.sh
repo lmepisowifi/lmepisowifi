@@ -41,6 +41,7 @@ OTA_REPO="lmepisowifi/lmepisowifi"
 OTA_BRANCH="main"
 OTA_MANIFEST_URL=""
 OTA_CACERT="$ROOT/cacert.pem"
+MOD_AUTO_UPDATE="1"            # default on; ota.env may set "0" to disable
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
 mkdir -p "$MODDIR" 2>/dev/null
@@ -110,6 +111,20 @@ fetch() {
     if [ -f "$OTA_CACERT" ]; then _wf="$_wf --ca-certificate=$OTA_CACERT"; else _wf="$_wf --no-check-certificate"; fi
     wget $_wf -q -O "$2" "$_u"
 }
+# fetch_large — for module tarballs on slow connections. Uses a 5-minute
+# read timeout (-T 300) so a large download that would exceed the 30-second
+# chunk window in fetch() doesn't produce a partial file that then fails the
+# sha256 check with a misleading "checksum_mismatch" error.
+fetch_large() {
+    _u=$(cdnify "$1")
+    _wf="--https-only -t 2 -T 300 --retry-connrefused -U lmepisowifi-modctl"
+    if [ -f "$OTA_CACERT" ]; then _wf="$_wf --ca-certificate=$OTA_CACERT"; else _wf="$_wf --no-check-certificate"; fi
+    wget $_wf -q -O "$2" "$_u"
+}
+# set_mod_status — write a granular phase label to the per-module status file
+# that modules.cgi set via the MOD_STATUS_FILE environment variable. No-op
+# when MOD_STATUS_FILE is not set (e.g. when called from the CLI directly).
+set_mod_status() { [ -n "$MOD_STATUS_FILE" ] && printf '%s' "$1" > "$MOD_STATUS_FILE" 2>/dev/null; }
 reg_field() { # reg_field <file> <id> <key>
     $BB awk -v want="$2" -v key="$3" '
         /^[[:space:]]*#/ { next }
@@ -230,6 +245,7 @@ do_install() {
     case " $MODULES " in *" $_id "*) : ;; *) echo '{"ok":false,"error":"unknown_module"}'; return 1 ;; esac
     mkdir -p "$DL"; : > "$LOG"
 
+    set_mod_status "fetching_registry"
     if ! fetch "$(modules_url)" "$DL/modules.txt"; then echo '{"ok":false,"error":"registry_fetch_failed"}'; return 1; fi
     _ver=$(reg_field "$DL/modules.txt" "$_id" version)
     _url=$(reg_field "$DL/modules.txt" "$_id" url)
@@ -242,12 +258,17 @@ do_install() {
         *) echo '{"ok":false,"error":"url_outside_repo"}'; return 1 ;;
     esac
 
-    if ! fetch "$_url" "$DL/mod.tar.gz"; then echo '{"ok":false,"error":"download_failed"}'; return 1; fi
+    # Use fetch_large (5-min timeout) so slow connections don't produce a partial
+    # tarball that fails the sha256 check with a spurious checksum_mismatch error.
+    set_mod_status "downloading"
+    if ! fetch_large "$_url" "$DL/mod.tar.gz"; then echo '{"ok":false,"error":"download_failed"}'; return 1; fi
+    set_mod_status "verifying"
     _got=$(sha256sum "$DL/mod.tar.gz" 2>/dev/null | $BB awk '{print $1}')
     if [ -z "$_got" ] || [ "$_got" != "$_sum" ]; then
         rm -f "$DL/mod.tar.gz"; echo '{"ok":false,"error":"checksum_mismatch"}'; return 1
     fi
 
+    set_mod_status "extracting"
     rm -rf "$DL/stage"; mkdir -p "$DL/stage"
     if ! tar -xzf "$DL/mod.tar.gz" -C "$DL/stage" 2>>"$LOG"; then
         rm -rf "$DL/stage"; echo '{"ok":false,"error":"extract_failed"}'; return 1
@@ -262,6 +283,7 @@ do_install() {
         rm -rf "$DL/stage"; echo '{"ok":false,"error":"bad_module_payload"}'; return 1
     fi
 
+    set_mod_status "applying"
     mod_prestop "$_id" 2>/dev/null
     cp -a "$_base/." "$ROOT/" 2>>"$LOG"
     chmod +x "$ROOT"/www2/cgi-bin/* 2>/dev/null
@@ -316,12 +338,55 @@ do_status() {
     printf '{"ok":true,"module":'; emit_status "$1" "$_reg"; printf '}\n'
 }
 
+# ── Module auto-update ──────────────────────────────────────────────────────
+# Called by ota.sh do_cron() on every 6-hour tick.  Fetches the registry once
+# and installs any module whose registry version differs from the installed one.
+# Controlled by MOD_AUTO_UPDATE in ota.env (default "1" = enabled; "0" = off).
+do_auto_update() {
+    [ "$MOD_AUTO_UPDATE" = "0" ] && { log "auto_update: disabled (MOD_AUTO_UPDATE=0)"; return 0; }
+    log "auto_update: checking installed modules"
+    mkdir -p "$DL"
+    if ! fetch "$(modules_url)" "$DL/modules_au.txt"; then
+        log "auto_update: could not fetch registry — skipping"; return 1
+    fi
+    for _id in $MODULES; do
+        [ "$(state_of "$_id")" = "installed" ] || continue
+        _iv=$(version_of "$_id")
+        _av=$(reg_field "$DL/modules_au.txt" "$_id" version)
+        [ -z "$_av" ] && continue
+        if [ "$_av" != "$_iv" ]; then
+            log "auto_update: updating $_id from ${_iv:-<unknown>} to $_av"
+            do_install "$_id" >/dev/null   # silence JSON; log() captures progress
+        else
+            log "auto_update: $_id already at $_av — nothing to do"
+        fi
+    done
+    rm -f "$DL/modules_au.txt" 2>/dev/null
+}
+
+do_get_mod_auto() { [ "$MOD_AUTO_UPDATE" = "0" ] && echo 0 || echo 1; }
+
+do_set_mod_auto() {
+    case "$1" in 1) _v=1 ;; *) _v=0 ;; esac
+    if [ -f "$ENV_FILE" ] && $BB grep -q '^MOD_AUTO_UPDATE=' "$ENV_FILE" 2>/dev/null; then
+        _tmp=$(mktemp /tmp/ota.env.XXXXXX)
+        $BB sed "s/^MOD_AUTO_UPDATE=.*/MOD_AUTO_UPDATE=\"$_v\"/" "$ENV_FILE" > "$_tmp" && mv "$_tmp" "$ENV_FILE"
+    else
+        printf 'MOD_AUTO_UPDATE="%s"\n' "$_v" >> "$ENV_FILE"
+    fi
+    sync
+    echo "$_v"
+}
+
 case "$1" in
-    reconcile)  do_reconcile ;;
-    is-active)  [ "$(state_of "${2:-hotspot}")" = "installed" ] ;;
-    install)    do_install   "$2" "$3" ;;
-    uninstall)  do_uninstall "$2" ;;
-    list)       do_list ;;
-    status)     do_status "${2:-hotspot}" ;;
-    *) echo "usage: $0 {reconcile|is-active|install|uninstall|list|status} [id]" >&2; exit 2 ;;
+    reconcile)   do_reconcile ;;
+    is-active)   [ "$(state_of "${2:-hotspot}")" = "installed" ] ;;
+    install)     do_install   "$2" "$3" ;;
+    uninstall)   do_uninstall "$2" ;;
+    list)        do_list ;;
+    status)      do_status "${2:-hotspot}" ;;
+    auto_update) do_auto_update ;;
+    get_auto)    do_get_mod_auto ;;
+    set_auto)    do_set_mod_auto "$2" ;;
+    *) echo "usage: $0 {reconcile|is-active|install|uninstall|list|status|auto_update|get_auto|set_auto} [id]" >&2; exit 2 ;;
 esac

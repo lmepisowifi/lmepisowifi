@@ -18,6 +18,14 @@
         .mod-ver { font-size:12px; color:var(--text-secondary); font-family:monospace; }
         .mod-desc { font-size:13px; color:var(--text-primary); margin-top:10px; }
         .mod-actions { margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; }
+        /* toggle (same as ota.html) */
+        .wlan-toggle { width:50px; height:28px; border-radius:14px; background:#555;
+            position:relative; cursor:pointer; transition:background .25s; flex-shrink:0; user-select:none; }
+        .wlan-toggle.on { background:#ffffff; }
+        .wlan-toggle-knob { position:absolute; width:20px; height:20px; border-radius:50%;
+            background:#fff; top:4px; left:4px; transition:left .25s,background .25s;
+            box-shadow:0 1px 4px rgba(0,0,0,.5); }
+        .wlan-toggle.on .wlan-toggle-knob { left:26px; background:#555; }
     </style>
 </head>
 <body>
@@ -45,6 +53,18 @@
                 <b>keeps your data</b> (e.g. the hotspot keeps <code>hotspot_data/</code> — users,
                 vouchers, income — and its settings), so reinstalling restores everything.
             </p>
+            <div class="d-flex align-items-start gap-3 mb-3 pb-3" style="border-bottom:1px solid var(--border-color)">
+                <div class="wlan-toggle" id="mod-auto-toggle" role="switch" aria-checked="true"
+                     onclick="onToggleModAuto()" title="Automatic module updates" style="margin-top:2px">
+                    <div class="wlan-toggle-knob"></div>
+                </div>
+                <span style="font-size:13px">
+                    Automatic module updates
+                    <span class="field-hint" style="display:block;margin-top:2px;">
+                        Keep installed modules up to date automatically whenever the 6-hour OTA check runs.
+                    </span>
+                </span>
+            </div>
             <div id="mod-list"><div class="field-hint">Loading…</div></div>
         </div>
     </div>
@@ -61,6 +81,7 @@ function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/
 
 var _modules = [];
 
+// ── Module list ───────────────────────────────────────────────────────────
 function loadModules(){
     var list = document.getElementById('mod-list');
     list.innerHTML = '<div class="field-hint">Loading…</div>';
@@ -105,35 +126,61 @@ function render(){
     });
 }
 
+// ── Install / update ──────────────────────────────────────────────────────
+// Human-readable labels for each install phase emitted by module_ctl.sh.
+var _phaseLabels = {
+    'queued':            'Queued…',
+    'fetching_registry': 'Fetching registry…',
+    'downloading':       'Downloading from GitHub…',
+    'verifying':         'Verifying checksum…',
+    'extracting':        'Extracting…',
+    'applying':          'Applying…'
+};
+
 function doInstall(id, isUpdate){
     var verb = isUpdate ? 'Update' : 'Install';
     if (!confirm(verb + ' the "' + id + '" module from GitHub? The download is checksum-verified before it is applied.')) return;
-    showOverlay(verb + 'ing ' + id + '… downloading from GitHub');
+    showOverlay(verb + 'ing ' + id + ' — Queued…');
     fetch('/cgi-bin/modules.cgi?action=install', {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'id=' + encodeURIComponent(id)
     })
     .then(function(r){ return r.json(); })
     .then(function(d){
-        if (!d.ok){ hideOverlay(); toastr.error('Install failed: ' + (d.error||'unknown')); return; }
-        pollInstall(id, 0);
+        if (!d.ok){ hideOverlay(); toastr.error('Install failed: ' + (d.error||'unknown_error')); return; }
+        // Poll with the module id so concurrent installs use separate status files
+        // and don't see each other's result (which caused "unknown_error").
+        pollInstall(id, verb, 0);
     })
     .catch(function(){ hideOverlay(); toastr.error('Network error'); });
 }
 
-function pollInstall(id, tries){
-    if (tries > 60){ hideOverlay(); toastr.error('Install is taking too long — check the Modules page again shortly.'); return; }
-    fetch('/cgi-bin/modules.cgi?action=install_status', { cache:'no-store' })
+function pollInstall(id, verb, tries){
+    // 90 × 2 s = 3 min ceiling — enough for a large module on a slow link
+    if (tries > 90){ hideOverlay(); toastr.error('Install is taking too long — check the Modules page again shortly.'); return; }
+    fetch('/cgi-bin/modules.cgi?action=install_status&id=' + encodeURIComponent(id), { cache:'no-store' })
         .then(function(r){ return r.json(); })
         .then(function(d){
-            if (d.status !== 'done'){ setTimeout(function(){ pollInstall(id, tries+1); }, 2000); return; }
+            if (d.status !== 'done'){
+                // Update the overlay text as the install progresses through phases
+                var label = _phaseLabels[d.status] || 'Working…';
+                showOverlay(verb + 'ing ' + id + ' — ' + label);
+                setTimeout(function(){ pollInstall(id, verb, tries+1); }, 2000);
+                return;
+            }
             hideOverlay();
             var res = d.result || {};
-            if (res.ok){ toastr.success('Installed' + (res.version ? ' v'+res.version : '')); loadModules(); }
-            else { toastr.error('Install failed: ' + ((res && res.error) || 'unknown')); loadModules(); }
+            if (res.ok){
+                toastr.success((verb === 'Update' ? 'Updated' : 'Installed') + (res.version ? ' v' + res.version : ''));
+                loadModules();
+            } else {
+                toastr.error(verb + ' failed: ' + ((res && res.error) || 'unknown_error'));
+                loadModules();
+            }
         })
-        .catch(function(){ setTimeout(function(){ pollInstall(id, tries+1); }, 2000); });
+        .catch(function(){ setTimeout(function(){ pollInstall(id, verb, tries+1); }, 2000); });
 }
 
+// ── Uninstall ─────────────────────────────────────────────────────────────
 function doUninstall(id){
     var msg = (id === 'hotspot')
         ? 'Uninstall the Hotspot module? The captive portal, coin acceptor and admin pages will stop and be removed. Your hotspot_data (users, vouchers, income) and settings are KEPT, so reinstalling restores everything.'
@@ -147,12 +194,47 @@ function doUninstall(id){
     .then(function(d){
         hideOverlay();
         if (d.ok){ toastr.success('Uninstalled ' + id + ' (data kept)'); loadModules(); }
-        else { toastr.error('Uninstall failed: ' + (d.error||'unknown')); }
+        else { toastr.error('Uninstall failed: ' + (d.error||'unknown_error')); }
     })
     .catch(function(){ hideOverlay(); toastr.error('Network error'); });
 }
 
-window.addEventListener('DOMContentLoaded', loadModules);
+// ── Auto-update toggle ────────────────────────────────────────────────────
+function loadModAutoConfig(){
+    fetch('/cgi-bin/modules.cgi?action=get_auto', { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+            var t = document.getElementById('mod-auto-toggle');
+            // default is on ("1"); treat anything that is NOT explicitly "0" as on
+            var on = (j.auto !== '0');
+            t.classList.toggle('on', on);
+            t.setAttribute('aria-checked', on ? 'true' : 'false');
+        })
+        .catch(function(){
+            // If the request fails just leave the toggle in its default-on state
+        });
+}
+
+function onToggleModAuto(){
+    var t = document.getElementById('mod-auto-toggle');
+    t.classList.toggle('on');
+    var on = t.classList.contains('on') ? 1 : 0;
+    t.setAttribute('aria-checked', on ? 'true' : 'false');
+    fetch('/cgi-bin/modules.cgi?action=set_auto', {
+        method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'auto=' + on
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+        if (j.auto === '1') toastr.success('Installed modules will update automatically during the 6-hour OTA check.', 'Auto-update on');
+        else toastr.info('Module updates will not install automatically.', 'Auto-update off');
+    })
+    .catch(function(){ toastr.error('Could not save the setting.', 'Error'); });
+}
+
+window.addEventListener('DOMContentLoaded', function(){
+    loadModAutoConfig();
+    loadModules();
+});
 </script>
 </body>
 </html>

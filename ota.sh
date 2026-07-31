@@ -952,6 +952,11 @@ do_cron() {
             fi
         fi
     fi
+
+    # Auto-update installed modules when MOD_AUTO_UPDATE is enabled (default: on).
+    # Runs on every cron tick regardless of whether a portal update was applied, so
+    # modules stay current even in between portal releases.
+    [ -x "$ROOT/module_ctl.sh" ] && "$ROOT/module_ctl.sh" auto_update >> "$LOG" 2>&1
 }
 
 # ---- auto-update toggle (persists OTA_AUTO in ota.env) ----

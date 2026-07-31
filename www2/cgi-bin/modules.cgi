@@ -70,17 +70,28 @@ case "$ACT" in
         # the real $MODULES-based validation and returns this same
         # unknown_module error for any id it doesn't recognize.
         [ -n "$ID" ] || err_json "unknown_module"
-        # Downloads a (possibly multi-MB) tarball from GitHub — run it in the
-        # background and let the page poll action=install_status so the request
-        # never blocks long enough to hit a proxy/browser timeout.
-        printf 'running' > /tmp/module_status
-        rm -f /tmp/module_result 2>/dev/null
-        ( "$MC" install "$ID" > /tmp/module_result 2>/dev/null; printf 'done' > /tmp/module_status ) &
+        # Use per-module files so two concurrent installs (e.g. hotspot + tailscale)
+        # don't clobber each other's status/result and produce "unknown_error".
+        # MOD_STATUS_FILE is read by module_ctl.sh's set_mod_status() to emit
+        # granular phase labels (downloading, verifying, …) that the UI polls.
+        _STATUSF="/tmp/module_status_${ID}"
+        _RESULTF="/tmp/module_result_${ID}"
+        printf 'queued' > "$_STATUSF"
+        rm -f "$_RESULTF" 2>/dev/null
+        ( MOD_STATUS_FILE="$_STATUSF" "$MC" install "$ID" > "$_RESULTF" 2>/dev/null
+          printf 'done' > "$_STATUSF" ) &
         ok_json '{"ok":true,"started":true}'
         ;;
     install_status)
-        ST=$(cat /tmp/module_status 2>/dev/null); [ -z "$ST" ] && ST="idle"
-        RES=$(cat /tmp/module_result 2>/dev/null)
+        # id is required — without it we can't look up the right per-module files.
+        _sid=$(echo "$QS" | $BB grep -o 'id=[^&]*' | $BB sed 's/id=//' | $BB tr -cd 'a-z0-9_-')
+        if [ -z "$_sid" ]; then
+            ok_json '{"ok":true,"status":"idle","result":null}'; exit 0
+        fi
+        _STATUSF="/tmp/module_status_${_sid}"
+        _RESULTF="/tmp/module_result_${_sid}"
+        ST=$(cat "$_STATUSF" 2>/dev/null); [ -z "$ST" ] && ST="idle"
+        RES=$(cat "$_RESULTF" 2>/dev/null)
         case "$RES" in {*}) : ;; *) RES="null" ;; esac
         ok_json "{\"ok\":true,\"status\":\"$ST\",\"result\":$RES}"
         ;;
@@ -90,6 +101,17 @@ case "$ACT" in
         [ -n "$ID" ] || err_json "unknown_module"
         OUT=$("$MC" uninstall "$ID" 2>/dev/null)
         [ -n "$OUT" ] && ok_json "$OUT" || err_json "uninstall_failed"
+        ;;
+    get_auto)
+        _v=$("$MC" get_auto 2>/dev/null); [ -z "$_v" ] && _v="1"
+        ok_json "{\"auto\":\"$_v\"}"
+        ;;
+    set_auto)
+        read -n "$CONTENT_LENGTH" BODY
+        _v=$(printf '%s' "$BODY" | $BB tr '&' '\n' | $BB grep '^auto=' | $BB sed 's/^auto=//' | $BB tr -cd '01' | $BB cut -c1)
+        [ -z "$_v" ] && _v=0
+        RES=$("$MC" set_auto "$_v" 2>/dev/null)
+        ok_json "{\"auto\":\"${RES:-$_v}\"}"
         ;;
     *)
         err_json "unknown_action"
