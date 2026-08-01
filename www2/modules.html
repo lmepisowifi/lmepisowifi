@@ -80,6 +80,11 @@ function hideOverlay(){ document.getElementById('overlay').style.display='none';
 function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 var _modules = [];
+// Modules with an install/uninstall actively being watched by THIS tab right
+// now (keyed by id). Drives the disabled "Working…" button in render() and
+// stops a same-tab double-click from firing a second request before the
+// first one's response even comes back.
+var _inFlight = {};
 
 // ── Module list ───────────────────────────────────────────────────────────
 function loadModules(){
@@ -91,6 +96,7 @@ function loadModules(){
             if (!d.ok || !d.modules){ list.innerHTML = '<div class="field-hint">Failed to load modules.</div>'; return; }
             _modules = d.modules;
             render();
+            _modules.forEach(function(m){ resumeIfRunning(m.id); });
         })
         .catch(function(){ list.innerHTML = '<div class="field-hint">Network error loading modules.</div>'; });
 }
@@ -100,16 +106,22 @@ function render(){
     list.innerHTML = '';
     _modules.forEach(function(m){
         var installed = !!m.installed;
+        var busy = !!_inFlight[m.id];
         var verLine = installed
             ? ('Installed' + (m.version ? ' &middot; v' + escHtml(m.version) : '')
                + (m.available && m.available !== m.version ? ' &middot; update available: v' + escHtml(m.available) : ''))
             : ('Not installed' + (m.available ? ' &middot; available: v' + escHtml(m.available) : ''));
-        var actions = installed
-            ? '<button class="btn btn-sm btn-outline-danger" onclick="doUninstall(\'' + escHtml(m.id) + '\')">Uninstall</button>'
-              + (m.available && m.available !== m.version
-                  ? '<button class="btn btn-sm btn-outline-primary" onclick="doInstall(\'' + escHtml(m.id) + '\',true)">Update to v' + escHtml(m.available) + '</button>'
-                  : '')
-            : '<button class="btn btn-sm btn-outline-primary" onclick="doInstall(\'' + escHtml(m.id) + '\',false)">Install from GitHub</button>';
+        var actions;
+        if (busy) {
+            actions = '<button class="btn btn-sm btn-outline-secondary" disabled>Working&hellip;</button>';
+        } else {
+            actions = installed
+                ? '<button class="btn btn-sm btn-outline-danger" onclick="doUninstall(\'' + escHtml(m.id) + '\')">Uninstall</button>'
+                  + (m.available && m.available !== m.version
+                      ? '<button class="btn btn-sm btn-outline-primary" onclick="doInstall(\'' + escHtml(m.id) + '\',true)">Update to v' + escHtml(m.available) + '</button>'
+                      : '')
+                : '<button class="btn btn-sm btn-outline-primary" onclick="doInstall(\'' + escHtml(m.id) + '\',false)">Install from GitHub</button>';
+        }
 
         var card = document.createElement('div');
         card.className = 'mod-card';
@@ -132,71 +144,125 @@ var _phaseLabels = {
     'queued':            'Queued…',
     'fetching_registry': 'Fetching registry…',
     'downloading':       'Downloading from GitHub…',
+    'download_retry_1':  'Connection dropped — retrying download…',
+    'download_retry_2':  'Connection dropped — retrying download (last attempt)…',
     'verifying':         'Verifying checksum…',
     'extracting':        'Extracting…',
     'applying':          'Applying…'
 };
+// Friendly text for the final result codes module_ctl.sh can return. Falls
+// back to showing the raw code for anything not listed here, rather than a
+// blanket "unknown_error" — a specific-but-unmapped code is still more
+// useful to the person reading it than a generic one.
+var _errorMessages = {
+    'unknown_module':        'Unknown module.',
+    'install_in_progress':   'An install for this module is already running — please wait for it to finish.',
+    'registry_fetch_failed': 'Could not reach GitHub to check the module registry — check the connection and try again.',
+    'registry_incomplete':   'The module registry entry looks incomplete — try again shortly.',
+    'url_outside_repo':      'Refused a download URL that did not point at the expected repository.',
+    'download_failed':       'The download failed after several attempts — check the connection and try again.',
+    'checksum_mismatch':     'The downloaded file failed verification — try again.',
+    'extract_failed':        'Could not unpack the downloaded module — try again.',
+    'bad_module_payload':    'The downloaded module was missing expected files — try again.',
+    'install_interrupted':   'The device lost track of this install (possibly a reboot or power loss) — please try again.'
+};
+function errorMessage(code){ return _errorMessages[code] || ('Failed (' + (code || 'unknown_error') + ').'); }
 
 function doInstall(id, isUpdate){
+    if (_inFlight[id]){ toastr.info('An operation for "' + id + '" is already in progress.'); return; }
     var verb = isUpdate ? 'Update' : 'Install';
     if (!confirm(verb + ' the "' + id + '" module from GitHub? The download is checksum-verified before it is applied.')) return;
+    _inFlight[id] = true; render();
     showOverlay(verb + 'ing ' + id + ' — Queued…');
     fetch('/cgi-bin/modules.cgi?action=install', {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'id=' + encodeURIComponent(id)
     })
     .then(function(r){ return r.json(); })
     .then(function(d){
-        if (!d.ok){ hideOverlay(); toastr.error('Install failed: ' + (d.error||'unknown_error')); return; }
-        // Poll with the module id so concurrent installs use separate status files
-        // and don't see each other's result (which caused "unknown_error").
+        if (!d.ok){ hideOverlay(); _inFlight[id] = false; render(); toastr.error('Install failed: ' + errorMessage(d.error)); return; }
+        // d.started or d.already_running — either way, watch the real
+        // status. already_running means this click didn't kick off its own
+        // job (an install for this id was already running — another tab,
+        // this tab's own earlier click, or the auto-update cron), so this
+        // just resumes watching that one instead of erroring out.
         pollInstall(id, verb, 0);
     })
-    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+    .catch(function(){ hideOverlay(); _inFlight[id] = false; render(); toastr.error('Network error'); });
 }
 
 function pollInstall(id, verb, tries){
-    // 90 × 2 s = 3 min ceiling — enough for a large module on a slow link
-    if (tries > 90){ hideOverlay(); toastr.error('Install is taking too long — check the Modules page again shortly.'); return; }
+    // 500 x 2s ≈ 16.7 min ceiling — covers module_ctl.sh's own worst-case
+    // download-retry budget (3 attempts x up to 5 min each, plus backoff)
+    // for a large module on a genuinely bad connection, with headroom.
+    if (tries > 500){
+        hideOverlay(); _inFlight[id] = false; render();
+        toastr.error('Install is taking too long — check the Modules page again shortly.');
+        return;
+    }
     fetch('/cgi-bin/modules.cgi?action=install_status&id=' + encodeURIComponent(id), { cache:'no-store' })
         .then(function(r){ return r.json(); })
         .then(function(d){
             if (d.status !== 'done'){
                 // Update the overlay text as the install progresses through phases
                 var label = _phaseLabels[d.status] || 'Working…';
+                _inFlight[id] = true;
                 showOverlay(verb + 'ing ' + id + ' — ' + label);
                 setTimeout(function(){ pollInstall(id, verb, tries+1); }, 2000);
                 return;
             }
-            hideOverlay();
+            hideOverlay(); _inFlight[id] = false;
             var res = d.result || {};
             if (res.ok){
                 toastr.success((verb === 'Update' ? 'Updated' : 'Installed') + (res.version ? ' v' + res.version : ''));
                 loadModules();
             } else {
-                toastr.error(verb + ' failed: ' + ((res && res.error) || 'unknown_error'));
+                toastr.error(verb + ' failed: ' + errorMessage(res.error));
                 loadModules();
             }
         })
         .catch(function(){ setTimeout(function(){ pollInstall(id, verb, tries+1); }, 2000); });
 }
 
+// A module can be mid-install without THIS tab knowing — a previous page
+// load, another tab, or the 6-hour auto-update cron may have started it.
+// Called for every module after each loadModules(), so a fresh page load
+// (or hitting Refresh) shows "Working…" and resumes real progress instead
+// of a plain clickable button that invites a second, redundant install.
+function resumeIfRunning(id){
+    if (_inFlight[id]) return; // this tab is already actively polling it
+    fetch('/cgi-bin/modules.cgi?action=install_status&id=' + encodeURIComponent(id), { cache:'no-store' })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+            if (_inFlight[id]) return; // a click may have started its own poll while this was in flight
+            if (d.status && d.status !== 'idle' && d.status !== 'done'){
+                _inFlight[id] = true; render();
+                showOverlay('Working on ' + id + ' — ' + (_phaseLabels[d.status] || 'Working…'));
+                pollInstall(id, 'Install', 0);
+            }
+        })
+        .catch(function(){});
+}
+
 // ── Uninstall ─────────────────────────────────────────────────────────────
 function doUninstall(id){
+    if (_inFlight[id]){ toastr.info('An operation for "' + id + '" is already in progress.'); return; }
     var msg = (id === 'hotspot')
         ? 'Uninstall the Hotspot module? The captive portal, coin acceptor and admin pages will stop and be removed. Your hotspot_data (users, vouchers, income) and settings are KEPT, so reinstalling restores everything.'
         : 'Uninstall the "' + id + '" module?';
     if (!confirm(msg)) return;
+    _inFlight[id] = true; render();
     showOverlay('Uninstalling ' + id + '…');
     fetch('/cgi-bin/modules.cgi?action=uninstall', {
         method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'id=' + encodeURIComponent(id)
     })
     .then(function(r){ return r.json(); })
     .then(function(d){
-        hideOverlay();
-        if (d.ok){ toastr.success('Uninstalled ' + id + ' (data kept)'); loadModules(); }
-        else { toastr.error('Uninstall failed: ' + (d.error||'unknown_error')); }
+        hideOverlay(); _inFlight[id] = false;
+        if (d.ok){ toastr.success('Uninstalled ' + id + ' (data kept)'); }
+        else { toastr.error('Uninstall failed: ' + errorMessage(d.error)); }
+        loadModules();
     })
-    .catch(function(){ hideOverlay(); toastr.error('Network error'); });
+    .catch(function(){ hideOverlay(); _inFlight[id] = false; render(); toastr.error('Network error'); });
 }
 
 // ── Auto-update toggle ────────────────────────────────────────────────────

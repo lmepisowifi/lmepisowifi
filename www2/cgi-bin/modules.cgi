@@ -76,6 +76,22 @@ case "$ACT" in
         # granular phase labels (downloading, verifying, …) that the UI polls.
         _STATUSF="/tmp/module_status_${ID}"
         _RESULTF="/tmp/module_result_${ID}"
+        # If a job for this exact module is already running, don't fork a
+        # second one on top of it — that race is what used to let an extra
+        # click (or a second tab open to this page) send two installs after
+        # the same $DL/stage and $ROOT, which could leave the result file
+        # empty if both tried to write it at once (the "unknown_error" this
+        # used to surface). module_ctl.sh's own install lock is the real
+        # guarantee against that; this is just a fast, cheap early-out so a
+        # duplicate click doesn't even pay for a second wget/tar. A status
+        # file untouched for 20+ minutes is treated as abandoned (e.g. the
+        # box lost power mid-install) rather than still running, so a stuck
+        # status can never permanently block a fresh attempt.
+        _cur=$(cat "$_STATUSF" 2>/dev/null)
+        case "$_cur" in
+            ""|idle|done) : ;;
+            *) [ -z "$($BB find "$_STATUSF" -mmin +20 2>/dev/null)" ] && ok_json '{"ok":true,"started":false,"already_running":true}' ;;
+        esac
         printf 'queued' > "$_STATUSF"
         rm -f "$_RESULTF" 2>/dev/null
         ( MOD_STATUS_FILE="$_STATUSF" "$MC" install "$ID" > "$_RESULTF" 2>/dev/null
@@ -93,6 +109,23 @@ case "$ACT" in
         ST=$(cat "$_STATUSF" 2>/dev/null); [ -z "$ST" ] && ST="idle"
         RES=$(cat "$_RESULTF" 2>/dev/null)
         case "$RES" in {*}) : ;; *) RES="null" ;; esac
+        # If the status still shows an in-progress phase but module_ctl.sh's
+        # own install lock for this id is gone, or its owning pid is no
+        # longer alive, the background job died without writing a result —
+        # most likely the device lost power or the process was killed.
+        # Report that plainly now instead of leaving the UI to poll a phase
+        # that will otherwise never change until its own multi-minute ceiling
+        # gives up.
+        case "$ST" in
+            idle|done) : ;;
+            *)
+                _LOCKD="/lmepisowifi/modules/${_sid}.installing"
+                _lp=$($BB cat "$_LOCKD/pid" 2>/dev/null | $BB tr -d ' \t\r\n')
+                if [ ! -d "$_LOCKD" ] || { [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; }; then
+                    ST="done"; RES='{"ok":false,"error":"install_interrupted"}'
+                fi
+                ;;
+        esac
         ok_json "{\"ok\":true,\"status\":\"$ST\",\"result\":$RES}"
         ;;
     uninstall)

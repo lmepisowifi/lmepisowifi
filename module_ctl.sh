@@ -114,12 +114,38 @@ fetch() {
 # fetch_large — for module tarballs on slow connections. Uses a 5-minute
 # read timeout (-T 300) so a large download that would exceed the 30-second
 # chunk window in fetch() doesn't produce a partial file that then fails the
-# sha256 check with a misleading "checksum_mismatch" error.
+# sha256 check with a misleading "checksum_mismatch" error. -c resumes from
+# an existing partial file at $2 (a no-op if $2 doesn't exist yet), which is
+# what lets fetch_large_retry() below continue a stalled download instead of
+# restarting it from byte 0.
 fetch_large() {
     _u=$(cdnify "$1")
-    _wf="--https-only -t 2 -T 300 --retry-connrefused -U lmepisowifi-modctl"
+    _wf="--https-only -c -t 2 -T 300 --retry-connrefused -U lmepisowifi-modctl"
     if [ -f "$OTA_CACERT" ]; then _wf="$_wf --ca-certificate=$OTA_CACERT"; else _wf="$_wf --no-check-certificate"; fi
     wget $_wf -q -O "$2" "$_u"
+}
+# fetch_large already retries transient hiccups WITHIN one connection attempt
+# (-t 2 above). This retries across whole DROPPED connections — a link that
+# stalls or resets for longer than that isn't rare on a weak wifi link to the
+# ONT or a mobile hotspot, and previously a single such drop anywhere in the
+# transfer meant giving up outright ("download_failed"), which is where most
+# reports of a failed install on a bad connection came from. Three attempts
+# with a short backoff, resuming via fetch_large's -c instead of paying for
+# the download again from the start each time, gives a flaky link a real
+# chance. This runs inside the background job modules.cgi already forks for
+# install, so nothing client-side is left waiting on it.
+fetch_large_retry() { # fetch_large_retry <url> <out>
+    _flu="$1"; _flo="$2"; _fln=1; _flmax=3
+    while [ "$_fln" -le "$_flmax" ]; do
+        if [ "$_fln" -eq 1 ]; then set_mod_status "downloading"; else set_mod_status "download_retry_$((_fln - 1))"; fi
+        fetch_large "$_flu" "$_flo" && return 0
+        [ "$_fln" -eq "$_flmax" ] && break
+        log "fetch_large_retry: attempt $_fln failed (connection dropped or stalled) — retrying"
+        sleep $((_fln * 5))
+        _fln=$((_fln + 1))
+    done
+    rm -f "$_flo" 2>/dev/null
+    return 1
 }
 # set_mod_status — write a granular phase label to the per-module status file
 # that modules.cgi set via the MOD_STATUS_FILE environment variable. No-op
@@ -141,6 +167,41 @@ state_of()   { [ -f "$MODDIR/$1.state" ] && $BB tr -d ' \t\r\n' < "$MODDIR/$1.st
 version_of() { [ -f "$MODDIR/$1.version" ] && $BB tr -d ' \t\r\n' < "$MODDIR/$1.version" || echo ""; }
 set_state()  { printf '%s\n' "$2" > "$MODDIR/$1.state"; sync; }
 set_version(){ printf '%s\n' "$2" > "$MODDIR/$1.version"; sync; }
+
+# ── Install lock ─────────────────────────────────────────────────────────────
+# Stops two installs of the SAME module from running at once — an impatient
+# extra click on Install, two browser tabs open to the Modules page, or the
+# 6-hour auto_update cron firing while someone is also installing that module
+# by hand all used to race on the same $DL/stage and $ROOT, occasionally
+# leaving the per-module result file empty when both tried to write it at the
+# same moment (surfaced to the user as a bare "unknown_error"). mkdir is
+# atomic on the underlying filesystem, so "did I just create this directory"
+# is a safe test-and-set without needing a separate lockfile utility (flock
+# isn't guaranteed to exist in a minimal BusyBox build). The pid inside lets a
+# later caller tell a genuinely-still-running install apart from a stale lock
+# left behind by one that was killed (SIGKILL, reboot, OOM) before it got a
+# chance to clean up after itself — see install_lock_live().
+lock_dir_for() { echo "$MODDIR/$1.installing"; }
+install_lock_live() { # install_lock_live <id> — exit 0 iff a live process holds the lock
+    _lld=$(lock_dir_for "$1")
+    [ -d "$_lld" ] || return 1
+    _llp=$($BB tr -d ' \t\r\n' < "$_lld/pid" 2>/dev/null)
+    [ -n "$_llp" ] && kill -0 "$_llp" 2>/dev/null
+}
+acquire_install_lock() { # acquire_install_lock <id> — return 0 if acquired, 1 if held by a live process
+    _lid="$1"; _ld=$(lock_dir_for "$_lid")
+    if mkdir "$_ld" 2>/dev/null; then
+        echo "$$" > "$_ld/pid" 2>/dev/null
+        return 0
+    fi
+    install_lock_live "$_lid" && return 1
+    # Lock dir exists but its owner is gone — stale, left by an install that
+    # never got to clean up after itself. Reclaim it.
+    rm -rf "$_ld" 2>/dev/null
+    mkdir "$_ld" 2>/dev/null && { echo "$$" > "$_ld/pid" 2>/dev/null; return 0; }
+    return 1
+}
+release_install_lock() { rm -rf "$(lock_dir_for "$1")" 2>/dev/null; }
 
 set_global() {
     [ -f "$GLOBALS" ] || : > "$GLOBALS"
@@ -243,35 +304,49 @@ do_reconcile() {
 do_install() {
     _id="$1"; _reqver="$2"
     case " $MODULES " in *" $_id "*) : ;; *) echo '{"ok":false,"error":"unknown_module"}'; return 1 ;; esac
+
+    if ! acquire_install_lock "$_id"; then
+        log "install: $_id already has an install in progress — refusing to start a second one"
+        echo '{"ok":false,"error":"install_in_progress"}'; return 1
+    fi
+
     mkdir -p "$DL"; : > "$LOG"
 
     set_mod_status "fetching_registry"
-    if ! fetch "$(modules_url)" "$DL/modules.txt"; then echo '{"ok":false,"error":"registry_fetch_failed"}'; return 1; fi
+    if ! fetch "$(modules_url)" "$DL/modules.txt"; then
+        release_install_lock "$_id"; echo '{"ok":false,"error":"registry_fetch_failed"}'; return 1
+    fi
     _ver=$(reg_field "$DL/modules.txt" "$_id" version)
     _url=$(reg_field "$DL/modules.txt" "$_id" url)
     _sum=$(reg_field "$DL/modules.txt" "$_id" sha256)
     [ -n "$_reqver" ] && log "install: requested $_reqver, registry has $_ver"
-    if [ -z "$_url" ] || [ -z "$_sum" ]; then echo '{"ok":false,"error":"registry_incomplete"}'; return 1; fi
+    if [ -z "$_url" ] || [ -z "$_sum" ]; then
+        release_install_lock "$_id"; echo '{"ok":false,"error":"registry_incomplete"}'; return 1
+    fi
     case "$_url" in
         "https://github.com/$OTA_REPO/releases/download/"*) : ;;
         "https://cdn.jsdelivr.net/gh/$OTA_REPO@"*) : ;;
-        *) echo '{"ok":false,"error":"url_outside_repo"}'; return 1 ;;
+        *) release_install_lock "$_id"; echo '{"ok":false,"error":"url_outside_repo"}'; return 1 ;;
     esac
 
-    # Use fetch_large (5-min timeout) so slow connections don't produce a partial
-    # tarball that fails the sha256 check with a spurious checksum_mismatch error.
-    set_mod_status "downloading"
-    if ! fetch_large "$_url" "$DL/mod.tar.gz"; then echo '{"ok":false,"error":"download_failed"}'; return 1; fi
+    # fetch_large_retry sets its own "downloading"/"download_retry_N" status
+    # as it goes — see its definition above for why a single stall no longer
+    # means giving up immediately.
+    if ! fetch_large_retry "$_url" "$DL/mod.tar.gz"; then
+        release_install_lock "$_id"; echo '{"ok":false,"error":"download_failed"}'; return 1
+    fi
     set_mod_status "verifying"
     _got=$(sha256sum "$DL/mod.tar.gz" 2>/dev/null | $BB awk '{print $1}')
     if [ -z "$_got" ] || [ "$_got" != "$_sum" ]; then
-        rm -f "$DL/mod.tar.gz"; echo '{"ok":false,"error":"checksum_mismatch"}'; return 1
+        rm -f "$DL/mod.tar.gz"
+        release_install_lock "$_id"; echo '{"ok":false,"error":"checksum_mismatch"}'; return 1
     fi
 
     set_mod_status "extracting"
     rm -rf "$DL/stage"; mkdir -p "$DL/stage"
     if ! tar -xzf "$DL/mod.tar.gz" -C "$DL/stage" 2>>"$LOG"; then
-        rm -rf "$DL/stage"; echo '{"ok":false,"error":"extract_failed"}'; return 1
+        rm -rf "$DL/stage"
+        release_install_lock "$_id"; echo '{"ok":false,"error":"extract_failed"}'; return 1
     fi
     _sent=$(module_sentinel "$_id")
     _base="$DL/stage"
@@ -280,7 +355,8 @@ do_install() {
         [ -n "$_inner" ] && _base=$(printf '%s' "$_inner" | $BB sed "s#/$_sent\$##")
     fi
     if [ ! -e "$_base/$_sent" ]; then
-        rm -rf "$DL/stage"; echo '{"ok":false,"error":"bad_module_payload"}'; return 1
+        rm -rf "$DL/stage"
+        release_install_lock "$_id"; echo '{"ok":false,"error":"bad_module_payload"}'; return 1
     fi
 
     set_mod_status "applying"
@@ -294,6 +370,7 @@ do_install() {
     set_state "$_id" installed
     set_version "$_id" "${_ver:-unknown}"
     mod_postinstall "$_id"
+    release_install_lock "$_id"
     log "install: $_id $_ver installed"
     printf '{"ok":true,"version":"%s"}\n' "$(json_esc "$_ver")"
 }
@@ -301,6 +378,9 @@ do_install() {
 do_uninstall() {
     _id="$1"
     case " $MODULES " in *" $_id "*) : ;; *) echo '{"ok":false,"error":"unknown_module"}'; return 1 ;; esac
+    if install_lock_live "$_id"; then
+        echo '{"ok":false,"error":"install_in_progress"}'; return 1
+    fi
     mod_prestop "$_id"
     remove_files "$_id"
     mod_postremove "$_id"
