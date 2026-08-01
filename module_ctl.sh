@@ -18,12 +18,14 @@
 #   module_ctl.sh reconcile            # enforce saved state (boot + post-OTA)
 #
 # State (device-local, gitignored, never in any release payload, survives OTA):
-#   /lmepisowifi/modules/<id>.state    -> "installed" | "uninstalled"
-#   /lmepisowifi/modules/<id>.version  -> installed module version
-#   /lmepisowifi/modules/<id>.assets/  -> preserved portal images/audio (hotspot)
+#   /lmepisowifi/modules/<id>.state         -> "installed" | "uninstalled"
+#   /lmepisowifi/modules/<id>.version       -> installed module version
+#   /lmepisowifi/hotspot_data/<id>.assets/  -> preserved portal images/favicon/
+#                                              audio (hotspot), restored on reinstall
 #
-# Uninstall keeps operator data: hotspot keeps hotspot_data/ + globals.env
-# settings; tailscale keeps everything under /config/ (state + config).
+# Uninstall keeps operator data: hotspot keeps hotspot_data/ (now including the
+# preserved portal images/favicon/audio above) + globals.env settings; tailscale
+# keeps everything under /config/ (state + config).
 # ============================================================
 
 ROOT="/lmepisowifi"
@@ -227,7 +229,19 @@ hotspot_start() {
     [ -f "$ROOT/lmehspt.sh" ] && "$ROOT/lmehspt.sh" >/dev/null 2>&1 &
 }
 preserve_assets() {
-    _a="$MODDIR/$1.assets"
+    # Only a genuinely-installed instance can hold real, live customization
+    # worth capturing. If $1's saved state isn't "installed" right now,
+    # whatever's sitting in hotspot/img got there some other way — most
+    # often a base OTA re-laying the hotspot component while the module is
+    # uninstalled (see do_reconcile's cleanup branch below), which ships its
+    # own generic default images, not anything an operator uploaded. The
+    # same is true if this fires from do_install() on a fresh/reinstall
+    # (state not yet "installed" at that point) rather than an in-place
+    # upgrade of a live module. Snapshotting in either case would overwrite
+    # the last real snapshot with junk (or emptiness), so leave the existing
+    # snapshot untouched whenever there's no live install to take it from.
+    [ "$(state_of "$1")" = "installed" ] || return 0
+    _a="$ROOT/hotspot_data/$1.assets"
     rm -rf "$_a"; mkdir -p "$_a/img" "$_a/audio"
     if [ -d "$ROOT/hotspot/img" ]; then
         for f in "$ROOT"/hotspot/img/promo[1-5].* "$ROOT"/hotspot/img/portal_logo.* "$ROOT/hotspot/img/favicon.ico"; do
@@ -238,7 +252,15 @@ preserve_assets() {
     sync
 }
 restore_assets() {
-    _a="$MODDIR/$1.assets"; [ -d "$_a" ] || return 0
+    _a="$ROOT/hotspot_data/$1.assets"
+    # One-time migration: devices that uninstalled before this moved from
+    # modules/<id>.assets/ into hotspot_data/ still have their preserved
+    # files at the old path — bring them along instead of losing them.
+    if [ ! -d "$_a" ] && [ -d "$MODDIR/$1.assets" ]; then
+        mkdir -p "$ROOT/hotspot_data"
+        mv "$MODDIR/$1.assets" "$_a" 2>/dev/null
+    fi
+    [ -d "$_a" ] || return 0
     [ -d "$_a/img" ]   && { mkdir -p "$ROOT/hotspot/img";   cp -a "$_a/img/"* "$ROOT/hotspot/img/" 2>/dev/null; }
     [ -d "$_a/audio" ] && { mkdir -p "$ROOT/hotspot/audio"; cp -a "$_a/audio/"* "$ROOT/hotspot/audio/" 2>/dev/null; }
     sync
