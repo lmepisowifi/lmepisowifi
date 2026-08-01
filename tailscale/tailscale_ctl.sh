@@ -45,6 +45,18 @@ json_esc() {
     printf '%s' "$1" | $BB sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+ensure_exec() {
+    # Fresh copies/extracts of this folder (tar, scp, sdcard image, etc.)
+    # don't reliably preserve the executable bit, which otherwise shows
+    # up as a silent {"ok":false} on start with nothing written to /tmp.
+    # Self-heal it here so every subcommand below can assume both
+    # binaries are runnable. The -x check in launch_daemon_once() stays
+    # in place as a fallback for cases chmod can't fix (e.g. a noexec
+    # mount).
+    [ -x "$DAEMON" ] || chmod +x "$DAEMON" 2>/dev/null
+    [ -x "$CLI" ] || chmod +x "$CLI" 2>/dev/null
+}
+
 save_cfg() {
     mkdir -p "$CFG_DIR" 2>/dev/null
     {
@@ -602,6 +614,8 @@ do_preuninstall() {
     stop_daemon
     return 0
 }
+
+ensure_exec
 
 case "$1" in
     start)
