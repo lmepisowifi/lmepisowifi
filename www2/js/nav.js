@@ -191,7 +191,7 @@ setInterval(function () {
             .catch(function() { return null; })
     ]).then(function(results) {
         var sys = results[0]; var hsp = results[1]; var mod = results[2];
-        var isGpon       = (String(sys.pon_auto) === '1' || String(sys.pon_mode) === '1');
+        var isGpon = (String(sys.pon_mode) === '1');
         var hotspotRunning = (hsp.hotspot_running === true);
         // Safe defaults: keep an existing hotspot visible on a transient error;
         // tailscale is opt-in so it stays hidden unless the registry confirms it.

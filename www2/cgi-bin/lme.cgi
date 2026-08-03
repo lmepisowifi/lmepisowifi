@@ -792,7 +792,7 @@ END {
             wlan0|wlan1) ;;
             *) IFACE="wlan1" ;;
         esac
-        /lmepisowifi/www2/tool/querysitesurvey "$IFACE" > /dev/null 2>&1
+        iwpriv "$IFACE" at_ss /dev/null 2>&1
         # Poll until the kernel removes the "waitting" sentinel (scan complete)
         # or until 20s timeout, whichever comes first
         TRIES=0
