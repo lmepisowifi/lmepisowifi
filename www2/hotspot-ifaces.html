@@ -147,12 +147,9 @@
                 </div>
                 <div class="col-12 col-sm-4">
                     <label class="form-label">Portal Port</label>
-                    <input type="number" class="form-control" id="portal-port" placeholder="808" min="1" max="65535" oninput="checkPortalPort()">
-                    <div class="field-hint">HTTP port for the portal. The gateway IP and DHCP range are set on the <a href="/hotspot-dhcp.html">DHCP Settings</a> page.</div>
+                    <input type="number" class="form-control" id="portal-port" placeholder="80" min="1" max="65535">
+                    <div class="field-hint">HTTP port for the hotspot portal. The gateway IP and DHCP range are set on the <a href="/hotspot-dhcp.html">DHCP Settings</a> page.</div>
                 </div>
-            </div>
-            <div class="field-hint mt-2" id="port80-warning" style="display:none;color:var(--bs-danger,#dc3545);">
-                ⚠ Port 80 also stops the router's own admin page and clears firewall rules blocking it, so the portal can bind that port instead — it then runs continuously as a watchdog.
             </div>
         </div>
     </div>
@@ -201,10 +198,6 @@
 toastr.options = { positionClass:'toast-bottom-right', timeOut:3000, progressBar:true, closeButton:true };
 function showOverlay(m){ document.getElementById('overlay-text').textContent=m||''; document.getElementById('overlay').style.display='flex'; }
 function hideOverlay(){ document.getElementById('overlay').style.display='none'; }
-function checkPortalPort(){
-    var v = document.getElementById('portal-port').value.trim();
-    document.getElementById('port80-warning').style.display = (v === '80') ? 'block' : 'none';
-}
 
 var _data = {};
 var _selected = [];  // list of interface names currently selected in the UI
@@ -219,7 +212,6 @@ function loadIfaces(){
 
             document.getElementById('bridge-name').value  = d.hotspot_br   || '';
             document.getElementById('portal-port').value  = d.portal_port  || '';
-            checkPortalPort();
             document.getElementById('bridge-name-label').textContent = '(' + (d.hotspot_br||'br1') + ')';
 
             // Running warn

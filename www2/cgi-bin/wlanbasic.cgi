@@ -52,6 +52,8 @@ band_keys() {
             WLAN_IF="wlan0"
             RV_PFX="/tmp/wbasic5"
             SEC_PFX="/tmp/wsec5"
+            REPEATER_EN_KEY="REPEATER_ENABLED1"
+            REPEATER_SSID_KEY="REPEATER_SSID1"
             ;;
         *)
             TBL_PFX="WLAN1_MBSSIB_TBL"
@@ -63,6 +65,8 @@ band_keys() {
             WLAN_IF="wlan1"
             RV_PFX="/tmp/wbasic24"
             SEC_PFX="/tmp/wsec24"
+            REPEATER_EN_KEY="REPEATER_ENABLED2"
+            REPEATER_SSID_KEY="REPEATER_SSID2"
             ;;
     esac
 }
@@ -873,6 +877,17 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         [ -n "$FORM_SSID" ] && mib set "${TBL_PFX}.${IDX}.ssid"         "$FORM_SSID"
         mib set "${TBL_PFX}.${IDX}.wlanDisabled" "$FORM_DIS"
         mib commit
+
+        # ── Repeater MIB sync (VXD/idx=5 only): REPEATER_ENABLED1/SSID1 is
+        #    the 5GHz repeater, REPEATER_ENABLED2/SSID2 is 2.4GHz. Enabled is
+        #    the inverse of wlanDisabled; SSID mirrors only when changed.
+        if [ "$IDX" = "5" ]; then
+            REPEATER_EN=$((1 - FORM_DIS))
+            mib set "$REPEATER_EN_KEY" "$REPEATER_EN"
+            [ -n "$FORM_SSID" ] && mib set "$REPEATER_SSID_KEY" "$FORM_SSID"
+            mib commit
+            dbg "save_iface idx=5: set $REPEATER_EN_KEY=$REPEATER_EN ssid=${FORM_SSID:-(unchanged)} ($REPEATER_SSID_KEY)"
+        fi
 
         # ── Merged SSID: mirror SSID + enable state onto the paired
         #    interface on the other band.
