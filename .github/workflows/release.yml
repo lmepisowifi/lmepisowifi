@@ -147,9 +147,10 @@ jobs:
           
       - name: Purge jsDelivr cache
         run: |
+          REPO="${GITHUB_REPOSITORY}"
           echo "Purging CHANGELOG.md..."
-          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/CHANGELOG.md
+          curl -sL "https://purge.jsdelivr.net/gh/${REPO}@main/CHANGELOG.md"
           echo -e "\nPurging manifest.txt..."
-          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/manifest.txt
+          curl -sL "https://purge.jsdelivr.net/gh/${REPO}@main/manifest.txt"
           echo -e "\nPurging modules.txt..."
-          curl -sL https://purge.jsdelivr.net/gh/lmepisowifi/lmepisowifi@main/modules.txt
+          curl -sL "https://purge.jsdelivr.net/gh/${REPO}@main/modules.txt"

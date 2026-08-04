@@ -3,7 +3,7 @@
 # make_release.sh — cut an OTA release for lmepisowifi
 #
 # Run this on your PC inside a clone of:
-#   https://github.com/lmepisowifi/lmepisowifi
+#   https://github.com/lmepisowifi/tmwim2-2050-g40
 #
 # Repo layout expected:
 #   payload/            <- exactly the tree that maps onto /lmepisowifi on the
@@ -21,7 +21,7 @@
 # ============================================================
 set -e
 
-REPO="lmepisowifi/lmepisowifi"
+REPO="lmepisowifi/tmwim2-2050-g40"
 BRANCH="main"
 
 VER="$1"
