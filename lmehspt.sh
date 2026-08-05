@@ -95,11 +95,29 @@ NTP_EVENT="/lmepisowifi/hotspot/ntp_event.sh"
 # devices automatically gain it (with its default) in their preserved
 # globals.env and it shows up pre-filled in the admin UI. It never overwrites a
 # key the user already set, and is idempotent (safe to run on every boot).
+#
+# Exception — primary NodeMCU identity (NODEMCU_IP/NODEMCU_MAC/COIN_PSK): on a
+# box that already has a globals.env (i.e. this isn't its very first-ever
+# boot), these three being ABSENT means "no primary configured" just as much
+# as hotspot.cgi's nodemcu_del explicitly blanking them to "" does (see
+# NID=1 handling in hotspot.cgi) — it's simply a box that never had a primary
+# set up (e.g. a hotspot-only/Orange Pi build using only extra units) rather
+# than one that had it deleted. Auto-seeding defaults.env's placeholder IP/MAC/
+# PSK into globals.env in that case silently manufactures a primary the admin
+# never configured, and it comes back on every OTA even after being deleted
+# via the old (pre-blanking) delete behavior. So these three are only ever
+# seeded on a device's true first boot, when globals.env doesn't exist yet and
+# the defaults really do represent factory-shipped values.
 seed_globals() {
     _def="/lmepisowifi/defaults.env"
     _glob="/lmepisowifi/globals.env"
     [ -f "$_def" ] || return 0
-    [ -f "$_glob" ] || : > "$_glob"   # create empty file if it doesn't exist yet
+    if [ -f "$_glob" ]; then
+        _glob_is_new=0
+    else
+        _glob_is_new=1
+        : > "$_glob"   # create empty file if it doesn't exist yet
+    fi
     while IFS= read -r _line || [ -n "$_line" ]; do
         case "$_line" in
             ''|\#*) continue ;;               # skip blank lines and comments
@@ -108,6 +126,11 @@ seed_globals() {
         case "$_key" in
             ''|*[!A-Za-z0-9_]*) continue ;;   # skip lines that aren't KEY=value
         esac
+        if [ "$_glob_is_new" != "1" ]; then
+            case "$_key" in
+                NODEMCU_IP|NODEMCU_MAC|COIN_PSK) continue ;;
+            esac
+        fi
         # append only if globals.env has no assignment for this key yet
         grep -q "^${_key}=" "$_glob" 2>/dev/null || printf '%s\n' "$_line" >> "$_glob"
     done < "$_def"
@@ -468,24 +491,51 @@ EOF
 wait_for_wlan_ready() {
     local max_wait=90 waited=0
 
-    # Wait for BOTH radios to be added to br0 by the vendor init.
-    # This is the only cross-firmware-safe signal: the full iwpriv
-    # set_mib sequence (SSID, auth, crypto) for wlan0/wlan1 always
-    # completes before brctl addif br0 wlanX on all Realtek SDK builds,
-    # regardless of where in rc35 monitord happens to be launched.
+    # No interfaces configured — nothing to wait for.
+    [ -z "$HOTSPOT_INTERFACES" ] && return
+
+    # Wait for every interface in HOTSPOT_INTERFACES to be added to br0
+    # by the vendor init — not just wlan*. eth0.2.0 (and any other eth
+    # VLAN sub-if) joins br0 within ~12s of boot, well before wlan even
+    # starts its MIB setup, so including it here costs nothing (it's
+    # already satisfied on the very first check); it just means this
+    # loop stays correct if HOTSPOT_INTERFACES ever changes shape,
+    # instead of hardcoding a wlan-only assumption.
+    #
+    # The wlan side is still the real gate: the full iwpriv set_mib
+    # sequence (SSID, auth, crypto) for wlanX always completes before
+    # brctl addif br0 wlanX on all Realtek SDK builds, regardless of
+    # where in rc35 monitord happens to be launched.
     #
     # Do NOT use monitord: on (PGN6401V) it launches at
     # the START of rc35 (~10s), 13+ seconds before WLAN MIB is written.
     # Do NOT use wlan0-vap0 existence: that's just MAC setup in rc32.
     while [ "$waited" -lt "$max_wait" ]; do
-        [ -d "/sys/class/net/br0/brif/wlan0" ] && \
-        [ -d "/sys/class/net/br0/brif/wlan1" ] && break
+        local all_ready=1 uptime_now _if
+        uptime_now="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+
+        for _if in $HOTSPOT_INTERFACES; do
+            [ -d "/sys/class/net/br0/brif/$_if" ] && continue
+
+            # System has been up over 60s and this interface still isn't
+            # in br0 — this is no longer a mid-boot timing race (that
+            # window is well within 60s on both firmwares), so assume
+            # it's already ready rather than waiting out the rest of
+            # max_wait.
+            if [ -n "$uptime_now" ] && [ "$uptime_now" -gt 60 ]; then
+                continue
+            fi
+
+            all_ready=0
+        done
+
+        [ "$all_ready" -eq 1 ] && break
         sleep 1
         waited=$((waited + 1))
     done
 
     # Settle: VAP MIBs and ebtables portmapping rules finish shortly
-    # after both radios join br0 (~1-2s on both firmwares).
+    # after the radios join br0 (~1-2s on both firmwares).
     sleep 2
 
     ip route add default via "$(resolve_br0_gateway)" dev br0 2>/dev/null

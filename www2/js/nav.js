@@ -49,6 +49,7 @@ setInterval(function () {
         ]},
         { label: 'LAN',     href: '/lan.html' },
         { label: 'IP ACL',  href: '/ipacl.html' },
+        { label: 'Domain Blocking', href: '/domainblk.html' },
         { label: 'Hotspot', module: 'hotspot', children: [
             { label: 'Overview',        href: '/hotspot.html',           hotspot: 'always'  },
             { label: 'Interfaces',      href: '/hotspot-ifaces.html',    hotspot: 'always'  },
