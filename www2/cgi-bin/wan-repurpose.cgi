@@ -170,7 +170,7 @@ _apply_default_now() {
     _TGW=$(get_iface_gw "$_TGT")
     [ -z "$_TGW" ] && _TGW=$(busybox cat "/tmp/repurpose_gw_${_TGT}" 2>/dev/null | busybox tr -d '\r\n')
     if [ -n "$_TGW" ]; then
-        ip route del default 2>/dev/null
+        while ip route del default 2>/dev/null; do :; done
         ip route add default via "$_TGW" dev "$_TGT" 2>/dev/null
         printf '%s' "$_TGW" > "/tmp/repurpose_gw_${_TGT}"
         iptables -t nat -D POSTROUTING -o "$_TGT" -j MASQUERADE 2>/dev/null

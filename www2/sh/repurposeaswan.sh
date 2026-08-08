@@ -121,7 +121,15 @@ case "$1" in
         _use_defroute="${_use_defroute:-1}"
         if [ -n "$router" ]; then
             if [ "$_use_defroute" = "1" ]; then
-                ip route del default dev "$interface" 2>/dev/null
+                # Clear EVERY existing default route first — not just one
+                # already tied to $interface. This box can have a stale/dead
+                # default route left over from the device's own native WAN
+                # path (e.g. "default via ... dev br0 linkdown") that has
+                # nothing to do with repurposeaswan.sh; a dev-scoped delete
+                # leaves that stale route in place and the kernel then
+                # refuses (or ECMP-splits) the `ip route add` below, since a
+                # default route already exists at the same metric.
+                while ip route del default 2>/dev/null; do :; done
                 ip route add default via "$router" dev "$interface" 2>/dev/null
                 # Persist gateway so the watchdog can restore it if the route is stolen
                 printf '%s' "$router" > "/tmp/repurpose_gw_${interface}"
@@ -511,7 +519,7 @@ while true; do
             case "$_CUR" in
                 *"dev $TARGET_IFACE"*) ;; # already correct
                 *)
-                    ip route del default 2>/dev/null
+                    while ip route del default 2>/dev/null; do :; done
                     ip route add default via "$_GW" dev "$TARGET_IFACE" 2>/dev/null
                     printf '[%s] RESTORED default route via %s dev %s\n' \
                         "$(busybox date)" "$_GW" "$TARGET_IFACE" >> "$LOG"
